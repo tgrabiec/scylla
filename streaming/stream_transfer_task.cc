@@ -146,10 +146,11 @@ void stream_transfer_task::start() {
     sslog.debug("[Stream #{}] stream_transfer_task: cf_id={}", plan_id, cf_id);
     sort_and_merge_ranges();
     _shard_ranges = dht::split_ranges_to_shards(_ranges, *schema);
-    parallel_for_each(_shard_ranges, [this, dst_cpu_id, plan_id, cf_id, id] (auto& item) {
+    do_for_each(_shard_ranges, [this, dst_cpu_id, plan_id, cf_id, id] (auto& item) {
         auto& shard = item.first;
         auto& prs = item.second;
         return session->get_db().invoke_on(shard, [plan_id, cf_id, id, dst_cpu_id, prs = std::move(prs)] (database& db) mutable {
+            sslog.debug("[Stream #{}] new reader: ranges={}", plan_id, prs);
             auto si = make_lw_shared<send_info>(db, plan_id, cf_id, prs, id, dst_cpu_id);
             return send_mutations(std::move(si));
         });
