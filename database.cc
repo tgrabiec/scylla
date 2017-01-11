@@ -952,6 +952,8 @@ column_family::seal_active_streaming_memtable_immediate() {
 
             newtab->set_unshared();
 
+            dblog.debug("Flushing streaming memtable to {}", newtab->get_filename());
+
             auto&& priority = service::get_local_streaming_write_priority();
             // This is somewhat similar to the main memtable flush, but with important differences.
             //
@@ -970,6 +972,7 @@ column_family::seal_active_streaming_memtable_immediate() {
                 return newtab->open_data();
             }).then([this, old, newtab] () {
                 add_sstable(newtab);
+                dblog.debug("Done flushing to to {}", newtab->get_filename());
                 trigger_compaction();
             }).handle_exception([] (auto ep) {
                 dblog.error("failed to write streamed sstable: {}", ep);
@@ -1003,12 +1006,13 @@ future<> column_family::seal_active_streaming_memtable_big(streaming_memtable_bi
                                                                 _config.datadir, calculate_generation_for_new_table(),
                                                                 sstables::sstable::version_types::ka,
                                                                 sstables::sstable::format_types::big);
-
+                dblog.debug("Flushing streaming memtable (big) to {}", newtab->get_filename());
                 newtab->set_unshared();
 
                 auto&& priority = service::get_local_streaming_write_priority();
                 return newtab->write_components(*old, incremental_backups_enabled(), priority, true).then([this, newtab, old, &smb] {
                     smb.sstables.emplace_back(newtab);
+                    dblog.debug("Done flushing to to {}", newtab->get_filename());
                 }).handle_exception([] (auto ep) {
                     dblog.error("failed to write streamed sstable: {}", ep);
                     return make_exception_future<>(ep);
@@ -2619,6 +2623,7 @@ future<> dirty_memory_manager::shutdown() {
 
 future<> memtable_list::request_flush() {
     if (!may_flush()) {
+        dblog.debug("!may_flush()");
         return make_ready_future<>();
     } else if (!_flush_coalescing) {
         _flush_coalescing = shared_promise<>();
@@ -2781,6 +2786,9 @@ future<> database::apply(schema_ptr s, const frozen_mutation& m, timeout_clock::
 }
 
 future<> database::apply_streaming_mutation(schema_ptr s, utils::UUID plan_id, const frozen_mutation& m, bool fragmented) {
+    if (dblog.is_enabled(logging::log_level::trace)) {
+        dblog.trace("apply streaming {}", m.pretty_printer(s));
+    }
     if (!s->is_synced()) {
         throw std::runtime_error(sprint("attempted to mutate using not synced schema of %s.%s, version=%s",
                                  s->ks_name(), s->cf_name(), s->version()));
@@ -3298,6 +3306,7 @@ future<> column_family::flush_streaming_mutations(utils::UUID plan_id, std::vect
     // be to change seal_active_streaming_memtable_delayed to take a range parameter. However, we
     // need this code to go away as soon as we can (see FIXME above). So the double gate is a better
     // temporary counter measure.
+    dblog.debug("flush_streaming_mutations: plan={}, ranges={}", plan_id, ranges);
     return with_gate(_streaming_flush_gate, [this, plan_id, ranges = std::move(ranges)] {
         return flush_streaming_big_mutations(plan_id).then([this] {
             return _streaming_memtables->seal_active_memtable(memtable_list::flush_behavior::delayed);
@@ -3312,6 +3321,8 @@ future<> column_family::flush_streaming_mutations(utils::UUID plan_id, std::vect
                     return _cache.invalidate(range);
                 });
             });
+        }).finally([plan_id] {
+            dblog.debug("flush_streaming_mutations done: plan={}", plan_id);
         });
     });
 }

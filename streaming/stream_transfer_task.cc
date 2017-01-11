@@ -76,6 +76,7 @@ struct send_info {
     semaphore mutations_done{0};
     bool error_logged = false;
     mutation_reader reader;
+    schema_ptr cf_schema;
     send_info(database& db_, utils::UUID plan_id_, utils::UUID cf_id_,
               std::vector<query::partition_range> prs_, net::messaging_service::msg_addr id_,
               uint32_t dst_cpu_id_)
@@ -86,13 +87,15 @@ struct send_info {
         , id(id_)
         , dst_cpu_id(dst_cpu_id_) {
         auto& cf = db.find_column_family(this->cf_id);
-        reader = cf.make_streaming_reader(cf.schema(), this->prs);
+        cf_schema = cf.schema();
+        reader = cf.make_streaming_reader(cf_schema, this->prs);
     }
 };
 
-future<> do_send_mutations(auto si, auto fm, bool fragmented) {
+future<> do_send_mutations(lw_shared_ptr<send_info> si, frozen_mutation fm, bool fragmented) {
     return get_local_stream_manager().mutation_send_limiter().wait().then([si, fragmented, fm = std::move(fm)] () mutable {
         sslog.debug("[Stream #{}] SEND STREAM_MUTATION to {}, cf_id={}", si->plan_id, si->id, si->cf_id);
+        sslog.debug("[Stream #{}] fm={}", si->plan_id, fm.pretty_printer(si->cf_schema));
         auto fm_size = fm.representation().size();
         net::get_local_messaging_service().send_stream_mutation(si->id, si->plan_id, std::move(fm), si->dst_cpu_id, fragmented).then([si, fm_size] {
             sslog.debug("[Stream #{}] GOT STREAM_MUTATION Reply from {}", si->plan_id, si->id.addr);
@@ -112,7 +115,7 @@ future<> do_send_mutations(auto si, auto fm, bool fragmented) {
     });
 }
 
-future<> send_mutations(auto si) {
+future<> send_mutations(lw_shared_ptr<send_info> si) {
     return repeat([si] () {
         return si->reader().then([si] (auto smopt) {
             if (smopt && si->db.column_family_exists(si->cf_id)) {
