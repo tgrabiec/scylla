@@ -2472,13 +2472,16 @@ future<lw_shared_ptr<query::result>>
 database::query(schema_ptr s, const query::read_command& cmd, query::result_request request, const std::vector<query::partition_range>& ranges, tracing::trace_state_ptr trace_state,
                 uint64_t max_result_size) {
     column_family& cf = find_column_family(cmd.cf_id);
-    return cf.query(std::move(s), cmd, request, ranges, std::move(trace_state), get_result_memory_limiter(), max_result_size).then_wrapped([this, s = _stats] (auto f) {
+    dblog.trace("query: cmd={}, ranges={}", cmd, ranges);
+    return cf.query(s, cmd, request, ranges, std::move(trace_state), get_result_memory_limiter(), max_result_size).then_wrapped([this, &cmd, stats = _stats, s] (auto f) {
         if (f.failed()) {
-            ++s->total_reads_failed;
+            dblog.trace("query failed");
+            ++stats->total_reads_failed;
         } else {
-            ++s->total_reads;
+            ++stats->total_reads;
             auto result = f.get0();
-            s->short_data_queries += bool(result->is_short_read());
+            dblog.trace("query result: {}", result->pretty_printer(s, cmd.slice));
+            stats->short_data_queries += bool(result->is_short_read());
             return make_ready_future<lw_shared_ptr<query::result>>(std::move(result));
         }
         return f;
@@ -2489,14 +2492,17 @@ future<reconcilable_result>
 database::query_mutations(schema_ptr s, const query::read_command& cmd, const query::partition_range& range,
                           query::result_memory_accounter&& accounter, tracing::trace_state_ptr trace_state) {
     column_family& cf = find_column_family(cmd.cf_id);
-    return mutation_query(std::move(s), cf.as_mutation_source(std::move(trace_state)), range, cmd.slice, cmd.row_limit, cmd.partition_limit,
-            cmd.timestamp, std::move(accounter)).then_wrapped([this, s = _stats] (auto f) {
+    dblog.trace("query mutations: cmd={}, range={}", cmd, range);
+    return mutation_query(s, cf.as_mutation_source(std::move(trace_state)), range, cmd.slice, cmd.row_limit, cmd.partition_limit,
+            cmd.timestamp, std::move(accounter)).then_wrapped([this, stats = _stats, s] (auto f) {
         if (f.failed()) {
-            ++s->total_reads_failed;
+            dblog.trace("query failed");
+            ++stats->total_reads_failed;
         } else {
-            ++s->total_reads;
+            ++stats->total_reads;
             auto result = f.get0();
-            s->short_mutation_queries += bool(result.is_short_read());
+            stats->short_mutation_queries += bool(result.is_short_read());
+            dblog.trace("query result: {}", result.pretty_printer(s));
             return make_ready_future<reconcilable_result>(std::move(result));
         }
         return f;
