@@ -40,6 +40,7 @@
 namespace bi = boost::intrusive;
 
 class row_cache;
+class read_context;
 
 // Intrusive set entry which holds partition data.
 //
@@ -102,7 +103,7 @@ public:
     partition_entry& partition() { return _pe; }
     const schema_ptr& schema() const { return _schema; }
     schema_ptr& schema() { return _schema; }
-    streamed_mutation read(row_cache&, const schema_ptr&, const query::partition_slice&, streamed_mutation::forwarding);
+    streamed_mutation read(row_cache&, read_context);
     bool continuous() const { return _flags._continuous; }
     void set_continuous(bool value) { _flags._continuous = value; }
 
@@ -253,12 +254,8 @@ private:
     logalloc::allocating_section _update_section;
     logalloc::allocating_section _populate_section;
     logalloc::allocating_section _read_section;
-    mutation_reader make_scanning_reader(schema_ptr,
-                                         const dht::partition_range&,
-                                         const io_priority_class& pc,
-                                         const query::partition_slice& slice,
-                                         tracing::trace_state_ptr trace_state,
-                                         streamed_mutation::forwarding);
+    mutation_reader make_scanning_reader(const dht::partition_range&,
+                                         read_context);
     void on_hit();
     void on_miss();
     void upgrade_entry(cache_entry&);
@@ -293,6 +290,8 @@ private:
     partitions_type::iterator partitions_end() {
         return std::prev(_partitions.end());
     }
+    mutation_reader
+    create_underlying_reader(schema_ptr, read_context&, const dht::partition_range&, streamed_mutation::forwarding);
 public:
     ~row_cache();
     row_cache(schema_ptr, mutation_source underlying, cache_tracker&);
