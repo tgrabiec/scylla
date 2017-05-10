@@ -180,15 +180,23 @@ public:
 class partition_entry;
 
 class partition_snapshot : public enable_lw_shared_from_this<partition_snapshot> {
+public:
+    // This is a hack. A proper solution would require snapshot to be a template of additional_data_type.
+    using additional_data_type = uint64_t;
+    static constexpr additional_data_type default_additional_data_value = 0;
+private:
     schema_ptr _schema;
     // Either _version or _entry is non-null.
     partition_version_ref _version;
     partition_entry* _entry;
+    additional_data_type _data;
 
     friend class partition_entry;
 public:
-    explicit partition_snapshot(schema_ptr s, partition_entry* entry)
-        : _schema(std::move(s)), _entry(entry) { }
+    explicit partition_snapshot(schema_ptr s,
+                                partition_entry* entry,
+                                additional_data_type data = default_additional_data_value)
+        : _schema(std::move(s)), _entry(entry), _data(data) { }
     partition_snapshot(const partition_snapshot&) = delete;
     partition_snapshot(partition_snapshot&&) = delete;
     partition_snapshot& operator=(const partition_snapshot&) = delete;
@@ -266,7 +274,9 @@ public:
     // needs to be called with reclaiming disabled
     void upgrade(schema_ptr from, schema_ptr to);
 
-    lw_shared_ptr<partition_snapshot> read(schema_ptr entry_schema);
+    // data is additional data that will be stored in the partition_snapshot returned from the method.
+    lw_shared_ptr<partition_snapshot>
+    read(schema_ptr entry_schema, partition_snapshot::additional_data_type data = partition_snapshot::default_additional_data_value);
 };
 
 inline partition_version_ref& partition_snapshot::version()

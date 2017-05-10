@@ -282,13 +282,19 @@ void partition_entry::upgrade(schema_ptr from, schema_ptr to)
     remove_or_mark_as_unique_owner(old_version);
 }
 
-lw_shared_ptr<partition_snapshot> partition_entry::read(schema_ptr entry_schema)
+lw_shared_ptr<partition_snapshot>
+partition_entry::read(schema_ptr entry_schema, partition_snapshot::additional_data_type data)
 {
     if (_snapshot) {
-        return _snapshot->shared_from_this();
-    } else {
-        auto snp = make_lw_shared<partition_snapshot>(entry_schema, this);
-        _snapshot = snp.get();
-        return snp;
+        if (_snapshot->_data == data) {
+            return _snapshot->shared_from_this();
+        } else {
+            auto new_version = current_allocator().construct<partition_version>(mutation_partition(entry_schema));
+            new_version->insert_before(*_version);
+            set_version(new_version);
+        }
     }
+    auto snp = make_lw_shared<partition_snapshot>(entry_schema, this, data);
+    _snapshot = snp.get();
+    return snp;
 }
