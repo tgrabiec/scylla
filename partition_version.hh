@@ -216,9 +216,14 @@ public:
     }
 
     unsigned version_count();
+
+    bool attached_to_entry() const {
+        return _entry != nullptr;
+    }
 };
 
 class partition_entry {
+    class rows_iterator;
     partition_snapshot* _snapshot = nullptr;
     partition_version_ref _version;
 
@@ -228,6 +233,10 @@ private:
     void set_version(partition_version*);
 
     void apply(const schema& s, partition_version* pv, const schema& pv_schema);
+
+    // Weak exception guarantees.
+    // If exception happens then both |this| and |version| may be modified. It is possible to retry with the same |pe|.
+    void apply_to_incomplete(const schema& s, partition_version* version);
 public:
     partition_entry() = default;
     explicit partition_entry(mutation_partition mp);
@@ -268,6 +277,12 @@ public:
     // such that if the operation is retried (possibly many times) and eventually
     // succeeds the result will be as if the first attempt didn't fail.
     void apply(const schema& s, partition_entry&& pe, const schema& pe_schema);
+
+    // Weak exception guarantees.
+    // If an exception is thrown this and pe will be left in some valid states
+    // such that if the operation is retried (possibly many times) and eventually
+    // succeeds the result will be as if the first attempt didn't fail.
+    void apply_to_incomplete(const schema& s, partition_entry&& pe, const schema& pe_schema);
 
     mutation_partition squashed(schema_ptr from, schema_ptr to);
 
