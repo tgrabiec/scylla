@@ -78,11 +78,17 @@ public:
     friend class cache_tracker;
 
     struct dummy_entry_tag{};
+    struct incomplete_tag{};
+
     cache_entry(dummy_entry_tag)
         : _key{dht::token(), partition_key::make_empty()}
     {
         _flags._dummy_entry = true;
     }
+
+    cache_entry(incomplete_tag, schema_ptr s, const dht::decorated_key& key)
+        : cache_entry(s, key, mutation_partition::make_incomplete(*s))
+    { }
 
     // It is assumed that p is fully continuous
     cache_entry(schema_ptr s, const dht::decorated_key& key, const mutation_partition& p)
