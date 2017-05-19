@@ -117,6 +117,8 @@ class partition_version : public anchorless_list_base_hook<partition_version> {
 
     friend class partition_version_ref;
 public:
+    explicit partition_version(schema_ptr s) noexcept
+        : _partition(std::move(s)) { }
     explicit partition_version(mutation_partition mp) noexcept
         : _partition(std::move(mp)) { }
     partition_version(partition_version&& pv) noexcept;
@@ -213,6 +215,7 @@ class partition_entry {
     partition_version_ref _version;
 
     friend class partition_snapshot;
+    friend class cache_entry;
 private:
     void set_version(partition_version*);
 

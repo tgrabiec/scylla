@@ -643,14 +643,37 @@ class rows_entry {
     intrusive_set_external_comparator_member_hook _link;
     clustering_key _key;
     deletable_row _row;
+    struct flags {
+        // This flag is used only in cache.
+        // If true then there's no uncached data (clustering row) between the clustering row represented by this rows_entry
+        // and the previous rows_entry in the mutation_partition this rows_entry belongs to.
+        bool _continuous : 1;
+        bool _dummy : 1;
+        bool _last : 1;
+        flags() : _continuous(true), _dummy(false), _last(false) { }
+    } _flags{};
     friend class mutation_partition;
 public:
-    explicit rows_entry(clustering_key&& key)
+    // Creates dummy rows_entry at position which is after all clustered rows
+    rows_entry(dummy_tag, is_continuous continuous)
+        : _key(bound_view::empty_prefix)
+    {
+        _flags._dummy = true;
+        _flags._last = true;
+        _flags._continuous = bool(continuous);
+    }
+    explicit rows_entry(clustering_key&& key, is_dummy dummy = is_dummy::no, is_continuous continuous = is_continuous::no)
         : _key(std::move(key))
-    { }
-    explicit rows_entry(const clustering_key& key)
+    {
+        _flags._dummy = bool(dummy);
+        _flags._continuous = bool(continuous);
+    }
+    explicit rows_entry(const clustering_key& key, is_dummy dummy = is_dummy::no, is_continuous continuous = is_continuous::no)
         : _key(key)
-    { }
+    {
+        _flags._dummy = bool(dummy);
+        _flags._continuous = bool(continuous);
+    }
     rows_entry(const clustering_key& key, deletable_row&& row)
         : _key(key), _row(std::move(row))
     { }
@@ -661,10 +684,13 @@ public:
     rows_entry(const rows_entry& e)
         : _key(e._key)
         , _row(e._row)
+        , _flags(e._flags)
     { }
+    // Valid only if !dummy()
     clustering_key& key() {
         return _key;
     }
+    // Valid only if !dummy()
     const clustering_key& key() const {
         return _key;
     }
@@ -675,6 +701,10 @@ public:
         return _row;
     }
     position_in_partition_view position() const;
+    is_continuous continuous() const { return is_continuous(_flags._continuous); }
+    void set_continuous(bool value) { _flags._continuous = value; }
+    void set_continuous(is_continuous value) { set_continuous(bool(value)); }
+    is_dummy dummy() const { return is_dummy(_flags._dummy); }
     void apply(row_tombstone t) {
         _row.apply(t);
     }
@@ -742,10 +772,16 @@ public:
         delegating_compare(Comparator&& c) : _c(std::move(c)) {}
         template <typename Comparable>
         bool operator()(const Comparable& v, const rows_entry& e) const {
+            if (e._flags._last) {
+                return true;
+            }
             return _c(v, e._key);
         }
         template <typename Comparable>
         bool operator()(const rows_entry& e, const Comparable& v) const {
+            if (e._flags._last) {
+                return false;
+            }
             return _c(e._key, v);
         }
     };
@@ -763,6 +799,45 @@ template<typename T>
 class serializer;
 }
 
+/**
+ * Represents arbitrary mutation of a single partition.
+ *
+ * The object is schema-dependent. Each instance is governed by some
+ * specific schema version. Accessors require a reference to a schema object
+ * of that version.
+ *
+ * Supports marking ranges of clustering keys as continuous or discontinuous.
+ * This can be used to represent lack of information about certain range of
+ * rows. Static row may also be marked as continuous or not.
+ *
+ * By default everything is continuous.
+ * Continuity information is ignored by instance equality.
+ * Continuity information is transient, not preserved by serialization.
+ *
+ * Row continuity is encoded with rows_entry::continuous() flag, which specifies if
+ * the range between that entry and the previous one (both ends exclusive) is continuous
+ * or not. The range after the last rows_entry is assumed to be continuous.
+ * It can be marked as discontinuous by inserting a so called dummy entry
+ * (rows_entry::dummy()) with appropriate key. Keys corresponding to regular
+ * rows_entries are assumed to be continuous. Keys corresponding to dummy entries
+ * are assumed to be discontinuous.
+ *
+ * Addition (apply) of two fully-continuous instances gives a fully-continuous instance.
+ * When adding two not fully-continuous instances, the information other than continuity
+ * is added the same way as for fully-continuous instances. Resulting continuity is
+ * currently unspecified though.
+ *
+ * NOTE: Addition of continuity could be well-defined as set intersection, with any
+ * key in the result being continuous if and only if it is continuous in both instances.
+ * That implies that a regular row which falls into discontinuous range of another instance
+ * would be dropped. The reason why it is not defined as such is that it is some effort
+ * to implement and this functionality is not used yet on mutation_partition level.
+ * The semantics mentioned here are implemented on partition_entry level, by
+ * partition_entry::apply_to_incomplete().
+ *
+ * Instances governed by the same schema version and fully continuous are commutative and
+ * associative with respect to addition (apply).
+ */
 class mutation_partition final {
 public:
     using rows_type = intrusive_set_external_comparator<rows_entry, &rows_entry::_link>;
@@ -771,6 +846,7 @@ public:
 private:
     tombstone _tombstone;
     row _static_row;
+    bool _static_row_cached = true;
     rows_type _rows;
     // Contains only strict prefixes so that we don't have to lookup full keys
     // in both _row_tombstones and _rows.
@@ -782,6 +858,12 @@ private:
     friend class converting_mutation_partition_applier;
 public:
     struct copy_comparators_only {};
+    struct incomplete_tag {};
+    // Constructs an empty instance which is fully discontinuous.
+    mutation_partition(incomplete_tag, const schema& s);
+    static mutation_partition make_incomplete(const schema& s) {
+        return mutation_partition(incomplete_tag(), s);
+    }
     mutation_partition(schema_ptr s)
         : _rows()
         , _row_tombstones(*s)
@@ -807,6 +889,12 @@ public:
     }
     friend std::ostream& operator<<(std::ostream& os, const mutation_partition& mp);
 public:
+    // Makes sure there is a dummy entry after all clustered rows. Doesn't affect continuity.
+    // Doesn't invalidate iterators.
+    void ensure_last_dummy(const schema&);
+    bool is_static_row_cached() const { return _static_row_cached; }
+    void set_static_row_cached(bool value) { _static_row_cached = value; }
+    bool is_fully_continuous() const;
     void apply(tombstone t) { _tombstone.apply(t); }
     void apply_delete(const schema& schema, const clustering_key_prefix& prefix, tombstone t);
     void apply_delete(const schema& schema, range_tombstone rt);
@@ -901,9 +989,9 @@ public:
     // Returns true if there is no live data or tombstones.
     bool empty() const;
 public:
-    deletable_row& clustered_row(const schema& s, const clustering_key& key);
-    deletable_row& clustered_row(const schema& s, clustering_key&& key);
-    deletable_row& clustered_row(const schema& s, const clustering_key_view& key);
+    deletable_row& clustered_row(const schema& s, const clustering_key& key, is_dummy dummy = is_dummy::no, is_continuous continuous = is_continuous::yes);
+    deletable_row& clustered_row(const schema& s, clustering_key&& key, is_dummy dummy = is_dummy::no, is_continuous continuous = is_continuous::yes);
+    deletable_row& clustered_row(const schema& s, clustering_key_view key, is_dummy dummy = is_dummy::no, is_continuous continuous = is_continuous::yes);
 public:
     tombstone partition_tombstone() const { return _tombstone; }
     row& static_row() { return _static_row; }
@@ -923,6 +1011,11 @@ public:
     rows_type::iterator lower_bound(const schema& schema, const query::clustering_range& r);
     rows_type::iterator upper_bound(const schema& schema, const query::clustering_range& r);
     boost::iterator_range<rows_type::iterator> range(const schema& schema, const query::clustering_range& r);
+    // Returns an iterator range of rows_entry, with only non-dummy entries.
+    auto non_dummy_rows() const {
+        return boost::make_iterator_range(_rows.begin(), _rows.end())
+            | boost::adaptors::filtered([] (const rows_entry& e) { return bool(!e.dummy()); });
+    }
     // Writes this partition using supplied query result writer.
     // The partition should be first compacted with compact_for_query(), otherwise
     // results may include data which is deleted/expired.

@@ -206,6 +206,9 @@ auto apply_reversibly_intrusive_set(const schema& s, mutation_partition::rows_ty
             // neutral entries will be given special meaning for the purpose of revert, so
             // get rid of empty rows from the input as if they were not there. This doesn't change
             // the value of src.
+            //
+            // Note that this may drop a dummy entry, which is ok since continuity after apply() is unspecified
+            // for not fully continuous entries.
             if (src_e.empty()) {
                 src_i = src.erase_and_dispose(src_i, current_deleter<rows_entry>());
                 continue;
@@ -317,6 +320,13 @@ mutation_partition::operator=(mutation_partition&& x) noexcept {
         new (this) mutation_partition(std::move(x));
     }
     return *this;
+}
+
+void mutation_partition::ensure_last_dummy(const schema& s) {
+    if (_rows.empty() || !_rows.rbegin()->position().is_after_all_clustered_rows(s)) {
+        _rows.insert_before(_rows.end(),
+            *current_allocator().construct<rows_entry>(dummy_tag{}, is_continuous::yes));
+    }
 }
 
 void
@@ -485,10 +495,10 @@ mutation_partition::find_row(const schema& s, const clustering_key& key) const {
 }
 
 deletable_row&
-mutation_partition::clustered_row(const schema& s, clustering_key&& key) {
+mutation_partition::clustered_row(const schema& s, clustering_key&& key, is_dummy dummy, is_continuous continuous) {
     auto i = _rows.find(key, rows_entry::compare(s));
     if (i == _rows.end()) {
-        auto e = current_allocator().construct<rows_entry>(std::move(key));
+        auto e = current_allocator().construct<rows_entry>(std::move(key), dummy, continuous);
         _rows.insert(i, *e, rows_entry::compare(s));
         return e->row();
     }
@@ -496,10 +506,10 @@ mutation_partition::clustered_row(const schema& s, clustering_key&& key) {
 }
 
 deletable_row&
-mutation_partition::clustered_row(const schema& s, const clustering_key& key) {
+mutation_partition::clustered_row(const schema& s, const clustering_key& key, is_dummy dummy, is_continuous continuous) {
     auto i = _rows.find(key, rows_entry::compare(s));
     if (i == _rows.end()) {
-        auto e = current_allocator().construct<rows_entry>(key);
+        auto e = current_allocator().construct<rows_entry>(key, dummy, continuous);
         _rows.insert(i, *e, rows_entry::compare(s));
         return e->row();
     }
@@ -507,10 +517,10 @@ mutation_partition::clustered_row(const schema& s, const clustering_key& key) {
 }
 
 deletable_row&
-mutation_partition::clustered_row(const schema& s, const clustering_key_view& key) {
+mutation_partition::clustered_row(const schema& s, clustering_key_view key, is_dummy dummy, is_continuous continuous) {
     auto i = _rows.find(key, rows_entry::compare(s));
     if (i == _rows.end()) {
-        auto e = current_allocator().construct<rows_entry>(key);
+        auto e = current_allocator().construct<rows_entry>(key, dummy, continuous);
         _rows.insert(i, *e, rows_entry::compare(s));
         return e->row();
     }
@@ -843,7 +853,7 @@ operator<<(std::ostream& os, const deletable_row& dr) {
 
 std::ostream&
 operator<<(std::ostream& os, const rows_entry& re) {
-    return fprint(os, "{rows_entry: %s %s}", re._key, re._row);
+    return fprint(os, "{rows_entry: cont=%d dummy=%d %s %s}", re.continuous(), re.dummy(), re._key, re._row);
 }
 
 std::ostream&
@@ -911,8 +921,12 @@ rows_entry::equal(const schema& s, const rows_entry& other) const {
 }
 
 position_in_partition_view rows_entry::position() const {
-    return position_in_partition_view(
-        position_in_partition_view::clustering_row_tag_t(), _key);
+    if (_flags._last) {
+        return position_in_partition_view::after_all_clustered_rows();
+    } else {
+        return position_in_partition_view(
+            position_in_partition_view::clustering_row_tag_t(), _key);
+    }
 }
 
 bool
@@ -930,7 +944,7 @@ bool mutation_partition::equal(const schema& this_schema, const mutation_partiti
         return false;
     }
 
-    if (!std::equal(_rows.begin(), _rows.end(), p._rows.begin(), p._rows.end(),
+    if (!boost::equal(non_dummy_rows(), p.non_dummy_rows(),
         [&] (const rows_entry& e1, const rows_entry& e2) {
             return e1.equal(this_schema, e2, p_schema);
         }
@@ -1338,6 +1352,7 @@ rows_entry::rows_entry(rows_entry&& o) noexcept
     : _link(std::move(o._link))
     , _key(std::move(o._key))
     , _row(std::move(o._row))
+    , _flags(std::move(o._flags))
 { }
 
 row::row(const row& o)
@@ -1646,7 +1661,10 @@ mutation_partition mutation_partition::difference(schema_ptr s, const mutation_p
     auto it_r = other._rows.begin();
     rows_entry::compare cmp_r(*s);
     for (auto&& r : _rows) {
-        while (it_r != other._rows.end() && cmp_r(*it_r, r)) {
+        if (r.dummy()) {
+            continue;
+        }
+        while (it_r != other._rows.end() && (it_r->dummy() || cmp_r(*it_r, r))) {
             ++it_r;
         }
         if (it_r == other._rows.end() || !it_r->key().equal(*s, r.key())) {
@@ -1676,7 +1694,7 @@ void mutation_partition::accept(const schema& s, mutation_partition_visitor& v) 
     }
     for (const rows_entry& e : _rows) {
         const deletable_row& dr = e.row();
-        v.accept_row(e.key(), dr.deleted_at(), dr.marker());
+        v.accept_row(e.key(), dr.deleted_at(), dr.marker(), e.dummy(), e.continuous());
         dr.cells().for_each_cell([&] (column_id id, const atomic_cell_or_collection& cell) {
             const column_definition& def = s.regular_column_at(id);
             if (def.is_atomic()) {
@@ -2073,6 +2091,27 @@ public:
         return std::move(_mutation);
     }
 };
+
+mutation_partition::mutation_partition(mutation_partition::incomplete_tag, const schema& s)
+    : _static_row_cached(false)
+    , _rows()
+    , _row_tombstones(s)
+{
+    _rows.insert_before(_rows.end(),
+        *current_allocator().construct<rows_entry>(dummy_tag{}, is_continuous::no));
+}
+
+bool mutation_partition::is_fully_continuous() const {
+    if (!_static_row_cached) {
+        return false;
+    }
+    for (auto&& row : _rows) {
+        if (!row.continuous()) {
+            return false;
+        }
+    }
+    return true;
+}
 
 future<mutation_opt> counter_write_query(schema_ptr s, const mutation_source& source,
                                          const dht::decorated_key& dk,
