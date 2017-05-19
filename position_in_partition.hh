@@ -115,6 +115,10 @@ public:
         return !_ck || (!s.has_static_columns() && _bound_weight < 0 && _ck->is_empty(s));
     }
 
+    bool is_after_all_clustered_rows(const schema& s) const {
+        return _ck && _ck->is_empty(s) && _bound_weight > 0;
+    }
+
     friend std::ostream& operator<<(std::ostream&, position_in_partition_view);
 };
 
@@ -175,6 +179,10 @@ public:
 
     bool is_static_row() const { return !_ck; }
     bool is_clustering_row() const { return _ck && !_bound_weight; }
+
+    bool is_after_all_clustered_rows(const schema& s) const {
+        return _ck && _ck->is_empty(s) && _bound_weight > 0;
+    }
 
     template<typename Hasher>
     void feed_hash(Hasher& hasher, const schema& s) const {
