@@ -180,7 +180,23 @@ column_family::sstables_as_mutation_source() {
                                    const io_priority_class& pc,
                                    tracing::trace_state_ptr trace_state,
                                    streamed_mutation::forwarding fwd) {
-        return make_sstable_reader(std::move(s), r, slice, pc, std::move(trace_state), fwd);
+        return make_sstable_reader(std::move(s), _sstables, r, slice, pc, std::move(trace_state), fwd);
+    });
+}
+
+snapshot_source
+column_family::sstables_as_snapshot_source() {
+    return snapshot_source([this] () {
+        // FIXME: Will keep sstables on disk until next memtable flush. Make compaction force cache refresh.
+        auto sst_set = _sstables;
+        return mutation_source([this, sst_set = std::move(sst_set)] (schema_ptr s,
+                const dht::partition_range& r,
+                const query::partition_slice& slice,
+                const io_priority_class& pc,
+                tracing::trace_state_ptr trace_state,
+                streamed_mutation::forwarding fwd) {
+            return make_sstable_reader(std::move(s), sst_set, r, slice, pc, std::move(trace_state), fwd);
+        });
     });
 }
 
@@ -523,6 +539,7 @@ public:
 
 mutation_reader
 column_family::make_sstable_reader(schema_ptr s,
+                                   lw_shared_ptr<sstables::sstable_set> sstables,
                                    const dht::partition_range& pr,
                                    const query::partition_slice& slice,
                                    const io_priority_class& pc,
@@ -548,11 +565,11 @@ column_family::make_sstable_reader(schema_ptr s,
         if (dht::shard_of(pos.token()) != engine().cpu_id()) {
             return make_empty_reader(); // range doesn't belong to this shard
         }
-        return restrict_reader(make_mutation_reader<single_key_sstable_reader>(const_cast<column_family*>(this), std::move(s), _sstables,
+        return restrict_reader(make_mutation_reader<single_key_sstable_reader>(const_cast<column_family*>(this), std::move(s), std::move(sstables),
             _stats.estimated_sstable_per_read, pr, slice, pc, std::move(trace_state), fwd));
     } else {
         // range_sstable_reader is not movable so we need to wrap it
-        return restrict_reader(make_mutation_reader<range_sstable_reader>(std::move(s), _sstables, pr, slice, pc, std::move(trace_state), fwd));
+        return restrict_reader(make_mutation_reader<range_sstable_reader>(std::move(s), std::move(sstables), pr, slice, pc, std::move(trace_state), fwd));
     }
 }
 
@@ -635,7 +652,7 @@ column_family::make_reader(schema_ptr s,
     if (_config.enable_cache) {
         readers.emplace_back(_cache.make_reader(s, range, slice, pc, std::move(trace_state), fwd));
     } else {
-        readers.emplace_back(make_sstable_reader(s, range, slice, pc, std::move(trace_state), fwd));
+        readers.emplace_back(make_sstable_reader(s, _sstables, range, slice, pc, std::move(trace_state), fwd));
     }
 
     return make_combined_reader(std::move(readers));
@@ -654,7 +671,7 @@ column_family::make_streaming_reader(schema_ptr s,
         readers.emplace_back(mt->make_reader(s, range, slice, pc, nullptr, streamed_mutation::forwarding::no));
     }
 
-    readers.emplace_back(make_sstable_reader(s, range, slice, pc, nullptr, streamed_mutation::forwarding::no));
+    readers.emplace_back(make_sstable_reader(s, _sstables, range, slice, pc, nullptr, streamed_mutation::forwarding::no));
 
     return make_combined_reader(std::move(readers));
 }
@@ -672,7 +689,7 @@ column_family::make_streaming_reader(schema_ptr s,
         for (auto&& mt : *_memtables) {
             readers.emplace_back(mt->make_reader(s, range, slice, pc, trace_state, fwd));
         }
-        readers.emplace_back(make_sstable_reader(s, range, slice, pc, std::move(trace_state), fwd));
+        readers.emplace_back(make_sstable_reader(s, _sstables, range, slice, pc, std::move(trace_state), fwd));
         return make_combined_reader(std::move(readers));
     });
 
