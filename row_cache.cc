@@ -728,6 +728,7 @@ future<> row_cache::update(memtable& m, partition_presence_checker presence_chec
                 }
             });
         });
+        _underlying = _snapshot_source();
         _populate_phaser.advance_and_await().get();
         while (!m.partitions.empty()) {
             with_allocator(_tracker.allocator(), [this, &m, &presence_checker] () {
@@ -864,11 +865,12 @@ void row_cache::invalidate_unwrapped(const dht::partition_range& range) {
     });
 }
 
-row_cache::row_cache(schema_ptr s, mutation_source fallback_factory, cache_tracker& tracker)
+row_cache::row_cache(schema_ptr s, snapshot_source src, cache_tracker& tracker)
     : _tracker(tracker)
     , _schema(std::move(s))
     , _partitions(cache_entry::compare(_schema))
-    , _underlying(std::move(fallback_factory))
+    , _underlying(src())
+    , _snapshot_source(std::move(src))
 {
     with_allocator(_tracker.allocator(), [this] {
         cache_entry* entry = current_allocator().construct<cache_entry>(cache_entry::dummy_entry_tag());
