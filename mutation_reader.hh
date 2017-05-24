@@ -318,7 +318,9 @@ class snapshot_source {
 private:
     std::function<mutation_source()> _func;
 public:
-    snapshot_source(const std::function<mutation_source()>& func);
+    snapshot_source(std::function<mutation_source()> func)
+        : _func(std::move(func))
+    { }
 
     // Creates a new snapshot.
     // The returned mutation_source represents all earlier writes and only those.
