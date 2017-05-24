@@ -321,3 +321,18 @@ make_multi_range_reader(schema_ptr s, mutation_source source, const dht::partiti
     return make_mutation_reader<multi_range_mutation_reader>(std::move(s), std::move(source), ranges,
                                                              slice, pc, std::move(trace_state), fwd);
 }
+
+mutation_source make_combined_mutation_source(std::vector<mutation_source> addends) {
+    return mutation_source([addends = std::move(addends)] (schema_ptr s,
+            const dht::partition_range& pr,
+            const query::partition_slice& slice,
+            const io_priority_class& pc,
+            tracing::trace_state_ptr tr,
+            streamed_mutation::forwarding fwd) {
+        std::vector<mutation_reader> rd;
+        for (auto&& ms : addends) {
+            rd.emplace_back(ms(s, pr, slice, pc, tr, fwd));
+        }
+        return make_combined_reader(std::move(rd));
+    });
+}
