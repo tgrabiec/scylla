@@ -698,6 +698,13 @@ future<> row_cache::clear() {
     return invalidate(query::full_partition_range);
 }
 
+mutation_source row_cache::snapshot_for_key(const dht::decorated_key& key) {
+    if (!_prev_snapshot_key || key.less_compare(*_schema, *_prev_snapshot_key)) {
+        return _underlying;
+    }
+    return *_prev_snapshot;
+}
+
 future<> row_cache::update(memtable& m, partition_presence_checker presence_checker) {
     m.on_detach_from_region_group();
     _tracker.region().merge(m); // Now all data in memtable belongs to cache
@@ -706,6 +713,8 @@ future<> row_cache::update(memtable& m, partition_presence_checker presence_chec
     STAP_PROBE(scylla, row_cache_update_start);
     auto t = seastar::thread(attr, [this, &m, presence_checker = std::move(presence_checker)] {
         auto cleanup = defer([&] {
+            _prev_snapshot_key = {};
+            _prev_snapshot = {};
             with_allocator(_tracker.allocator(), [&m, this] () {
                 logalloc::reclaim_lock _(_tracker.region());
                 bool blow_cache = false;
@@ -728,7 +737,7 @@ future<> row_cache::update(memtable& m, partition_presence_checker presence_chec
                 }
             });
         });
-        _underlying = _snapshot_source();
+        _prev_snapshot = std::exchange(_underlying, _snapshot_source());
         _populate_phaser.advance_and_await().get();
         while (!m.partitions.empty()) {
             with_allocator(_tracker.allocator(), [this, &m, &presence_checker] () {
@@ -775,6 +784,11 @@ future<> row_cache::update(memtable& m, partition_presence_checker presence_chec
                           STAP_PROBE(scylla, row_cache_update_partition_end);
                         } while (!m.partitions.empty() && quota && !need_preempt());
                         STAP_PROBE1(scylla, row_cache_update_one_batch_end, quota_before - quota);
+                        with_allocator(standard_allocator(), [&] {
+                            if (!m.partitions.empty()) {
+                                _prev_snapshot_key = m.partitions.begin()->key();
+                            }
+                        });
                     });
                     if (quota == 0 && seastar::thread::should_yield()) {
                         return;

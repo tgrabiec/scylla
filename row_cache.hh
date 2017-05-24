@@ -265,6 +265,10 @@ private:
     // Represents all mutations behind the cache.
     // The set of mutations doesn't change within a single populate phase (it's a snapshot).
     mutation_source _underlying;
+    // Previous snapshot. Non-empty only during update().
+    mutation_source_opt _prev_snapshot;
+    // All entries with keys >= than this are using _prev_snapshot, the rest is using _underlying.
+    stdx::optional<dht::decorated_key> _prev_snapshot_key;
     snapshot_source _snapshot_source;
 
     // Synchronizes populating reads with updates of underlying data source to ensure that cache
@@ -318,6 +322,10 @@ private:
     }
     mutation_reader
     create_underlying_reader(schema_ptr, read_context&, const dht::partition_range&, streamed_mutation::forwarding);
+
+    // Returns underlying mutation source snapshot matching cache entry with given key.
+    // Should be only called outside update().
+    mutation_source snapshot_for_key(const dht::decorated_key&);
 public:
     ~row_cache();
     row_cache(schema_ptr, snapshot_source, cache_tracker&);
@@ -351,6 +359,8 @@ public:
     // has just been flushed to the underlying data source.
     // The memtable can be queried during the process, but must not be written.
     // After the update is complete, memtable is empty.
+    //
+    // Concurrent update() calls are not allowed.
     future<> update(memtable&, partition_presence_checker underlying_negative);
 
     // Moves given partition to the front of LRU if present in cache.
