@@ -329,7 +329,7 @@ public:
                         auto cr = query::clustering_key_filter_ranges::get_ranges(*schema(), _slice, key_and_snp->first.key());
                         auto snp_schema = key_and_snp->second->schema();
                         bool digest_requested = _slice.options.contains<query::partition_slice::option::with_digest>();
-                        auto mpsr = make_partition_snapshot_flat_reader(snp_schema, std::move(key_and_snp->first), std::move(cr),
+                        auto mpsr = make_partition_snapshot_flat_reader<partition_snapshot_reader_dummy_accounter>(snp_schema, std::move(key_and_snp->first), std::move(cr),
                                         std::move(key_and_snp->second), digest_requested, region(), read_section(), mtbl(), streamed_mutation::forwarding::no);
                         if (snp_schema->version() != schema()->version()) {
                             _delegate = transform(std::move(mpsr), schema_upgrader(schema()));
@@ -554,7 +554,7 @@ memtable::make_flat_reader(schema_ptr s,
         auto cr = query::clustering_key_filter_ranges::get_ranges(*s, slice, dk.key());
         auto snp_schema = snp->schema();
         bool digest_requested = slice.options.contains<query::partition_slice::option::with_digest>();
-        auto rd = make_partition_snapshot_flat_reader(snp_schema, std::move(dk), std::move(cr), std::move(snp), digest_requested,
+        auto rd = make_partition_snapshot_flat_reader<partition_snapshot_reader_dummy_accounter>(snp_schema, std::move(dk), std::move(cr), std::move(snp), digest_requested,
                                                       *this, _read_section, shared_from_this(), fwd);
         if (snp_schema->version() != s->version()) {
             return transform(std::move(rd), schema_upgrader(s));

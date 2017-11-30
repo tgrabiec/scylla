@@ -99,7 +99,7 @@ class partition_snapshot_flat_reader : public flat_mutation_reader::impl, public
     private:
         template<typename Function>
         decltype(auto) in_alloc_section(Function&& fn) {
-            return _read_section.with_reclaiming_disabled(_region, [&] { 
+            return _read_section.with_reclaiming_disabled(_region, [&] {
                 return with_linearized_managed_bytes([&] {
                     return fn();
                 });
@@ -187,7 +187,7 @@ class partition_snapshot_flat_reader : public flat_mutation_reader::impl, public
                 return _snapshot->static_row(_digest_requested);
             });
         }
-        
+
         // Returns next clustered row in the range.
         // If the ck_range is the same as the one used previously last_row needs
         // to be engaged and equal the position of the row returned last time.
@@ -359,19 +359,4 @@ make_partition_snapshot_flat_reader(schema_ptr s,
     } else {
         return std::move(res);
     }
-}
-
-inline flat_mutation_reader
-make_partition_snapshot_flat_reader(schema_ptr s,
-                                    dht::decorated_key dk,
-                                    query::clustering_key_filter_ranges crr,
-                                    lw_shared_ptr<partition_snapshot> snp,
-                                    bool digest_requested,
-                                    logalloc::region& region,
-                                    logalloc::allocating_section& read_section,
-                                    boost::any pointer_to_container,
-                                    streamed_mutation::forwarding fwd)
-{
-    return make_partition_snapshot_flat_reader<partition_snapshot_reader_dummy_accounter>(std::move(s),
-            std::move(dk), std::move(crr), std::move(snp), digest_requested, region, read_section, std::move(pointer_to_container), fwd);
 }
