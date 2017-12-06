@@ -5,5 +5,11 @@
 # Usage: mutation_diff <path-to-test-output-file>
 #
 
-colordiff -u <(sed -n '/expected/,/got:/p' $1 | head -n-1) \
-             <(sed -n '/got:/,/^$/p' $1) | less -R
+function transform() {
+    # Continuity is ignored by equality
+    #sed 's/cont=[[:alpha:]]*/cont=\*/g'
+    cat
+}
+
+colordiff -u <(sed -n '/expected\|t match/,/got:\|and:/p' $1 | head -n-1 | transform) \
+             <(sed -n '/got:\|and:/,/^$/p' $1 | transform) | less -R

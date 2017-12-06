@@ -1229,9 +1229,9 @@ bytes make_blob(size_t blob_size) {
 class random_mutation_generator::impl {
     friend class random_mutation_generator;
     generate_counters _generate_counters;
-    const size_t _external_blob_size = 128; // Should be enough to force use of external bytes storage
+    const size_t _external_blob_size = 8; // Should be enough to force use of external bytes storage
     const size_t n_blobs = 1024;
-    const column_id column_count = row::max_vector_size * 2;
+    const column_id column_count = 6;
     std::mt19937 _gen;
     schema_ptr _schema;
     std::vector<bytes> _blobs;
@@ -1462,7 +1462,7 @@ public:
 
         auto row_count_dist = [&] (auto& gen) {
             static thread_local std::normal_distribution<> dist(32, 1.5);
-            return static_cast<size_t>(std::min(100.0, std::max(0.0, dist(gen))));
+            return static_cast<size_t>(std::min(10.0, std::max(0.0, dist(gen))));
         };
 
         size_t row_count = row_count_dist(_gen);

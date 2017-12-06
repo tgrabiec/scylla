@@ -68,6 +68,8 @@ public:
 
     mutation_partition_assertion& has_same_continuity(const mutation_partition& other) {
         if (!_m.equal_continuity(*_schema, other)) {
+            std::cout << other.get_continuity(*_schema) << "\n";
+            std::cout << _m.get_continuity(*_schema) << "\n";
             BOOST_FAIL(sprint("Continuity doesn't match: %s\n ...and: %s", other, _m));
         }
         return *this;

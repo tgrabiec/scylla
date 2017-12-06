@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include <seastar/util/backtrace.hh>
 #include "utils/allocation_strategy.hh"
 
 class failure_injecting_allocation_strategy : public allocation_strategy {
@@ -33,6 +34,7 @@ public:
     virtual void* alloc(migrate_fn mf, size_t size, size_t alignment) override {
         if (_alloc_count >= _fail_at) {
             stop_failing();
+            //std::cout << seastar::current_backtrace() << "\n";
             throw std::bad_alloc();
         }
         ++_alloc_count;
