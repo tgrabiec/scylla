@@ -81,6 +81,9 @@ public:
         }
         return false;
     }
+    rows_entry* operator->() const {
+        return &*_it;
+    }
 };
 
 // Allows iterating over rows of mutation_partition represented by given partition_snapshot.
