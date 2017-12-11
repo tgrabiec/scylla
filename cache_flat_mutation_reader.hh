@@ -242,7 +242,7 @@ future<> cache_flat_mutation_reader::do_fill_buffer(db::timeout_clock::time_poin
             }
         }
         _next_row.maybe_refresh();
-        clogger.trace("csm {}: next={}, cont={}", this, _next_row.position(), _next_row.continuous());
+        clogger.trace("csm {}: next={}, cont={}, dummy={}", this, _next_row.position(), _next_row.continuous(), _next_row.dummy());
         while (!is_buffer_full() && _state == state::reading_from_cache) {
             copy_from_cache_to_buffer();
             if (need_preempt()) {
@@ -435,7 +435,7 @@ void cache_flat_mutation_reader::start_reading_from_underlying() {
 
 inline
 void cache_flat_mutation_reader::copy_from_cache_to_buffer() {
-    clogger.trace("csm {}: copy_from_cache, next={}, next_row_in_range={}", this, _next_row.position(), _next_row_in_range);
+    clogger.trace("csm {}: copy_from_cache, next={}, dummy={}, next_row_in_range={}", this, _next_row.position(), _next_row.dummy(), _next_row_in_range);
     position_in_partition_view next_lower_bound = _next_row.dummy() ? _next_row.position() : position_in_partition_view::after_key(_next_row.key());
     for (auto &&rts : _snp->range_tombstones(_lower_bound, _next_row_in_range ? next_lower_bound : _upper_bound)) {
         // This guarantees that rts starts after any emitted clustering_row
