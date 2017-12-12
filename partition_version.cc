@@ -555,3 +555,11 @@ void partition_entry::evict() noexcept {
     }
     current_allocator().invalidate_references();
 }
+
+size_t partition_entry::size_in_allocator(allocation_strategy& allocator) {
+    size_t size = 0;
+    for (auto&& v : versions()) {
+        size += v.size_in_allocator(allocator);
+    }
+    return size;
+}

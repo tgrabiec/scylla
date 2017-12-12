@@ -356,6 +356,8 @@ public:
         return _version->elements_from_this();
     }
 
+    size_t size_in_allocator(allocation_strategy&);
+
     // Strong exception guarantees.
     // Assumes this instance and mp are fully continuous.
     // Use only on non-evictable entries.
