@@ -2950,8 +2950,15 @@ SEASTAR_TEST_CASE(test_concurrent_reads_and_eviction) {
                         }
                         return m2 == actual;
                     })) {
-                        BOOST_FAIL(sprint("Mutation read doesn't match any expected version, slice: %s, read: %s\nexpected: [%s]",
-                            slice, actual, ::join(",\n", possible_versions)));
+                        for (auto&& m : possible_versions) {
+                            auto m2 = m.sliced(ranges);
+                            try {
+                                assert_that(actual).is_equal_to(m2);
+                            } catch (...) {
+                                std::cout << std::current_exception() << std::endl;
+                            }
+                        }
+                        BOOST_FAIL(sprint("Mutation read doesn't match any expected version, slice: %s", slice));
                     }
                 }
             });

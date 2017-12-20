@@ -371,11 +371,13 @@ private:
                 }
                 _end_of_stream = true;
             } else if (phase == _cache.phase_of(_read_context->range().start()->value())) {
+                //std::cout << __PRETTY_FUNCTION__ << " " << __LINE__ << "\n";
                 _reader = _cache._read_section(_cache._tracker.region(), [&] {
                     cache_entry& e = _cache.find_or_create(mfopt->as_partition_start().key(), mfopt->as_partition_start().partition_tombstone(), phase);
                     return e.read(_cache, *_read_context, phase);
                 });
             } else {
+                //std::cout << __PRETTY_FUNCTION__ << " " << __LINE__ << "\n";
                 _cache._tracker.on_mispopulate();
                 _reader = read_directly_from_underlying(*_read_context);
                 this->push_mutation_fragment(std::move(*mfopt));
@@ -748,11 +750,14 @@ row_cache::make_reader(schema_ptr s,
                     _tracker.touch(e);
                     upgrade_entry(e);
                     on_partition_hit();
+                    //std::cout << __PRETTY_FUNCTION__ << " " << __LINE__ << "\n";
                     return e.read(*this, *ctx);
                 } else if (i->continuous()) {
+                    //std::cout << __PRETTY_FUNCTION__ << " " << __LINE__ << "\n";
                     return make_empty_flat_reader(std::move(s));
                 } else {
                     on_partition_miss();
+                    //std::cout << __PRETTY_FUNCTION__ << " " << __LINE__ << "\n";
                     return make_flat_mutation_reader<single_partition_populating_reader>(*this, std::move(ctx));
                 }
             });

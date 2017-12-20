@@ -264,11 +264,14 @@ future<> cache_flat_mutation_reader::read_from_underlying(db::timeout_clock::tim
         },
         [this] {
             _state = state::reading_from_cache;
+            clogger.trace("csm {}: underlying done, next={}, next_row_in_range={}", this, _next_row.position(), _next_row_in_range);
             _lsa_manager.run_in_update_section([this] {
                 auto same_pos = _next_row.maybe_refresh();
                 if (!same_pos) {
                     _read_context->cache().on_mispopulate(); // FIXME: Insert dummy entry at _upper_bound.
                     _next_row_in_range = !after_current_range(_next_row.position());
+                    clogger.trace("csm {}: next moved, next={}, cont={}, next_row_in_range={}", this, _next_row.position(),
+                        _next_row.continuous(), _next_row_in_range);
                     if (!_next_row.continuous()) {
                         start_reading_from_underlying();
                     }

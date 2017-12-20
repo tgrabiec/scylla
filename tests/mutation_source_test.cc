@@ -1230,7 +1230,7 @@ class random_mutation_generator::impl {
     friend class random_mutation_generator;
     generate_counters _generate_counters;
     const size_t _external_blob_size = 8; // Should be enough to force use of external bytes storage
-    const size_t n_blobs = 1024;
+    const size_t n_blobs = 10;
     const column_id column_count = 6;
     std::mt19937 _gen;
     schema_ptr _schema;
@@ -1275,7 +1275,7 @@ public:
     explicit impl(generate_counters counters) : _generate_counters(counters) {
         std::random_device rd;
         // In case of errors, replace the seed with a fixed value to get a deterministic run.
-        auto seed = rd();
+        auto seed = 123123123;//rd();
         std::cout << "Random seed: " << seed << "\n";
         _gen = std::mt19937(seed);
 
@@ -1390,7 +1390,7 @@ public:
         };
 
         auto set_random_cells = [&] (row& r, column_kind kind) {
-            auto columns_to_set = column_count_dist(_gen);
+            auto columns_to_set = 1;//column_count_dist(_gen);
             for (column_id i = 0; i < columns_to_set; ++i) {
                 auto cid = column_id_dist(_gen);
                 auto& col = _schema->column_at(kind, cid);
@@ -1465,7 +1465,7 @@ public:
             return static_cast<size_t>(std::min(10.0, std::max(0.0, dist(gen))));
         };
 
-        size_t row_count = row_count_dist(_gen);
+        size_t row_count = 5; //row_count_dist(_gen);
         for (size_t i = 0; i < row_count; ++i) {
             auto ckey = make_random_key();
             is_continuous continuous = is_continuous(_bool_dist(_gen));
@@ -1486,8 +1486,16 @@ public:
             if (less(end, start)) {
                 std::swap(start, end);
             }
-            m.partition().apply_row_tombstone(*_schema,
-                    range_tombstone(std::move(start), std::move(end), random_tombstone()));
+
+            auto rt = range_tombstone(std::move(start), std::move(end), random_tombstone());
+            {
+                position_in_partition::less_compare less(*_schema);
+                if (less(rt.end_position(), rt.position())) {
+                    std::cout << rt << "\n";
+                    abort();
+                }
+            }
+            m.partition().apply_row_tombstone(*_schema, rt);
         }
 
         if (_bool_dist(_gen)) {

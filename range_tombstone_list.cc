@@ -56,6 +56,13 @@ void range_tombstone_list::apply_reversibly(const schema& s,
             it = _tombstones.end();
         }
         insert_from(s, std::move(it), std::move(start), start_kind, std::move(end), end_kind, std::move(tomb), rev);
+        for (auto&& new_rt : _tombstones) {
+                position_in_partition::less_compare less(s);
+                if (less(new_rt.end_position(), new_rt.position())) {
+                    std::cout << new_rt << "\n";
+                    abort();
+                }
+        }
         return;
     }
     auto rt = alloc_strategy_unique_ptr<range_tombstone>(current_allocator().construct<range_tombstone>(
@@ -86,23 +93,42 @@ void range_tombstone_list::insert_from(const schema& s,
 {
     bound_view::compare less(s);
     bound_view end_bound(end, end_kind);
+    {
+        position_in_partition::less_compare less(s);
+        range_tombstone new_rt(start, start_kind, end, end_kind, tomb);
+        if (less(new_rt.end_position(), new_rt.position())) {
+            std::cout << new_rt << "\n";
+            abort();
+        }
+    }
+    //std::cout << __FILE__ << " " << __LINE__ << " " << bound_view(start, start_kind) << " " << end_bound << "\n";
+    //std::cout << *this << "\n";
     if (it != _tombstones.begin()) {
+        //std::cout << __FILE__ << " " << __LINE__ << "\n";
         auto prev = std::prev(it);
         if (prev->tomb == tomb && prev->end_bound().adjacent(s, bound_view(start, start_kind))) {
+            //std::cout << __FILE__ << " " << __LINE__ << "\n";
             start = prev->start;
             start_kind = prev->start_kind;
             rev.erase(prev);
         }
     }
     while (it != _tombstones.end()) {
+        //std::cout << __FILE__ << " " << __LINE__ << "\n";
+
         bound_view start_bound(start, start_kind);
         if (less(end_bound, start_bound)) {
+            //std::cout << __FILE__ << " " << __LINE__ << "\n";
             return;
         }
 
         if (less(end_bound, it->start_bound())) {
+            //std::cout << __FILE__ << " " << __LINE__ << "\n";
+
             // not overlapping
             if (it->tomb == tomb && end_bound.adjacent(s, it->start_bound())) {
+                //std::cout << __FILE__ << " " << __LINE__ << "\n";
+
                 rev.update(it, {std::move(start), start_kind, it->end, it->end_kind, tomb});
             } else {
                 auto rt = alloc_strategy_unique_ptr<range_tombstone>(
@@ -116,23 +142,35 @@ void range_tombstone_list::insert_from(const schema& s,
 
         auto c = tomb.compare(it->tomb);
         if (c == 0) {
+            //std::cout << __FILE__ << " " << __LINE__ << "\n";
+
             // same timestamp, overlapping or adjacent, so merge.
             if (less(it->start_bound(), start_bound)) {
+                //std::cout << __FILE__ << " " << __LINE__ << "\n";
+
                 start = it->start;
                 start_kind = it->start_kind;
             }
             if (less(end_bound, it->end_bound())) {
+                //std::cout << __FILE__ << " " << __LINE__ << "\n";
+
                 end = it->end;
                 end_kind = it->end_kind;
                 end_bound = bound_view(end, end_kind);
             }
             it = rev.erase(it);
         } else if (c > 0) {
+            //std::cout << __FILE__ << " " << __LINE__ << "\n";
+
             // We overwrite the current tombstone.
 
             if (less(it->start_bound(), start_bound)) {
+                //std::cout << __FILE__ << " " << __LINE__ << "\n";
+
                 auto new_end = bound_view(start, invert_kind(start_kind));
                 if (!less(new_end, it->start_bound())) {
+                    //std::cout << __FILE__ << " " << __LINE__ << "\n";
+
                     // Here it->start < start
                     auto rt = alloc_strategy_unique_ptr<range_tombstone>(
                         current_allocator().construct<range_tombstone>(it->start_bound(), new_end, it->tomb));
@@ -143,6 +181,8 @@ void range_tombstone_list::insert_from(const schema& s,
             }
 
             if (less(end_bound, it->end_bound())) {
+                //std::cout << __FILE__ << " " << __LINE__ << "\n";
+
                 // Here start <= it->start and end < it->end.
                 auto rt = alloc_strategy_unique_ptr<range_tombstone>(
                     current_allocator().construct<range_tombstone>(std::move(start), start_kind, end, end_kind, std::move(tomb)));
@@ -156,13 +196,20 @@ void range_tombstone_list::insert_from(const schema& s,
             it = rev.erase(it);
         } else {
             // We don't overwrite the current tombstone.
+            //std::cout << __FILE__ << " " << __LINE__ << "\n";
 
             if (less(start_bound, it->start_bound())) {
+                //std::cout << __FILE__ << " " << __LINE__ << "\n";
+
                 // The new tombstone starts before the current one.
                 if (less(it->start_bound(), end_bound)) {
+                    //std::cout << __FILE__ << " " << __LINE__ << "\n";
+
                     // Here start < it->start and it->start < end.
                     auto new_end_kind = invert_kind(it->start_kind);
                     if (!less(bound_view(it->start, new_end_kind), start_bound)) {
+                        //std::cout << __FILE__ << " " << __LINE__ << "\n";
+
                         auto rt = alloc_strategy_unique_ptr<range_tombstone>(current_allocator().construct<range_tombstone>(
                                 std::move(start), start_kind, it->start, new_end_kind, tomb));
                         it = rev.insert(it, *rt);
@@ -170,6 +217,8 @@ void range_tombstone_list::insert_from(const schema& s,
                         ++it;
                     }
                 } else {
+                    //std::cout << __FILE__ << " " << __LINE__ << "\n";
+
                     // Here start < it->start and end <= it->start, so just insert the new tombstone.
                     auto rt = alloc_strategy_unique_ptr<range_tombstone>(current_allocator().construct<range_tombstone>(
                             std::move(start), start_kind, std::move(end), end_kind, std::move(tomb)));
@@ -180,16 +229,20 @@ void range_tombstone_list::insert_from(const schema& s,
             }
 
             if (less(it->end_bound(), end_bound)) {
+                //std::cout << __FILE__ << " " << __LINE__ << "\n";
                 // Here the current tombstone overwrites a range of the new one.
                 start = it->end;
                 start_kind = invert_kind(it->end_kind);
                 ++it;
             } else {
+                //std::cout << __FILE__ << " " << __LINE__ << "\n";
+
                 // Here the current tombstone completely overwrites the new one.
                 return;
             }
         }
     }
+    //std::cout << __FILE__ << " " << __LINE__ << "\n";
 
     // If we got here, then just insert the remainder at the end.
     auto rt = alloc_strategy_unique_ptr<range_tombstone>(current_allocator().construct<range_tombstone>(
@@ -358,6 +411,12 @@ void range_tombstone_list::trim(const schema& s, const query::clustering_row_ran
 
 range_tombstone_list::range_tombstones_type::iterator
 range_tombstone_list::reverter::insert(range_tombstones_type::iterator it, range_tombstone& new_rt) {
+    position_in_partition::less_compare less(_s);
+    if (less(new_rt.end_position(), new_rt.position())) {
+        std::cout << _dst << "\n";
+        std::cout << new_rt << "\n";
+        abort();
+    }
     _ops.emplace_back(insert_undo_op(new_rt));
     return _dst._tombstones.insert_before(it, new_rt);
 }

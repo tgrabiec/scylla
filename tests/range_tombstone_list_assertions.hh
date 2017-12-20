@@ -40,6 +40,18 @@ public:
         return *this;
     }
 
+    range_tombstone_list_assertions& is_non_overlapping() {
+        position_in_partition::less_compare less(_s);
+        position_in_partition last_pos = position_in_partition::before_all_clustered_rows();
+        for (auto&& rt : _list) {
+            if (less(rt.position(), last_pos)) {
+                BOOST_FAIL(sprint("The list has overlapping tombstones, %s overlaps in %s", rt, _list));
+            }
+            last_pos = position_in_partition(rt.end_position());
+        }
+        return *this;
+    }
+
     range_tombstone_list_assertions& is_equal_to(const range_tombstone_list& other) {
         if (!_list.equal(_s, other)) {
             BOOST_FAIL(sprint("Lists differ, expected: %s\n ...but got: %s", other, _list));

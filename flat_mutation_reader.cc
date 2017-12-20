@@ -215,6 +215,7 @@ flat_mutation_reader make_forwardable(flat_mutation_reader m) {
                         return stop_iteration::yes;
                     }
                     if (_next->relevant_for_range(*_schema, _current.start())) {
+                        //std::cout << "rel " << _next << ", range=" << _current << "\n";
                         push_mutation_fragment(std::move(*_next));
                     }
                     _next = {};
