@@ -415,6 +415,71 @@ void partition_entry::apply_to_incomplete(const schema& s, partition_entry&& pe,
     }
 }
 
+/*
+ *
+
+ Represents mutation_partition with snapshotting support a la MVCC.
+
+Internally the state is represented by an ordered list of mutation_partition
+objects called versions. The logical mutation_partition state represented  by
+that chain (snapshot value) is equal to reducing the chain from left (latest
+version) to right  using merging rules appropriate for the type of the entry,
+as described below.
+
+ === Evictability and merging rules ===
+
+The way partition elements are merged between versions differs depending on
+whether they are partially evictable or not. For elements which are not
+partially evictable, the value of the element in the
+snapshot is a sum of their values from all versions, ordered from oldest to newest. This way incremental
+writes don't have to duplicate information stored in older versions. For
+partially evictable elements, their value is always picked from the latest
+version. This means that incremental writes need to copy any information
+for that element stored in older versions together with the write to the latest version. This
+is needed so that values from older versions can be evicted without the need
+to merge them into the newer version.
+
+For performance reasons, we distinguish evictable and non-evictable partition
+entries. Entries which are non-evictable have no partically
+evictable elements and are fully continuous.
+
+For evictable entries, the following partition elements are partially evictable:
+  - a clustered row
+  - clustering range continuity
+
+The following elements are not partially evictable:
+  - partition tombstone
+  - range tombstones
+  - static row
+
+Note that even though clustering row continuity is partially evictable, range tombstones are not
+partially evictable, so they don't have to be duplicated in each version for ranges
+which are continuous in those versions. Only the sum of tombstones in all versions
+has to be complete.
+
+ === Eviction of clustered rows ===
+
+Eviction happens with granularity of a row entry belonging to some version. We
+want eviction to not have to touch newer versions. The following rules follow
+from that requirement:
+
+  1) newer versions must store complete logical value of an evictable element
+     which is marked complete in that version
+
+  2) any elements must be evicted from oldest version first
+
+An example of violation of (2) is a complete row in older version falling into a
+continuous interval in the newer version. Eviction of that row would cause
+the snapshot to claim the row doesn't exist, which it not true. The newer version must
+either mark the range corresponding to the row as discontinuous or duplicate it.
+Another example is a complete row in newer version falling into
+a continuous interval in older version. Eviction of that row would cause
+the snapshot to claim the row doesn't exist, which it not true
+
+
+
+ */
+
 void partition_entry::apply_to_incomplete(const schema& s, partition_version* version,
         logalloc::region& reg) {
     partition_version& dst = open_version(s);
