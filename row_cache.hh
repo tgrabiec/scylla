@@ -43,6 +43,7 @@ namespace bi = boost::intrusive;
 
 class row_cache;
 class memtable_entry;
+class cache_tracker;
 
 namespace cache {
 
@@ -126,6 +127,9 @@ public:
     }
 
     bool is_evictable() { return _lru_link.is_linked(); }
+    // Called when all contents have been evicted.
+    // This object should unlink and destroy itself from the container.
+    void on_evicted(cache_tracker&) noexcept;
     const dht::decorated_key& key() const { return _key; }
     dht::ring_position_view position() const {
         if (is_dummy_entry()) {
@@ -234,6 +238,7 @@ public:
     void on_partition_merge();
     void on_partition_hit();
     void on_partition_miss();
+    void on_partition_eviction();
     void on_row_hit();
     void on_row_miss();
     void on_miss_already_populated();
