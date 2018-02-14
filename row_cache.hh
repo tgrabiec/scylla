@@ -122,7 +122,6 @@ public:
     cache_entry(cache_entry&&) noexcept;
     ~cache_entry();
 
-    bool is_evictable() { return _lru_link.is_linked(); }
     // Called when all contents have been evicted.
     // This object should unlink and destroy itself from the container.
     void on_evicted(cache_tracker&) noexcept;
