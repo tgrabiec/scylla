@@ -126,7 +126,6 @@ public:
         return ::container_of(&cache_entry::_pe, pe);
     }
 
-    bool is_evictable() { return _lru_link.is_linked(); }
     // Called when all contents have been evicted.
     // This object should unlink and destroy itself from the container.
     void on_evicted(cache_tracker&) noexcept;
