@@ -122,6 +122,10 @@ public:
     cache_entry(cache_entry&&) noexcept;
     ~cache_entry();
 
+    static cache_entry& container_of(partition_entry& pe) {
+        return ::container_of(&cache_entry::_pe, pe);
+    }
+
     // Called when all contents have been evicted.
     // This object should unlink and destroy itself from the container.
     void on_evicted(cache_tracker&) noexcept;
