@@ -45,6 +45,7 @@
 #include "clustering_key_filter.hh"
 #include "intrusive_set_external_comparator.hh"
 #include "utils/with_relational_operators.hh"
+#include "utils/container_of.hh"
 
 class mutation_fragment;
 class clustering_row;
@@ -881,6 +882,7 @@ public:
     mutation_partition(const mutation_partition&, const schema&, query::clustering_key_filter_ranges);
     mutation_partition(mutation_partition&&, const schema&, query::clustering_key_filter_ranges);
     ~mutation_partition();
+    static mutation_partition& container_of(rows_type&);
     mutation_partition& operator=(const mutation_partition& x);
     mutation_partition& operator=(mutation_partition&& x) noexcept;
     bool equal(const schema&, const mutation_partition&) const;
@@ -1068,3 +1070,8 @@ private:
     void for_each_row(const schema& schema, const query::clustering_range& row_range, bool reversed, Func&& func) const;
     friend class counter_write_query_result_builder;
 };
+
+inline
+mutation_partition& mutation_partition::container_of(rows_type& rows) {
+    return ::container_of<>(&mutation_partition::_rows, rows);
+}
