@@ -714,6 +714,21 @@ SEASTAR_TEST_CASE(test_eviction) {
     });
 }
 
+SEASTAR_TEST_CASE(test_container_of) {
+    return seastar::async([] {
+        struct S {
+            int x = 0;
+        };
+        S s1;
+        int& x_ref = s1.x;
+        S& s2 = container_of(&S::x, x_ref);
+        s2.x = 1;
+        s1.x = 3;
+        BOOST_REQUIRE(s2.x == 3);
+        BOOST_REQUIRE(x_ref == 3);
+    });
+}
+
 bool has_key(row_cache& cache, const dht::decorated_key& key) {
     auto range = dht::partition_range::make_singular(key);
     auto reader = cache.make_reader(cache.schema(), range);
