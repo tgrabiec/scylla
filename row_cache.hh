@@ -121,6 +121,10 @@ public:
     cache_entry(cache_entry&&) noexcept;
     ~cache_entry();
 
+    static cache_entry& container_of(partition_entry& pe) {
+        return ::container_of(&cache_entry::_pe, pe);
+    }
+
     bool is_evictable() { return _lru_link.is_linked(); }
     const dht::decorated_key& key() const { return _key; }
     dht::ring_position_view position() const {
