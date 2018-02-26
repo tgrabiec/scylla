@@ -1525,6 +1525,15 @@ SEASTAR_TEST_CASE(test_slicing_mutation_reader) {
     });
 }
 
+static void evict_one_partition(cache_tracker& tracker) {
+    auto initial = tracker.partitions();
+    assert(initial > 0);
+    while (tracker.partitions() == initial) {
+        auto ret = tracker.region().evict_some();
+        BOOST_REQUIRE(ret == memory::reclaiming_result::reclaimed_something);
+    }
+}
+
 SEASTAR_TEST_CASE(test_lru) {
     return seastar::async([] {
         auto s = make_schema();
@@ -1548,8 +1557,7 @@ SEASTAR_TEST_CASE(test_lru) {
                 .produces(partitions[2])
                 .produces_end_of_stream();
 
-        auto ret = tracker.region().evict_some();
-        BOOST_REQUIRE(ret == memory::reclaiming_result::reclaimed_something);
+        evict_one_partition(tracker);
 
         pr = dht::partition_range::make_ending_with(dht::ring_position(partitions[4].decorated_key()));
         rd = cache.make_reader(s, pr);
@@ -1566,8 +1574,7 @@ SEASTAR_TEST_CASE(test_lru) {
                 .produces(partitions[5])
                 .produces_end_of_stream();
 
-        ret = tracker.region().evict_some();
-        BOOST_REQUIRE(ret == memory::reclaiming_result::reclaimed_something);
+        evict_one_partition(tracker);
 
         rd = cache.make_reader(s);
         assert_that(std::move(rd))
