@@ -303,6 +303,7 @@ future<> cache_flat_mutation_reader::read_from_underlying(db::timeout_clock::tim
                                 auto inserted = insert_result.second;
                                 auto it = insert_result.first;
                                 if (inserted) {
+                                    _snp->tracker()->insert(*e);
                                     e.release();
                                     auto next = std::next(it);
                                     it->set_continuous(next->continuous());
@@ -318,6 +319,7 @@ future<> cache_flat_mutation_reader::read_from_underlying(db::timeout_clock::tim
                                 auto inserted = insert_result.second;
                                 if (inserted) {
                                     clogger.trace("csm {}: inserted dummy at {}", this, _upper_bound);
+                                    _snp->tracker()->insert(*e);
                                     e.release();
                                 } else {
                                     clogger.trace("csm {}: mark {} as continuous", this, insert_result.first->position());
@@ -362,6 +364,7 @@ bool cache_flat_mutation_reader::ensure_population_lower_bound() {
             auto inserted = insert_result.second;
             if (inserted) {
                 clogger.trace("csm {}: inserted lower bound dummy at {}", this, e->position());
+                _snp->tracker()->insert(*e);
                 e.release();
             }
         });
@@ -414,7 +417,7 @@ void cache_flat_mutation_reader::maybe_add_to_cache(const clustering_row& cr) {
                                               : mp.clustered_rows().lower_bound(cr.key(), less);
         auto insert_result = mp.clustered_rows().insert_check(it, *new_entry, less);
         if (insert_result.second) {
-            _read_context->cache().on_row_insert();
+            _snp->tracker()->insert(*new_entry);
             new_entry.release();
         }
         it = insert_result.first;
@@ -441,11 +444,13 @@ inline
 void cache_flat_mutation_reader::start_reading_from_underlying() {
     clogger.trace("csm {}: start_reading_from_underlying(), range=[{}, {})", this, _lower_bound, _next_row_in_range ? _next_row.position() : _upper_bound);
     _state = state::move_to_underlying;
+    _next_row.touch();
 }
 
 inline
 void cache_flat_mutation_reader::copy_from_cache_to_buffer() {
     clogger.trace("csm {}: copy_from_cache, next={}, dummy={}, next_row_in_range={}", this, _next_row.position(), _next_row.dummy(), _next_row_in_range);
+    _next_row.touch();
     position_in_partition_view next_lower_bound = _next_row.dummy() ? _next_row.position() : position_in_partition_view::after_key(_next_row.key());
     for (auto &&rts : _snp->range_tombstones(_lower_bound, _next_row_in_range ? next_lower_bound : _upper_bound)) {
         // This guarantees that rts starts after any emitted clustering_row
@@ -512,6 +517,7 @@ void cache_flat_mutation_reader::move_to_range(query::clustering_row_ranges::con
                     auto new_entry = current_allocator().construct<rows_entry>(*_schema, _lower_bound, is_dummy::yes, is_continuous::no);
                     return rows.insert_before(_next_row.get_iterator_in_latest_version(), *new_entry);
                 });
+                _snp->tracker()->insert(*it);
                 _last_row = partition_snapshot_row_weakref(*_snp, it, true);
             } else {
                 _read_context->cache().on_mispopulate();
