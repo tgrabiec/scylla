@@ -102,6 +102,7 @@ cache_tracker::setup_metrics() {
         sm::make_derive("static_row_insertions", sm::description("total number of static rows added to cache"), _stats.static_row_insertions),
         sm::make_derive("concurrent_misses_same_key", sm::description("total number of operation with misses same key"), _stats.concurrent_misses_same_key),
         sm::make_derive("partition_merges", sm::description("total number of partitions merged"), _stats.partition_merges),
+        sm::make_derive("row_flushes", sm::description("total number of rows flushed from memtables"), _stats.row_flushes),
         sm::make_derive("partition_evictions", sm::description("total number of evicted partitions"), _stats.partition_evictions),
         sm::make_derive("partition_removals", sm::description("total number of invalidated partitions"), _stats.partition_removals),
         sm::make_derive("mispopulations", sm::description("number of entries not inserted by reads"), _stats.mispopulations),
@@ -176,6 +177,10 @@ void cache_tracker::on_remove(rows_entry& row) noexcept {
 
 void cache_tracker::on_partition_merge() {
     ++_stats.partition_merges;
+}
+
+void cache_tracker::on_row_flushed() {
+    ++_stats.row_flushes;
 }
 
 void cache_tracker::on_partition_hit() {
