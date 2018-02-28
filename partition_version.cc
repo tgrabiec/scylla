@@ -532,6 +532,7 @@ void partition_entry::apply_to_incomplete(const schema& s, partition_version* ve
             rows_entry* e = cur.ensure_entry_if_complete(source.position());
             if (e) {
                 source.consume_row([&] (deletable_row&& row) {
+                    tracker.on_row_flushed();
                     e->row().apply_monotonically(s, std::move(row));
                 });
             }

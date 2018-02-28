@@ -202,6 +202,7 @@ public:
         uint64_t static_row_insertions;
         uint64_t concurrent_misses_same_key;
         uint64_t partition_merges;
+        uint64_t row_flushes;
         uint64_t partition_evictions;
         uint64_t partition_removals;
         uint64_t row_evictions;
@@ -244,6 +245,7 @@ public:
     void on_partition_miss();
     void on_partition_eviction();
     void on_row_eviction();
+    void on_row_flushed();
     void on_row_hit();
     void on_row_miss();
     void on_miss_already_populated();
