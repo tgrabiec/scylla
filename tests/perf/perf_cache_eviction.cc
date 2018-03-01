@@ -30,6 +30,8 @@
 #include "utils/int_range.hh"
 #include "utils/div_ceil.hh"
 #include <seastar/core/reactor.hh>
+#include <seastar/net/dns.hh>
+#include "core/prometheus.hh"
 
 logging::logger test_log("test");
 
@@ -53,6 +55,23 @@ public:
     }
 };
 
+void start_prometheus(const db::config& cfg) {
+    static thread_local httpd::http_server_control prometheus_server;
+    prometheus::config pctx;
+    auto prom_addr = seastar::net::dns::get_host_by_name(cfg.prometheus_address()).get0();
+    uint16_t pport = cfg.prometheus_port();
+    if (pport) {
+        pctx.metric_help = "Scylla server statistics";
+        pctx.prefix = cfg.prometheus_prefix();
+        prometheus_server.start("prometheus").get();
+        engine().at_exit([] {
+            return prometheus_server.stop();
+        });
+        prometheus::start(prometheus_server, pctx);
+        prometheus_server.listen(ipv4_addr{prom_addr.addr_list.front(), pport}).get();
+    }
+}
+
 int main(int argc, char** argv) {
     namespace bpo = boost::program_options;
     app_template app;
@@ -74,6 +93,8 @@ int main(int argc, char** argv) {
         return do_with_cql_env_thread([&app] (cql_test_env& env) {
             auto reads_enabled = !app.configuration().count("no-reads");
             auto seconds = app.configuration()["seconds"].as<unsigned>();
+
+            start_prometheus(env.local_db().get_config());
 
             engine().at_exit([] {
                 cancelled = true;
