@@ -668,7 +668,7 @@ SEASTAR_TEST_CASE(test_reading_from_random_partial_partition) {
         memtable_snapshot_source underlying(gen.schema());
         underlying.apply(make_fully_continuous(m1));
 
-        row_cache cache(gen.schema(), snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(gen.schema(), underlying, tracker);
 
         cache.populate(m1); // m1 is supposed to have random continuity and populate() should preserve it
 
@@ -699,7 +699,7 @@ SEASTAR_TEST_CASE(test_random_partition_population) {
         memtable_snapshot_source underlying(gen.schema());
         underlying.apply(m1);
 
-        row_cache cache(gen.schema(), snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(gen.schema(), underlying, tracker);
 
         assert_that(cache.make_reader(gen.schema()))
             .produces(m1)
@@ -1383,7 +1383,7 @@ SEASTAR_TEST_CASE(test_mvcc) {
             underlying.apply(m1);
 
             cache_tracker tracker;
-            row_cache cache(s, snapshot_source([&] { return underlying(); }), tracker);
+            row_cache cache(s, underlying, tracker);
 
             auto pk = m1.key();
             cache.populate(m1);
@@ -1642,7 +1642,7 @@ SEASTAR_TEST_CASE(test_update_invalidating) {
         auto m2 = mutation_for_key(keys[3]);
         underlying.apply(m2);
 
-        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(s.schema(), underlying, tracker);
 
         assert_that(cache.make_reader(s.schema()))
             .produces(m1)
@@ -1815,7 +1815,7 @@ SEASTAR_TEST_CASE(test_tombstone_merging_in_partial_partition) {
         s.add_row(m2, s.make_ckey(8), "val");
         underlying.apply(m2);
 
-        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(s.schema(), underlying, tracker);
 
         {
             auto slice = partition_slice_builder(*s.schema())
@@ -1882,7 +1882,7 @@ SEASTAR_TEST_CASE(test_readers_get_all_data_after_eviction) {
         underlying.apply(m1);
 
         cache_tracker tracker;
-        row_cache cache(s, snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(s, underlying, tracker);
         cache.populate(m1);
 
         auto apply = [&] (mutation m) {
@@ -1936,7 +1936,7 @@ SEASTAR_TEST_CASE(test_single_tombstone_with_small_buffer) {
 
         underlying.apply(m1);
 
-        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(s.schema(), underlying, tracker);
 
         populate_range(cache);
 
@@ -1968,7 +1968,7 @@ SEASTAR_TEST_CASE(test_tombstone_and_row_with_small_buffer) {
 
         underlying.apply(m1);
 
-        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(s.schema(), underlying, tracker);
 
         populate_range(cache);
 
@@ -2013,7 +2013,7 @@ SEASTAR_TEST_CASE(test_tombstones_are_not_missed_when_range_is_invalidated) {
 
         underlying.apply(m1);
 
-        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(s.schema(), underlying, tracker);
 
         auto make_reader = [&] (const query::partition_slice& slice) {
             auto rd = cache.make_reader(s.schema(), pr, slice);
@@ -2189,7 +2189,7 @@ SEASTAR_TEST_CASE(test_exception_safety_of_reads) {
         auto mut = make_fully_continuous(gen());
         underlying.apply(mut);
 
-        row_cache cache(s, snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(s, underlying, tracker);
         auto&& injector = memory::local_failure_injector();
 
         auto run_queries = [&] {
@@ -2259,7 +2259,7 @@ SEASTAR_TEST_CASE(test_exception_safety_of_transitioning_from_underlying_read_to
         mut.partition().apply_row_tombstone(*s.schema(), rt);
         underlying.apply(mut);
 
-        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(s.schema(), underlying, tracker);
 
         auto&& injector = memory::local_failure_injector();
 
@@ -2310,7 +2310,7 @@ SEASTAR_TEST_CASE(test_exception_safety_of_partition_scan) {
             underlying.apply(mut);
         }
 
-        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(s.schema(), underlying, tracker);
 
         auto&& injector = memory::local_failure_injector();
 
@@ -2347,7 +2347,7 @@ SEASTAR_TEST_CASE(test_concurrent_population_before_latest_version_iterator) {
         s.add_row(m1, s.make_ckey(1), "v");
         underlying.apply(m1);
 
-        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(s.schema(), underlying, tracker);
 
         auto make_reader = [&] (const query::partition_slice& slice) {
             auto rd = cache.make_reader(s.schema(), pr, slice);
@@ -2437,7 +2437,7 @@ SEASTAR_TEST_CASE(test_concurrent_populating_partition_range_reads) {
             underlying.apply(m);
         }
 
-        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(s.schema(), underlying, tracker);
 
         // Check the case when one reader inserts entries after the other reader's range but before
         // that readers upper bound at the time the read started.
@@ -2509,7 +2509,7 @@ SEASTAR_TEST_CASE(test_random_row_population) {
         unsigned max_key = 9;
         underlying.apply(m1);
 
-        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(s.schema(), underlying, tracker);
 
         auto make_reader = [&] (const query::partition_slice* slice = nullptr) {
             auto rd = cache.make_reader(s.schema(), pr, slice ? *slice : s.schema()->full_slice());
@@ -2574,7 +2574,7 @@ SEASTAR_TEST_CASE(test_no_misses_when_read_is_repeated) {
         auto pr = dht::partition_range::make_singular(m1.decorated_key());
 
         cache_tracker tracker;
-        row_cache cache(gen.schema(), snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(gen.schema(), underlying, tracker);
 
         for (auto n_ranges : {1, 2, 4}) {
             auto ranges = gen.make_random_ranges(n_ranges);
@@ -2618,7 +2618,7 @@ SEASTAR_TEST_CASE(test_continuity_is_populated_when_read_overlaps_with_older_ver
         mutation m4(s.schema(), pk);
         s.add_row(m4, s.make_ckey(14), "v");
 
-        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(s.schema(), underlying, tracker);
 
         auto apply = [&] (mutation m) {
             auto mt = make_lw_shared<memtable>(m.schema());
@@ -2746,7 +2746,7 @@ SEASTAR_TEST_CASE(test_continuity_population_with_multicolumn_clustering_key) {
         mutation m2(s, pk);
         m2.partition().clustered_row(*s, ck6).apply(new_tombstone());
 
-        row_cache cache(s, snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(s, underlying, tracker);
 
         auto apply = [&] (mutation m) {
             auto mt = make_lw_shared<memtable>(m.schema());
@@ -2811,7 +2811,7 @@ SEASTAR_TEST_CASE(test_continuity_is_populated_for_single_row_reads) {
         s.add_row(m1, s.make_ckey(6), "v6");
         underlying.apply(m1);
 
-        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(s.schema(), underlying, tracker);
 
         populate_range(cache, pr, query::clustering_range::make_singular(s.make_ckey(2)));
         check_continuous(cache, pr, query::clustering_range::make_singular(s.make_ckey(2)));
@@ -2859,7 +2859,7 @@ SEASTAR_TEST_CASE(test_concurrent_setting_of_continuity_on_read_upper_bound) {
         mutation m2(s.schema(), pk);
         s.add_row(m2, s.make_ckey(4), "v2");
 
-        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(s.schema(), underlying, tracker);
 
         auto make_rd = [&] (const query::partition_slice* slice = nullptr) {
             auto rd = cache.make_reader(s.schema(), pr, slice ? *slice : s.schema()->full_slice());
@@ -2923,7 +2923,7 @@ SEASTAR_TEST_CASE(test_tombstone_merging_of_overlapping_tombstones_in_many_versi
         m2.partition().apply_delete(*s.schema(),
             s.make_range_tombstone(s.make_ckey_range(1, 100), s.new_tombstone()));
 
-        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(s.schema(), underlying, tracker);
 
         auto make_reader = [&] {
             auto rd = cache.make_reader(s.schema());
@@ -2959,7 +2959,7 @@ SEASTAR_TEST_CASE(test_concurrent_reads_and_eviction) {
         versions.emplace_back(m0);
 
         cache_tracker tracker;
-        row_cache cache(s, snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(s, underlying, tracker);
 
         auto pr = dht::partition_range::make_singular(m0.decorated_key());
         auto make_reader = [&] (const query::partition_slice& slice) {
@@ -3063,7 +3063,7 @@ SEASTAR_TEST_CASE(test_cache_update_and_eviction_preserves_monotonicity_of_memta
 
         cache_tracker tracker;
         memtable_snapshot_source underlying(s);
-        row_cache cache(s, snapshot_source([&] { return underlying(); }), tracker, is_continuous::yes);
+        row_cache cache(s, underlying, tracker, is_continuous::yes);
 
         lw_shared_ptr<memtable> mt = make_lw_shared<memtable>(s);
 
@@ -3112,7 +3112,7 @@ SEASTAR_TEST_CASE(test_hash_is_cached) {
         memtable_snapshot_source underlying(s);
         underlying.apply(mut);
 
-        row_cache cache(s, snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(s, underlying, tracker);
 
         {
             auto rd = cache.make_reader(s);
@@ -3181,7 +3181,7 @@ SEASTAR_TEST_CASE(test_random_population_with_many_versions) {
         m3.partition().make_fully_continuous();
 
         cache_tracker tracker;
-        row_cache cache(s, snapshot_source([&] { return underlying(); }), tracker);
+        row_cache cache(s, underlying, tracker);
 
         auto make_reader = [&] () {
             auto rd = cache.make_reader(s, query::full_partition_range, s->full_slice());
@@ -3272,7 +3272,7 @@ SEASTAR_TEST_CASE(test_eviction_after_old_snapshot_touches_overriden_rows_keeps_
         {
             memtable_snapshot_source underlying(s);
             cache_tracker tracker;
-            row_cache cache(s, snapshot_source([&] { return underlying(); }), tracker);
+            row_cache cache(s, underlying, tracker);
 
             auto pk = table.make_pkey();
 
@@ -3311,7 +3311,7 @@ SEASTAR_TEST_CASE(test_eviction_after_old_snapshot_touches_overriden_rows_keeps_
         {
             memtable_snapshot_source underlying(s);
             cache_tracker tracker;
-            row_cache cache(s, snapshot_source([&] { return underlying(); }), tracker);
+            row_cache cache(s, underlying, tracker);
 
             auto pk = table.make_pkey();
 

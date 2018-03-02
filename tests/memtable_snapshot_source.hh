@@ -131,4 +131,7 @@ public:
         on_new_memtable();
         return make_combined_mutation_source(std::move(src));
     }
+    operator snapshot_source() {
+        return snapshot_source([&] { return (*this)(); });
+    }
 };
