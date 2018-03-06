@@ -109,7 +109,7 @@ class partition_snapshot_row_cursor final {
     friend class partition_snapshot_row_weakref;
     struct position_in_version {
         mutation_partition::rows_type::iterator it;
-        mutation_partition::rows_type::iterator end;
+        partition_version* v;
         int version_no;
 
         struct less_compare {
@@ -171,7 +171,7 @@ class partition_snapshot_row_cursor final {
             auto end = rows.end();
             _iterators.push_back(pos);
             if (pos != end) {
-                _heap.push_back({pos, end, version_no});
+                _heap.push_back({pos, &v, version_no});
             }
             ++version_no;
         }
@@ -224,7 +224,7 @@ public:
                     boost::range::make_heap(_heap, heap_less);
                 }
             } else if (eq(_position, it->position())) {
-                _current_row.insert(_current_row.begin(), position_in_version{it, rows.end(), 0});
+                _current_row.insert(_current_row.begin(), position_in_version{it, &*_snp.version(), 0});
                 if (heap_i != _heap.end()) {
                     _heap.erase(heap_i);
                     boost::range::make_heap(_heap, heap_less);
@@ -234,7 +234,7 @@ public:
                     heap_i->it = it;
                     boost::range::make_heap(_heap, heap_less);
                 } else {
-                    _heap.push_back({it, rows.end(), 0});
+                    _heap.push_back({it, &*_snp.version(), 0});
                     boost::range::push_heap(_heap, heap_less);
                 }
             }
@@ -273,7 +273,7 @@ public:
         for (auto&& curr : _current_row) {
             ++curr.it;
             _iterators[curr.version_no] = curr.it;
-            if (curr.it != curr.end) {
+            if (curr.it != curr.v->partition().clustered_rows().end()) {
                 _heap.push_back(curr);
                 boost::range::push_heap(_heap, heap_less);
             }
@@ -345,28 +345,52 @@ public:
     // Doesn't change logical value of mutation_partition or continuity of the snapshot.
     // The cursor doesn't have to be valid.
     // The cursor is invalid after the call.
-    // Assumes the snapshot is evictable.
+    // Assumes the snapshot is evictable and _snp.at_latest_version().
     stdx::optional<ensure_result> ensure_entry_if_complete(position_in_partition_view pos) {
-        prepare_heap(pos);
-        if (!_heap.empty()) {
-            recreate_current_row();
-            position_in_partition::equal_compare eq(_schema);
-            if (eq(position(), pos)) {
-                if (dummy()) {
-                    return stdx::nullopt;
+        position_in_partition::equal_compare eq(_schema);
+        rows_entry::compare less(_schema);
+
+        if (!iterators_valid()) {
+            _heap.clear();
+            int version_no = 0;
+            for (auto&& v : _snp.versions()) {
+                auto& rows = v.partition().clustered_rows();
+                auto i = rows.lower_bound(pos, less);
+                _heap.push_back({i, &v, version_no});
+                ++version_no;
+            }
+            _change_mark = _snp.get_change_mark();
+        }
+
+        for (position_in_version& e : _heap) {
+            if (less(e.it->position(), pos)) {
+                auto& rows = e.v->partition().clustered_rows();
+                auto i = rows.lower_bound(pos, less);
+                assert(i != rows.end()); // there must be last dummy in each version
+                e.it = i;
+            }
+            if (eq(e.it->position(), pos)) {
+                if (e.version_no == 0) {
+                    _snp.tracker()->touch(*e.it);
+                    return ensure_result{*e.it, false};
+                } else {
+                    auto latest_i = _heap[0].it;
+                    auto e2 = current_allocator().construct<rows_entry>(*_current_row[0].it);
+                    e2->set_continuous(latest_i->continuous());
+                    _snp.tracker()->insert(*e2);
+                    e.v->partition().clustered_rows().insert_before(latest_i, *e2);
+                    return ensure_result{*e2, true};
                 }
-                return ensure_entry_in_latest();
-            } else if (!continuous()) {
-                return stdx::nullopt;
+            } else if (e.it->continuous()) {
+                auto&& rows = _snp.version()->partition().clustered_rows();
+                auto latest_i = _heap[0].it;
+                auto e2 = current_allocator().construct<rows_entry>(_schema, pos, is_dummy::no, is_continuous(latest_i->continuous()));
+                _snp.tracker()->insert(*e2);
+                rows.insert_before(latest_i, *e2);
+                return ensure_result{*e2, true};
             }
         }
-        auto&& rows = _snp.version()->partition().clustered_rows();
-        auto latest_i = get_iterator_in_latest_version();
-        auto e = current_allocator().construct<rows_entry>(_schema, pos, is_dummy(!pos.is_clustering_row()),
-            is_continuous(latest_i != rows.end() && latest_i->continuous()));
-        _snp.tracker()->insert(*e);
-        rows.insert_before(latest_i, *e);
-        return ensure_result{*e, true};
+        return stdx::nullopt;
     }
 
     // Brings the entry pointed to by the cursor to the front of the LRU

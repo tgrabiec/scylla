@@ -968,33 +968,44 @@ future<> row_cache::do_update(external_updater eu, memtable& m, Updater updater)
     m.on_detach_from_region_group();
     _tracker.region().merge(m); // Now all data in memtable belongs to cache
     STAP_PROBE(scylla, row_cache_update_start);
+    clogger.info("start");
     auto cleanup = defer([&m, this] {
         invalidate_sync(m);
         STAP_PROBE(scylla, row_cache_update_end);
+        clogger.info("end");
     });
-
+    clogger.info("{}", __LINE__);
     return seastar::async([this, &m, updater = std::move(updater), real_dirty_acc = std::move(real_dirty_acc)] () mutable {
+        clogger.info("{}", __LINE__);
         // In case updater fails, we must bring the cache to consistency without deferring.
         auto cleanup = defer([&m, this] {
+            clogger.info("{}", __LINE__);
             invalidate_sync(m);
             _prev_snapshot_pos = {};
             _prev_snapshot = {};
         });
+        clogger.info("{}", __LINE__);
         partition_presence_checker is_present = _prev_snapshot->make_partition_presence_checker();
         while (!m.partitions.empty()) {
+            clogger.info("{}", __LINE__);
             with_allocator(_tracker.allocator(), [&] () {
+                clogger.info("{}", __LINE__);
                 auto cmp = cache_entry::compare(_schema);
                 {
+                    clogger.info("{}", __LINE__);
                     _update_section(_tracker.region(), [&] {
+                        clogger.info("{}", __LINE__);
                         STAP_PROBE(scylla, row_cache_update_one_batch_start);
                         // FIXME: we should really be checking should_yield() here instead of
                         // need_preempt(). However, should_yield() is currently quite
                         // expensive and we need to amortize it somehow.
                         do {
                           auto i = m.partitions.begin();
+                            clogger.info("{}", __LINE__);
                           STAP_PROBE(scylla, row_cache_update_partition_start);
                           with_linearized_managed_bytes([&] {
                            {
+                               clogger.info("{}", __LINE__);
                             memtable_entry& mem_e = *i;
                             auto size_entry = mem_e.size_in_allocator(_tracker.allocator());
 
@@ -1004,24 +1015,36 @@ future<> row_cache::do_update(external_updater eu, memtable& m, Updater updater)
                             real_dirty_acc.unpin_memory(size_entry);
                             i = m.partitions.erase(i);
                             current_allocator().destroy(&mem_e);
+                               clogger.info("{}", __LINE__);
                            }
                           });
+                            clogger.info("{}", __LINE__);
                           STAP_PROBE(scylla, row_cache_update_partition_end);
                         } while (!m.partitions.empty() && !need_preempt());
+                        clogger.info("{}", __LINE__);
                         with_allocator(standard_allocator(), [&] {
+                            clogger.info("{}", __LINE__);
                             if (m.partitions.empty()) {
                                 _prev_snapshot_pos = {};
                             } else {
                                 _prev_snapshot_pos = dht::ring_position(m.partitions.begin()->key());
                             }
                         });
+                        clogger.info("{}", __LINE__);
                         STAP_PROBE(scylla, row_cache_update_one_batch_end);
                     });
+                    clogger.info("{}", __LINE__);
                 }
+                clogger.info("{}", __LINE__);
             });
-            seastar::thread::yield();
+            clogger.info("{}", __LINE__);
+            //seastar::thread::yield();
+            clogger.info("{}", __LINE__);
         }
-    }).finally([cleanup = std::move(cleanup)] {});
+        clogger.info("{}", __LINE__);
+    }).finally([cleanup = std::move(cleanup)] {
+        clogger.info("{}", __LINE__);
+    });
   });
 }
 

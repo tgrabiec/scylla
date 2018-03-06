@@ -309,7 +309,23 @@ public:
             ss.start(std::ref(*db), std::ref(*auth_service)).get();
             auto stop_storage_service = defer([&ss] { ss.stop().get(); });
 
-            db->start(std::move(*cfg), database_config()).get();
+            // Note: changed from using a move here, because we want the config object intact.
+            database_config dbcfg;
+            auto make_sched_group = [&] (sstring name, unsigned shares) {
+                if (cfg->cpu_scheduler()) {
+                    return seastar::create_scheduling_group(name, shares).get0();
+                } else {
+                    return seastar::scheduling_group();
+                }
+            };
+            dbcfg.compaction_scheduling_group = make_sched_group("compaction", 1000);
+            dbcfg.streaming_scheduling_group = make_sched_group("streaming", 200);
+            dbcfg.query_scheduling_group = make_sched_group("query", 1000);
+            dbcfg.memtable_scheduling_group = make_sched_group("memtable", 1000);
+            dbcfg.memtable_to_cache_scheduling_group = make_sched_group("memtable_to_cache", 200);
+            dbcfg.commitlog_scheduling_group = make_sched_group("commitlog", 1000);
+
+            db->start(std::move(*cfg), dbcfg).get();
             auto stop_db = defer([db] {
                 db->stop().get();
             });

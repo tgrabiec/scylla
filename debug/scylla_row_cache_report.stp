@@ -5,10 +5,11 @@
 #
 global batch_start_time
 global batch_latencies;
-global partition_count;
 
 global start_time
 global latencies;
+
+global partition_start;
 
 
 probe process.mark("row_cache_update_one_batch_start") {
@@ -19,7 +20,6 @@ probe process.mark("row_cache_update_one_batch_end") {
     if (batch_start_time[tid()]) {
         lat = (gettimeofday_ns() - batch_start_time[tid()]);
         batch_latencies <<< lat;
-        partition_count <<< $arg1;
         delete batch_start_time[tid()]
     }
 }
@@ -31,8 +31,24 @@ probe process.mark("row_cache_update_start") {
 probe process.mark("row_cache_update_end") {
     if (start_time[tid()]) {
         lat = (gettimeofday_us() - start_time[tid()]);
+        print("Update: ");
+        println(lat);
         latencies <<< lat;
         delete start_time[tid()]
+    }
+}
+
+probe process.mark("row_cache_update_partition_start") {
+    partition_start[tid()] = gettimeofday_us()
+}
+
+probe process.mark("row_cache_update_partition_end") {
+    if (partition_start[tid()]) {
+        lat = (gettimeofday_us() - partition_start[tid()]);
+        print("partition: ");
+        println(lat);
+        latencies <<< lat;
+        delete partition_start[tid()]
     }
 }
 
@@ -46,13 +62,7 @@ probe end {
     println(@hist_log(latencies));
     println("Time spent per partition batch (nsec)");
     print(@hist_log(batch_latencies));
-    println("Partitions updated per batch:");
-    println(@hist_log(partition_count));
 
-    println("Total partitions updated:");
-    println(@sum(partition_count));
     println("Average time spent per partition batch (nsec)");
     println(@avg(batch_latencies));
-    println("Average time per partition per partition (nsec)");
-    println(@sum(batch_latencies) / @sum(partition_count));
 }

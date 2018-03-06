@@ -335,7 +335,7 @@ struct segment {
 class segment_zone;
 
 static constexpr size_t max_managed_object_size = segment_size * 0.1;
-static constexpr size_t max_used_space_for_compaction = segment_size * 0.85;
+static constexpr size_t max_used_space_for_compaction = segment_size * 0.5;
 static constexpr size_t min_free_space_for_compaction = segment_size - max_used_space_for_compaction;
 
 static_assert(min_free_space_for_compaction >= max_managed_object_size,
