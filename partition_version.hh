@@ -234,6 +234,32 @@ public:
 
     bool is_unique_owner() const { return _unique_owner; }
     void mark_as_unique_owner() { _unique_owner = true; }
+
+    // Inserts v before the version referenced by this (if any) and starts referencing v.
+    // is_unique_owner() remains unchanged.
+    void push_front(partition_version& v) noexcept {
+        if (_version) {
+            v.insert_before(*_version);
+            _version->_backref = nullptr;
+        }
+        _version = &v;
+        assert(!v._backref);
+        v._backref = this;
+    }
+
+    // Removes the referenced version from its list and switches to the next one in the list.
+    // The next version must not be referenced.
+    // is_unique_owner() remains unchanged.
+    void pop_front() noexcept {
+        auto next = _version->next();
+        _version->erase();
+        _version->_backref = nullptr;
+        _version = next;
+        if (next) {
+            assert(!next->_backref);
+            next->_backref = this;
+        }
+    }
 };
 
 inline
