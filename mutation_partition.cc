@@ -2195,7 +2195,7 @@ clustering_interval_set mutation_partition::get_continuity(const schema& s, is_c
     return result;
 }
 
-stop_iteration mutation_partition::clear_gently() noexcept {
+stop_iteration mutation_partition::clear_gently(cache_tracker* tracker) noexcept {
     if (_row_tombstones.clear_gently() == stop_iteration::no) {
         return stop_iteration::no;
     }
@@ -2204,7 +2204,11 @@ stop_iteration mutation_partition::clear_gently() noexcept {
     auto i = _rows.begin();
     auto end = _rows.end();
     while (i != end) {
+        if (tracker) {
+            tracker->on_remove(*i);
+        }
         i = _rows.erase_and_dispose(i, del);
+
         // The iterator comparison below is to not defer destruction of now empty
         // mutation_partition objects. Not doing this would cause eviction to leave garbage
         // versions behind unnecessarily.
@@ -2308,7 +2312,7 @@ memory::reclaiming_result mutation_cleaner::clear_some() noexcept {
     }
     auto&& alloc = current_allocator();
     partition_version& pv = *_head;
-    if (pv.clear_gently() == stop_iteration::yes) {
+    if (pv.clear_gently(_tracker) == stop_iteration::yes) {
         if (_tail && _head->next() == &*_tail) {
             _tail = {};
         }
