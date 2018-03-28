@@ -36,6 +36,7 @@
 #include "counters.hh"
 #include "row_cache.hh"
 #include "view_info.hh"
+#include "mutation_cleaner.hh"
 #include <seastar/core/execution_stage.hh>
 
 template<bool reversed>
@@ -2287,4 +2288,57 @@ future<mutation_opt> counter_write_query(schema_ptr s, const mutation_source& so
             *s, gc_clock::now(), slice, query::max_rows, query::max_rows, std::move(cwqrb));
     auto f = r_a_r->reader.consume(std::move(cfq), flat_mutation_reader::consume_reversed_partitions::no);
     return f.finally([r_a_r = std::move(r_a_r)] { });
+}
+
+mutation_cleaner::~mutation_cleaner() {
+    with_allocator(_region.allocator(), [this] {
+        clear();
+    });
+}
+
+void mutation_cleaner::clear() noexcept {
+    while (clear_gently() == stop_iteration::no) ;
+}
+
+stop_iteration mutation_cleaner::clear_gently() noexcept {
+    while (clear_some() == memory::reclaiming_result::reclaimed_something) {
+        if (need_preempt()) {
+            return stop_iteration::no;
+        }
+    }
+    return stop_iteration::yes;
+}
+
+memory::reclaiming_result mutation_cleaner::clear_some() noexcept {
+    if (!_head) {
+        return memory::reclaiming_result::reclaimed_nothing;
+    }
+    auto&& alloc = current_allocator();
+    partition_version& pv = *_head;
+    if (pv.clear_gently() == stop_iteration::yes) {
+        if (_tail && _head->next() == &*_tail) {
+            _tail = {};
+        }
+        _head.pop_front();
+        alloc.destroy(&pv);
+    }
+    return memory::reclaiming_result::reclaimed_something;
+}
+
+void mutation_cleaner::merge(mutation_cleaner& r) noexcept {
+    if (!r._head) {
+        return;
+    }
+    if (!_head) {
+        _head = std::move(r._head);
+        _tail = std::move(r._tail);
+    } else {
+        (_tail ? _tail : _head)->join(*r._head);
+        if (r._tail) {
+            _tail = std::move(r._tail);
+            r._head = {};
+        } else {
+            _tail = std::move(r._head);
+        }
+    }
 }
