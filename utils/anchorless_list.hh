@@ -162,6 +162,13 @@ public:
             _next->_prev = this;
         }
     }
+    // Inserts a chain pointed to by list after this elem,
+    // assumes !head.prev() and !next().
+    void join(T& head) {
+        auto e = static_cast<anchorless_list_base_hook*>(&head);
+        _next = e;
+        e->_prev = this;
+    }
     // Inserts this before elem.
     void insert_before(T& elem) {
         auto e = static_cast<anchorless_list_base_hook*>(&elem);
