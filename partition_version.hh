@@ -376,6 +376,8 @@ public:
     std::vector<range_tombstone> range_tombstones();
 };
 
+class real_dirty_memory_accounter;
+
 // Represents mutation_partition with snapshotting support a la MVCC.
 //
 // Internally the state is represented by an ordered list of mutation_partition
@@ -484,7 +486,7 @@ public:
     // such that if the operation is retried (possibly many times) and eventually
     // succeeds the result will be as if the first attempt didn't fail.
     coroutine apply_to_incomplete(const schema& s, partition_entry&& pe, const schema& pe_schema, logalloc::allocating_section&,
-        logalloc::region&, cache_tracker&, partition_snapshot::phase_type);
+        logalloc::region&, cache_tracker&, partition_snapshot::phase_type, real_dirty_memory_accounter&);
 
     // If this entry is evictable, cache_tracker must be provided.
     partition_version& add_version(const schema& s, cache_tracker*);
