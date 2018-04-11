@@ -404,9 +404,6 @@ private:
     coroutine with_detached_versions(Func&&);
 
     void set_version(partition_version*);
-
-    coroutine apply_to_incomplete(const schema& s, partition_version* other, logalloc::region&, cache_tracker&,
-        partition_snapshot::phase_type);
 public:
     struct evictable_tag {};
     class rows_iterator;
