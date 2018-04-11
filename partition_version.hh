@@ -405,7 +405,8 @@ private:
 
     void set_version(partition_version*);
 
-    coroutine apply_to_incomplete(const schema& s, partition_version* other, logalloc::region&, cache_tracker&);
+    coroutine apply_to_incomplete(const schema& s, partition_version* other, logalloc::region&, cache_tracker&,
+        partition_snapshot::phase_type);
 public:
     struct evictable_tag {};
     class rows_iterator;
@@ -484,7 +485,8 @@ public:
     // If an exception is thrown this and pe will be left in some valid states
     // such that if the operation is retried (possibly many times) and eventually
     // succeeds the result will be as if the first attempt didn't fail.
-    coroutine apply_to_incomplete(const schema& s, partition_entry&& pe, const schema& pe_schema, logalloc::region&, cache_tracker&);
+    coroutine apply_to_incomplete(const schema& s, partition_entry&& pe, const schema& pe_schema, logalloc::region&, cache_tracker&,
+        partition_snapshot::phase_type);
 
     // If this entry is evictable, cache_tracker must be provided.
     partition_version& add_version(const schema& s, cache_tracker*);
