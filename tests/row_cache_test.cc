@@ -3004,14 +3004,33 @@ SEASTAR_TEST_CASE(test_concurrent_reads_and_eviction) {
                     auto n_to_consider = last_generation - oldest_generation + 1;
                     auto possible_versions = boost::make_iterator_range(versions.end() - n_to_consider, versions.end());
                     if (!boost::algorithm::any_of(possible_versions, [&] (const mutation& m) {
-                        auto m2 = m.sliced(ranges);
-                        if (n_to_consider == 1) {
-                            assert_that(actual).is_equal_to(m2);
-                        }
-                        return m2 == actual;
+                        return m.sliced(ranges) == actual;
                     })) {
-                        BOOST_FAIL(sprint("Mutation read doesn't match any expected version, slice: %s, read: %s\nexpected: [%s]",
-                            slice, actual, ::join(",\n", possible_versions)));
+                        int i = 0;
+                        for (auto&& m : possible_versions) {
+                            auto m2 = m.sliced(ranges);
+                            std::ofstream of(std::string("mut") + std::to_string(i++));
+                            of << sprint("Mutations differ, expected %s\n ...but got: %s", m2, actual) << "\n";
+                            of.close();
+                        }
+                        auto n_versions = i;
+
+                        {
+                            auto v2 = possible_versions.begin();
+                            auto v1 = v2++;
+                            i = 0;
+                            while (v2 != possible_versions.end()) {
+                                auto m1 = v1->sliced(ranges);
+                                auto m2 = v2->sliced(ranges);
+                                std::ofstream of(std::string("diff") + std::to_string(i++));
+                                of << sprint("Mutations differ, expected %s\n ...but got: %s", m1, m2) << "\n";
+                                of.close();
+                                v1 = v2++;
+                            }
+                        }
+
+                        BOOST_FAIL(sprint("Mutation read doesn't match any expected version (there are %d), slice: %s, read: %s\nexpected: [%s]",
+                            n_versions, slice, actual, ::join(",\n", possible_versions)));
                     }
                 }
             }).finally([&, id] {
