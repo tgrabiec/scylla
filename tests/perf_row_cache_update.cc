@@ -27,6 +27,7 @@
 #include <seastar/core/weak_ptr.hh>
 
 #include "utils/managed_bytes.hh"
+#include "utils/extremum_tracking.hh"
 #include "utils/logalloc.hh"
 #include "row_cache.hh"
 #include "log.hh"
@@ -51,6 +52,7 @@ class scheduling_latency_measurer : public weakly_referencable<scheduling_latenc
     using clk = std::chrono::steady_clock;
     clk::time_point _last = clk::now();
     utils::estimated_histogram _hist{300};
+    min_max_tracker<clk::duration> _minmax;
     bool _stop = false;
 private:
     void schedule_tick();
@@ -58,6 +60,7 @@ private:
         auto old = _last;
         _last = clk::now();
         auto latency = _last - old;
+        _minmax.update(latency);
         _hist.add(latency.count());
         if (!_stop) {
             schedule_tick();
@@ -74,6 +77,8 @@ public:
     const utils::estimated_histogram& histogram() const {
         return _hist;
     }
+    clk::duration min() const { return _minmax.min(); }
+    clk::duration max() const { return _minmax.max(); }
 };
 
 void scheduling_latency_measurer::schedule_tick() {
@@ -95,11 +100,11 @@ std::ostream& operator<<(std::ostream& out, const scheduling_latency_measurer& s
                          "99%%: %.6f [ms], "
                          "max: %.6f [ms]}",
         slm.histogram().count(),
-        to_ms(slm.histogram().min()),
+        to_ms(slm.min().count()),
         to_ms(slm.histogram().percentile(0.5)),
         to_ms(slm.histogram().percentile(0.9)),
         to_ms(slm.histogram().percentile(0.99)),
-        to_ms(slm.histogram().max()));
+        to_ms(slm.max().count()));
 }
 
 template<typename MutationGenerator>
