@@ -1189,7 +1189,7 @@ private:
     }
 
     void compact(segment* seg, segment_descriptor& desc) {
-        ++_invalidate_counter;
+        ++_invalidate_counter; // break logalloc.cc:1192
 
         for_each_live(seg, [this] (const object_descriptor* desc, void* obj) {
             auto size = desc->live_size(obj);

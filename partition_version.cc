@@ -445,7 +445,7 @@ coroutine partition_entry::apply_to_incomplete(const schema& s, partition_entry&
     return coroutine([&tracker, &s, &alloc, &reg, &acc, can_move,
             merge_dst_snp = std::move(merge_dst_snp),
             cur = partition_snapshot_row_cursor(s, *dst_snp),
-            src_cur = partition_snapshot_row_cursor(s, *src_snp),
+            src_cur = partition_snapshot_row_cursor(s, *src_snp, can_move),
             dst_snp = std::move(dst_snp),
             prev_snp = std::move(prev_snp),
             src_snp = std::move(src_snp),
@@ -511,7 +511,7 @@ coroutine partition_entry::apply_to_incomplete(const schema& s, partition_entry&
                             tracker.on_row_dropped_from_memtable();
                         }
                     }
-                    auto has_next = src_cur.next();
+                    auto has_next = src_cur.erase_and_advance();
                     acc.unpin_memory(size);
                     if (!has_next) {
                         return stop_iteration::yes;

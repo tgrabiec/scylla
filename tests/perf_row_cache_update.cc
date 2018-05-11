@@ -93,16 +93,16 @@ std::ostream& operator<<(std::ostream& out, const scheduling_latency_measurer& s
     auto to_ms = [] (int64_t nanos) {
         return float(nanos) / 1e6;
     };
-    return out << sprint("{ticks: %d, "
-                         "min: %.6f [ms], "
-                         "50%%: %.6f [ms], "
-                         "90%%: %.6f [ms], "
+    return out << sprint("{count: %d, "
+                         //"min: %.6f [ms], "
+                         //"50%%: %.6f [ms], "
+                         //"90%%: %.6f [ms], "
                          "99%%: %.6f [ms], "
                          "max: %.6f [ms]}",
         slm.histogram().count(),
-        to_ms(slm.min().count()),
-        to_ms(slm.histogram().percentile(0.5)),
-        to_ms(slm.histogram().percentile(0.9)),
+        //to_ms(slm.min().count()),
+        //to_ms(slm.histogram().percentile(0.5)),
+        //to_ms(slm.histogram().percentile(0.9)),
         to_ms(slm.histogram().percentile(0.99)),
         to_ms(slm.max().count()));
 }
@@ -117,6 +117,10 @@ void run_test(const sstring& name, schema_ptr s, MutationGenerator&& gen) {
     std::cout << name << ":\n";
 
     for (int i = 0; i < update_iterations; ++i) {
+        auto MB = 1024 * 1024;
+        auto prefill_compacted = logalloc::memory_compacted();
+        auto prefill_allocated = logalloc::memory_allocated();
+
         auto mt = make_lw_shared<memtable>(s);
         while (mt->occupancy().total_space() < memtable_size) {
             auto pk = dht::global_partitioner().decorate_key(*s, partition_key::from_single_value(*s,
@@ -128,6 +132,19 @@ void run_test(const sstring& name, schema_ptr s, MutationGenerator&& gen) {
             }
         }
 
+        auto prev_compacted = logalloc::memory_compacted();
+        auto prev_allocated = logalloc::memory_allocated();
+
+        std::cout << sprint("cache: %d/%d [MB], memtable: %d/%d [MB], alloc/comp: %d/%d [MB] (amp: %.3f)\n",
+            tracker.region().occupancy().used_space() / MB,
+            tracker.region().occupancy().total_space() / MB,
+            mt->occupancy().used_space() / MB,
+            mt->occupancy().total_space() / MB,
+            (prev_allocated - prefill_allocated) / MB,
+            (prev_compacted - prefill_compacted) / MB,
+            float((prev_compacted - prefill_compacted)) / (prev_allocated - prefill_allocated)
+        );
+
         scheduling_latency_measurer slm;
         slm.start();
         auto d = duration_in_seconds([&] {
@@ -135,15 +152,18 @@ void run_test(const sstring& name, schema_ptr s, MutationGenerator&& gen) {
         });
         slm.stop();
 
-        auto MB = 1024 * 1024;
-        std::cout << sprint("update: %.6f [ms], stall: %s, cache: %d/%d [MB] LSA: %d/%d [MB] std free: %d [MB]\n",
+        auto compacted = logalloc::memory_compacted() - prev_compacted;
+        auto allocated = logalloc::memory_allocated() - prev_allocated;
+
+        std::cout << sprint("update: %.6f [ms], stall: %s, cache: %d/%d [MB], alloc/comp: %d/%d [MB] (amp: %.3f), pr/me/dr %d/%d/%d\n",
             d.count() * 1000,
             slm,
             tracker.region().occupancy().used_space() / MB,
             tracker.region().occupancy().total_space() / MB,
-            logalloc::shard_tracker().region_occupancy().used_space() / MB,
-            logalloc::shard_tracker().region_occupancy().total_space() / MB,
-            seastar::memory::stats().free_memory() / MB);
+            allocated / MB, compacted / MB, float(compacted)/allocated,
+            tracker.get_stats().rows_processed_from_memtable,
+            tracker.get_stats().rows_merged_from_memtable,
+            tracker.get_stats().rows_dropped_from_memtable);
     }
 
     auto d = duration_in_seconds([&] {
@@ -230,8 +250,8 @@ int main(int argc, char** argv) {
                 return make_ready_future();
             });
             test_small_partitions();
-            test_partition_with_lots_of_small_rows();
-            test_partition_with_lots_of_range_tombstones();
+            //test_partition_with_lots_of_small_rows();
+            //test_partition_with_lots_of_range_tombstones();
         });
     });
 }

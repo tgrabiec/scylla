@@ -1020,10 +1020,12 @@ future<> row_cache::update(external_updater eu, memtable& m) {
     return do_update(std::move(eu), m, [this] (logalloc::allocating_section& alloc,
             row_cache::partitions_type::iterator cache_i, memtable_entry& mem_e, partition_presence_checker& is_present,
             real_dirty_memory_accounter& acc) mutable {
+        dht::ring_position_comparator tricmp(*_schema);
         // If cache doesn't contain the entry we cannot insert it because the mutation may be incomplete.
         // FIXME: keep a bitmap indicating which sstables we do cover, so we don't have to
         //        search it.
-        if (cache_i != partitions_end() && cache_i->key().equal(*_schema, mem_e.key())) {
+        assert(cache_i != _partitions.end()); // There must be dummy entry at the last position
+        if (tricmp(cache_i->position(), mem_e.key()) == 0) {
             cache_entry& entry = *cache_i;
             upgrade_entry(entry);
             _tracker.on_partition_merge();

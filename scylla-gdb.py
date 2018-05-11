@@ -764,12 +764,11 @@ class lsa_object_descriptor(object):
     @staticmethod
     def decode(pos):
         def next():
-            global pos
             byte = pos.dereference() & 0xff
-            pos = pos + 1
             return byte
         start_pos = pos
         b = next()
+        pos = pos + 1
         if not (b & 0x40):
             raise Exception('object descriptor at 0x%x does not start with 0x40: 0x%x' % (int(start_pos), int(b)))
         value = b & 0x3f
@@ -777,6 +776,7 @@ class lsa_object_descriptor(object):
         while not (b & 0x80):
             shift += 6
             b = next()
+            pos = pos + 1
             value |= (b & 0x3f) << shift
         return lsa_object_descriptor(value, start_pos, pos)
     mig_re = re.compile(r'.* standard_migrator<(.*)>\+16>,')
