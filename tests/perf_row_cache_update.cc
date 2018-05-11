@@ -95,14 +95,14 @@ std::ostream& operator<<(std::ostream& out, const scheduling_latency_measurer& s
     };
     return out << sprint("{ticks: %d, "
                          "min: %.6f [ms], "
-                         "50%%: %.6f [ms], "
-                         "90%%: %.6f [ms], "
+                         //"50%%: %.6f [ms], "
+                         //"90%%: %.6f [ms], "
                          "99%%: %.6f [ms], "
                          "max: %.6f [ms]}",
         slm.histogram().count(),
         to_ms(slm.min().count()),
-        to_ms(slm.histogram().percentile(0.5)),
-        to_ms(slm.histogram().percentile(0.9)),
+        //to_ms(slm.histogram().percentile(0.5)),
+        //to_ms(slm.histogram().percentile(0.9)),
         to_ms(slm.histogram().percentile(0.99)),
         to_ms(slm.max().count()));
 }
@@ -128,6 +128,9 @@ void run_test(const sstring& name, schema_ptr s, MutationGenerator&& gen) {
             }
         }
 
+        auto prev_compacted = logalloc::memory_compacted();
+        auto prev_allocated = logalloc::memory_allocated();
+
         scheduling_latency_measurer slm;
         slm.start();
         auto d = duration_in_seconds([&] {
@@ -135,15 +138,17 @@ void run_test(const sstring& name, schema_ptr s, MutationGenerator&& gen) {
         });
         slm.stop();
 
+        auto compacted = logalloc::memory_compacted() - prev_compacted;
+        auto allocated = logalloc::memory_allocated() - prev_allocated;
+
         auto MB = 1024 * 1024;
-        std::cout << sprint("update: %.6f [ms], stall: %s, cache: %d/%d [MB] LSA: %d/%d [MB] std free: %d [MB]\n",
+        std::cout << sprint("update: %.6f [ms], stall: %s, cache: %d/%d [MB], all/comp %d/%d (%.3f amp) [MB]\n",
             d.count() * 1000,
             slm,
             tracker.region().occupancy().used_space() / MB,
             tracker.region().occupancy().total_space() / MB,
-            logalloc::shard_tracker().region_occupancy().used_space() / MB,
-            logalloc::shard_tracker().region_occupancy().total_space() / MB,
-            seastar::memory::stats().free_memory() / MB);
+            logalloc::memory_allocated(),
+            logalloc::memory_compacted(), float(compacted)/allocated);
     }
 
     auto d = duration_in_seconds([&] {
@@ -231,7 +236,7 @@ int main(int argc, char** argv) {
             });
             test_small_partitions();
             test_partition_with_lots_of_small_rows();
-            test_partition_with_lots_of_range_tombstones();
+            //test_partition_with_lots_of_range_tombstones();
         });
     });
 }
