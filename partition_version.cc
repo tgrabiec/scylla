@@ -427,7 +427,93 @@ coroutine partition_entry::apply_to_incomplete(const schema& s, partition_entry&
         pe.upgrade(pe_schema.shared_from_this(), s.shared_from_this(), tracker.cleaner(), &tracker);
     }
 
+    auto&& allocator = reg.allocator();
     bool can_move = !pe._snapshot;
+
+    if (0 && s.clustering_key_size() == 0) {
+        auto dst_snp = read(reg, tracker.cleaner(), s.shared_from_this(), &tracker, phase);
+        auto&& dst = dst_snp->version()->partition();
+        auto cur = partition_snapshot_row_cursor(s, *dst_snp);
+
+        size_t dirty_size = 0;
+        bool first = true;
+        for (auto&& v : pe.versions()) {
+            mutation_partition&& src = std::move(v.partition());
+            can_move &= first || !v.is_referenced();
+            first = false;
+
+            if (dst_snp->static_row_continuous()) {
+                dirty_size += allocator.object_memory_size_in_allocator(&*pe.version())
+                              + src.static_row().external_memory_usage();
+                if (can_move) {
+                    dst.static_row().apply(s, column_kind::static_column, std::move(src.static_row()));
+                } else {
+                    dst.static_row().apply(s, column_kind::static_column, src.static_row());
+                }
+            }
+
+            dirty_size += src.row_tombstones().external_memory_usage();
+            if (can_move) {
+                dst.row_tombstones().apply_monotonically(s, std::move(src.row_tombstones()));
+            } else {
+                dst.row_tombstones().apply_monotonically(s, src.row_tombstones());
+            }
+
+            {
+                if (!src.clustered_rows().empty()) {
+                    auto src_i = src.clustered_rows().begin();
+                    rows_entry& r = *src_i;
+                    dirty_size += r.memory_usage();
+                    if (!r.dummy()) {
+
+                        tracker.on_row_processed_from_memtable();
+                        auto ropt = cur.ensure_entry_if_complete(clustering_key::make_empty());
+                        if (ropt) {
+                            if (!ropt->inserted) {
+                                tracker.on_row_merged_from_memtable();
+                            }
+                            rows_entry& e = ropt->row;
+                            if (can_move) {
+                                e.row().apply_monotonically(s, std::move(r.row()));
+                            } else {
+                                e.row().apply_monotonically(s, deletable_row(r.row()));
+                            }
+                        } else {
+                            tracker.on_row_dropped_from_memtable();
+                        }
+
+                        //
+                        //tracker.on_row_processed_from_memtable();
+                        //if (!dst_row.dummy()) {
+                        //    tracker.on_row_merged_from_memtable();
+                        //    if (can_move) {
+                        //        dst_rows.begin()->row().apply_monotonically(s, std::move(r.row()));
+                        //    } else {
+                        //        dst_rows.begin()->row().apply_monotonically(s, deletable_row(r.row()));
+                        //    }
+                        //} else if (dst_row.continuous()) {
+                        //    if (can_move) {
+                        //        src.clustered_rows().erase(src_i);
+                        //        dst_rows.insert_before(dst_rows.begin(), r);
+                        //        r.set_continuous(true);
+                        //        tracker.insert(r);
+                        //    } else {
+                        //        auto& e = *allocator.construct<rows_entry>(r);
+                        //        e.set_continuous(true);
+                        //        dst_rows.insert_before(dst_rows.begin(), e);
+                        //        tracker.insert(e);
+                        //    }
+                        //} else {
+                        //    tracker.on_row_dropped_from_memtable();
+                        //}
+                    }
+                }
+            }
+        }
+        acc.unpin_memory(dirty_size);
+        return make_empty_coroutine();
+    }
+
     auto src_snp = pe.read(reg, tracker.cleaner(), s.shared_from_this(), &tracker);
     // Reads must see prev_snp until whole update completes. We must always preprate a snapshot
     // in case update defers and a read comes later.
@@ -451,11 +537,11 @@ coroutine partition_entry::apply_to_incomplete(const schema& s, partition_entry&
             src_snp = std::move(src_snp),
             static_done = false] () mutable {
         auto&& allocator = reg.allocator();
-        if (!static_done) {
-            // FIXME: defer while applying range tombstones
-            alloc(reg, [&] {
-                with_linearized_managed_bytes([&] {
-                    size_t dirty_size = 0;
+        return alloc(reg, [&] {
+            return with_linearized_managed_bytes([&] {
+                size_t dirty_size = 0;
+
+                if (!static_done) {
                     partition_version& dst = *dst_snp->version();
                     bool static_row_continuous = dst_snp->static_row_continuous();
                     auto current = &*src_snp->version();
@@ -474,6 +560,7 @@ coroutine partition_entry::apply_to_incomplete(const schema& s, partition_entry&
                         }
                         dirty_size += current->partition().row_tombstones().external_memory_usage();
                         range_tombstone_list& tombstones = dst.partition().row_tombstones();
+                        // FIXME: defer while applying range tombstones
                         if (can_move) {
                             tombstones.apply_monotonically(s, std::move(current->partition().row_tombstones()));
                         } else {
@@ -483,17 +570,13 @@ coroutine partition_entry::apply_to_incomplete(const schema& s, partition_entry&
                         can_move &= current && !current->is_referenced();
                     }
                     acc.unpin_memory(dirty_size);
-                });
-            });
-            static_done = true;
-        }
+                    static_done = true;
+                }
 
-        // FIXME: limit amount of allocation inside the section
-        return alloc(reg, [&] {
-            return with_linearized_managed_bytes([&] {
                 if (!src_cur.maybe_refresh_static()) {
                     return stop_iteration::yes;
                 }
+
                 do {
                     auto size = src_cur.memory_usage();
                     if (!src_cur.dummy()) {
