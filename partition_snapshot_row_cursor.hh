@@ -325,7 +325,6 @@ public:
     bool erase_and_advance() {
         memory::on_alloc_point();
         position_in_version::less_compare heap_less(_schema);
-        assert(iterators_valid());
         for (auto&& curr : _current_row) {
             if (curr.unique_owner) {
                 curr.it = curr.rows->erase_and_dispose(curr.it, current_deleter<rows_entry>());
