@@ -39,6 +39,8 @@
 #include "mutation_cleaner.hh"
 #include <seastar/core/execution_stage.hh>
 
+static const lifetime_group rows_lifetime = { 1 };
+
 template<bool reversed>
 struct reversal_traits;
 
@@ -161,7 +163,7 @@ mutation_partition::mutation_partition(const mutation_partition& x, const schema
     try {
         for(auto&& r : ck_ranges) {
             for (const rows_entry& e : x.range(schema, r)) {
-                _rows.insert(_rows.end(), *current_allocator().construct<rows_entry>(e), rows_entry::compare(schema));
+                _rows.insert(_rows.end(), *current_allocator().construct<rows_entry>(rows_lifetime, e), rows_entry::compare(schema));
             }
             for (auto&& rt : x._row_tombstones.slice(schema, r)) {
                 _row_tombstones.apply(schema, rt);
@@ -229,7 +231,7 @@ mutation_partition::operator=(mutation_partition&& x) noexcept {
 void mutation_partition::ensure_last_dummy(const schema& s) {
     if (_rows.empty() || !_rows.rbegin()->is_last_dummy()) {
         _rows.insert_before(_rows.end(),
-            *current_allocator().construct<rows_entry>(s, rows_entry::last_dummy_tag(), is_continuous::yes));
+            *current_allocator().construct<rows_entry>(rows_lifetime, s, rows_entry::last_dummy_tag(), is_continuous::yes));
     }
 }
 
@@ -452,12 +454,12 @@ void mutation_partition::apply_insert(const schema& s, clustering_key_view key, 
     clustered_row(s, key).apply(row_marker(created_at, ttl, expiry));
 }
 void mutation_partition::insert_row(const schema& s, const clustering_key& key, deletable_row&& row) {
-    auto e = current_allocator().construct<rows_entry>(key, std::move(row));
+    auto e = current_allocator().construct<rows_entry>(rows_lifetime, key, std::move(row));
     _rows.insert(_rows.end(), *e, rows_entry::compare(s));
 }
 
 void mutation_partition::insert_row(const schema& s, const clustering_key& key, const deletable_row& row) {
-    auto e = current_allocator().construct<rows_entry>(key, row);
+    auto e = current_allocator().construct<rows_entry>(rows_lifetime, key, row);
     _rows.insert(_rows.end(), *e, rows_entry::compare(s));
 }
 
@@ -474,7 +476,7 @@ deletable_row&
 mutation_partition::clustered_row(const schema& s, clustering_key&& key) {
     auto i = _rows.find(key, rows_entry::compare(s));
     if (i == _rows.end()) {
-        auto e = current_allocator().construct<rows_entry>(std::move(key));
+        auto e = current_allocator().construct<rows_entry>(rows_lifetime, std::move(key));
         _rows.insert(i, *e, rows_entry::compare(s));
         return e->row();
     }
@@ -485,7 +487,7 @@ deletable_row&
 mutation_partition::clustered_row(const schema& s, const clustering_key& key) {
     auto i = _rows.find(key, rows_entry::compare(s));
     if (i == _rows.end()) {
-        auto e = current_allocator().construct<rows_entry>(key);
+        auto e = current_allocator().construct<rows_entry>(rows_lifetime, key);
         _rows.insert(i, *e, rows_entry::compare(s));
         return e->row();
     }
@@ -496,7 +498,7 @@ deletable_row&
 mutation_partition::clustered_row(const schema& s, clustering_key_view key) {
     auto i = _rows.find(key, rows_entry::compare(s));
     if (i == _rows.end()) {
-        auto e = current_allocator().construct<rows_entry>(key);
+        auto e = current_allocator().construct<rows_entry>(rows_lifetime, key);
         _rows.insert(i, *e, rows_entry::compare(s));
         return e->row();
     }
@@ -507,7 +509,7 @@ deletable_row&
 mutation_partition::clustered_row(const schema& s, position_in_partition_view pos, is_dummy dummy, is_continuous continuous) {
     auto i = _rows.find(pos, rows_entry::compare(s));
     if (i == _rows.end()) {
-        auto e = current_allocator().construct<rows_entry>(s, pos, dummy, continuous);
+        auto e = current_allocator().construct<rows_entry>(rows_lifetime, s, pos, dummy, continuous);
         _rows.insert(i, *e, rows_entry::compare(s));
         return e->row();
     }
@@ -2154,7 +2156,7 @@ mutation_partition::mutation_partition(mutation_partition::incomplete_tag, const
     , _row_tombstones(s)
 {
     _rows.insert_before(_rows.end(),
-        *current_allocator().construct<rows_entry>(s, rows_entry::last_dummy_tag(), is_continuous::no));
+        *current_allocator().construct<rows_entry>(rows_lifetime, s, rows_entry::last_dummy_tag(), is_continuous::no));
 }
 
 bool mutation_partition::is_fully_continuous() const {

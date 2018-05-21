@@ -1068,10 +1068,14 @@ class region_impl final : public basic_region_impl {
         }
     };
 private:
+    struct active {
+        segment* seg = nullptr;
+        size_t offset = 0;
+    };
     region* _region = nullptr;
     region_group* _group = nullptr;
-    segment* _active = nullptr;
-    size_t _active_offset;
+    active a1;
+    active a2;
     segment_descriptor_hist _segment_descs; // Contains only closed segments
     occupancy_stats _closed_occupancy;
     occupancy_stats _non_lsa_occupancy;
@@ -1103,27 +1107,27 @@ private:
         }
     };
 
-    void* alloc_small(allocation_strategy::migrate_fn migrator, segment::size_type size, size_t alignment) {
-        if (!_active) {
-            _active = new_segment();
-            _active_offset = 0;
+    void* alloc_small(active& a, allocation_strategy::migrate_fn migrator, segment::size_type size, size_t alignment) {
+        if (!a.seg) {
+            a.seg = new_segment();
+            a.offset = 0;
         }
 
         auto desc = object_descriptor(migrator);
         auto desc_encoded_size = desc.encoded_size();
 
-        size_t obj_offset = align_up(_active_offset + desc_encoded_size, alignment);
+        size_t obj_offset = align_up(a.offset + desc_encoded_size, alignment);
         if (obj_offset + size > segment::size) {
-            close_and_open();
-            return alloc_small(migrator, size, alignment);
+            close_and_open(a);
+            return alloc_small(a, migrator, size, alignment);
         }
 
-        auto old_active_offset = _active_offset;
-        auto pos = _active->at<char>(_active_offset);
+        auto old_active_offset = a.offset;
+        auto pos = a.seg->at<char>(a.offset);
         // Use non-canonical encoding to allow for alignment pad
-        desc.encode(pos, obj_offset - _active_offset);
-        _active_offset = obj_offset + size;
-        _active->record_alloc(_active_offset - old_active_offset);
+        desc.encode(pos, obj_offset - a.offset);
+        a.offset = obj_offset + size;
+        a.seg->record_alloc(a.offset - old_active_offset);
         return pos;
     }
 
@@ -1147,20 +1151,20 @@ private:
         }
     }
 
-    void close_active() {
-        if (!_active) {
+    void close_active(active& a) {
+        if (!a.seg) {
             return;
         }
-        if (_active_offset < segment::size) {
-            auto desc = object_descriptor::make_dead(segment::size - _active_offset);
-            auto pos =_active->at<char>(_active_offset);
+        if (a.offset < segment::size) {
+            auto desc = object_descriptor::make_dead(segment::size - a.offset);
+            auto pos =a.seg->at<char>(a.offset);
             desc.encode(pos);
         }
-        llogger.trace("Closing segment {}, used={}, waste={} [B]", _active, _active->occupancy(), segment::size - _active_offset);
-        _closed_occupancy += _active->occupancy();
+        llogger.trace("Closing segment {}, used={}, waste={} [B]", a.seg, a.seg->occupancy(), segment::size - a.offset);
+        _closed_occupancy += a.seg->occupancy();
 
-        _segment_descs.push(shard_segment_pool.descriptor(_active));
-        _active = nullptr;
+        _segment_descs.push(shard_segment_pool.descriptor(a.seg));
+        a.seg = nullptr;
     }
 
     void free_segment(segment_descriptor& desc) noexcept {
@@ -1193,7 +1197,7 @@ private:
 
         for_each_live(seg, [this] (const object_descriptor* desc, void* obj) {
             auto size = desc->live_size(obj);
-            auto dst = alloc_small(desc->migrator(), size, desc->alignment());
+            auto dst = alloc_small(a1, desc->migrator(), size, desc->alignment());
             _sanitizer.on_migrate(obj, size, dst);
             desc->migrator()->migrate(obj, dst, size);
         });
@@ -1201,11 +1205,11 @@ private:
         free_segment(seg, desc);
     }
 
-    void close_and_open() {
+    void close_and_open(active& a) {
         segment* new_active = new_segment();
-        close_active();
-        _active = new_active;
-        _active_offset = 0;
+        close_active(a);
+        a.seg = new_active;
+        a.offset = 0;
     }
 
     static uint64_t next_id() {
@@ -1256,10 +1260,10 @@ public:
             free_segment(desc);
         }
         _closed_occupancy = {};
-        if (_active) {
-            assert(_active->is_empty());
-            free_segment(_active);
-            _active = nullptr;
+        if (a1.seg) {
+            assert(a1.seg->is_empty());
+            free_segment(a1.seg);
+            a1.seg = nullptr;
         }
         if (_group) {
             _group->del(this);
@@ -1276,8 +1280,11 @@ public:
     occupancy_stats occupancy() const {
         occupancy_stats total = _non_lsa_occupancy;
         total += _closed_occupancy;
-        if (_active) {
-            total += _active->occupancy();
+        if (a1.seg) {
+            total += a1.seg->occupancy();
+        }
+        if (a2.seg) {
+            total += a2.seg->occupancy();
         }
         return total;
     }
@@ -1309,12 +1316,12 @@ public:
         return is_compactible();
     }
 
-    virtual void* alloc(allocation_strategy::migrate_fn migrator, size_t size, size_t alignment) override {
+    virtual void* alloc(allocation_strategy::migrate_fn migrator, size_t size, size_t alignment, lifetime_group lg) override {
         compaction_lock _(*this);
         memory::on_alloc_point();
         shard_segment_pool.on_memory_allocation(size);
         if (size > max_managed_object_size) {
-            auto ptr = standard_allocator().alloc(migrator, size, alignment);
+            auto ptr = standard_allocator().alloc(migrator, size, alignment, lg);
             // This isn't very acurrate, the correct free_space value would be
             // malloc_usable_size(ptr) - size, but there is no way to get
             // the exact object size at free.
@@ -1327,7 +1334,7 @@ public:
             shard_segment_pool.update_non_lsa_memory_in_use(allocated_size);
             return ptr;
         } else {
-            auto ptr = alloc_small(migrator, (segment::size_type) size, alignment);
+            auto ptr = alloc_small(lg.id ? a2 : a1, migrator, (segment::size_type) size, alignment);
             _sanitizer.on_allocation(ptr, size);
             return ptr;
         }
@@ -1380,13 +1387,14 @@ public:
         auto npos = const_cast<char*>(pos);
         desc.encode(npos);
 
-        if (seg != _active) {
+        bool active = seg == a1.seg || seg == a2.seg;
+        if (!active) {
             _closed_occupancy -= seg->occupancy();
         }
 
         seg_desc.record_free(dead_size);
 
-        if (seg != _active) {
+        if (!active) {
             if (seg_desc.is_empty()) {
                 _segment_descs.erase(seg_desc);
                 free_segment(seg, seg_desc);
@@ -1423,20 +1431,25 @@ public:
         degroup_temporarily dgt1(this);
         degroup_temporarily dgt2(&other);
 
-        if (_active && _active->is_empty()) {
-            shard_segment_pool.free_segment(_active);
-            _active = nullptr;
-        }
-        if (!_active) {
-            _active = other._active;
-            other._active = nullptr;
-            _active_offset = other._active_offset;
-            if (_active) {
-                shard_segment_pool.set_region(_active, this);
+        auto merge_active = [&] (active& a, active& other_a) {
+            if (a.seg && a.seg->is_empty()) {
+                shard_segment_pool.free_segment(a.seg);
+                a.seg = nullptr;
             }
-        } else {
-            other.close_active();
-        }
+            if (!a.seg) {
+                a.seg = other_a.seg;
+                other_a.seg = nullptr;
+                a.offset = other_a.offset;
+                if (a.seg) {
+                    shard_segment_pool.set_region(a.seg, this);
+                }
+            } else {
+                other.close_active(other_a);
+            }
+        };
+
+        merge_active(a1, other.a1);
+        merge_active(a2, other.a2);
 
         for (auto& desc : other._segment_descs) {
             shard_segment_pool.set_region(desc, this);
@@ -1484,13 +1497,16 @@ public:
     void migrate_segment(segment* src, segment_descriptor& src_desc, segment* dst, segment_descriptor& dst_desc) {
         ++_invalidate_counter;
         size_t segment_size;
-        if (src != _active) {
+        if (src == a1.seg) {
+            a1.seg = dst;
+            segment_size = a1.offset;
+        } else if (src == a2.seg) {
+            a2.seg = dst;
+            segment_size = a2.offset;
+        } else {
             _segment_descs.erase(src_desc);
             _segment_descs.push(dst_desc);
             segment_size = segment::size;
-        } else {
-            _active = dst;
-            segment_size = _active_offset;
         }
 
         size_t offset = 0;
@@ -1519,7 +1535,8 @@ public:
     void full_compaction() {
         compaction_lock _(*this);
         llogger.debug("Full compaction, {}", occupancy());
-        close_and_open();
+        close_and_open(a1);
+        close_and_open(a2);
         segment_descriptor_hist all;
         std::swap(all, _segment_descs);
         _closed_occupancy = {};

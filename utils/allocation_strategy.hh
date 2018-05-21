@@ -87,6 +87,10 @@ standard_migrator<T>& get_standard_migrator()
     return instance;
 }
 
+struct lifetime_group {
+    int id = 0;
+};
+
 //
 // Abstracts allocation strategy for managed objects.
 //
@@ -127,7 +131,7 @@ public:
     //
     // Doesn't invalidate references to objects allocated with this strategy.
     //
-    virtual void* alloc(migrate_fn, size_t size, size_t alignment) = 0;
+    virtual void* alloc(migrate_fn, size_t size, size_t alignment, lifetime_group = {}) = 0;
 
     // Releases storage for the object. Doesn't invoke object's destructor.
     // Doesn't invalidate references to objects allocated with this strategy.
@@ -146,14 +150,22 @@ public:
     // standard move semantics. Allocates respecting object's alignment
     // requirement.
     template<typename T, typename... Args>
-    T* construct(Args&&... args) {
-        void* storage = alloc(&get_standard_migrator<T>(), sizeof(T), alignof(T));
+    T* construct(lifetime_group gr, Args&&... args) {
+        void* storage = alloc(&get_standard_migrator<T>(), sizeof(T), alignof(T), gr);
         try {
             return new (storage) T(std::forward<Args>(args)...);
         } catch (...) {
             free(storage, sizeof(T));
             throw;
         }
+    }
+
+    // Like alloc() but also constructs the object with a migrator using
+    // standard move semantics. Allocates respecting object's alignment
+    // requirement.
+    template<typename T, typename... Args>
+    T* construct(Args&&... args) {
+        return construct<T>(lifetime_group(), std::forward<Args>(args)...);
     }
 
     // Destroys T and releases its storage.
@@ -184,7 +196,7 @@ public:
 
 class standard_allocation_strategy : public allocation_strategy {
 public:
-    virtual void* alloc(migrate_fn, size_t size, size_t alignment) override {
+    virtual void* alloc(migrate_fn, size_t size, size_t alignment, lifetime_group /* ignored */) override {
         seastar::memory::on_alloc_point();
         // ASAN doesn't intercept aligned_alloc() and complains on free().
         void* ret;

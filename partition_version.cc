@@ -29,6 +29,8 @@
 #include "utils/coroutine.hh"
 #include "real_dirty_memory_accounter.hh"
 
+static const lifetime_group pv_lifetime = { 1 };
+
 static void remove_or_mark_as_unique_owner(partition_version* current, mutation_cleaner* cleaner)
 {
     while (current && !current->is_referenced()) {
@@ -206,7 +208,7 @@ unsigned partition_snapshot::version_count()
 
 partition_entry::partition_entry(mutation_partition mp)
 {
-    auto new_version = current_allocator().construct<partition_version>(std::move(mp));
+    auto new_version = current_allocator().construct<partition_version>(pv_lifetime, std::move(mp));
     _version = partition_version_ref(*new_version);
 }
 
@@ -287,8 +289,8 @@ partition_version& partition_entry::add_version(const schema& s, cache_tracker* 
     // to stay around (with tombstones and static rows) after fully evicted.
     // Such versions must be fully discontinuous, and thus have a dummy at the end.
     auto new_version = tracker
-                       ? current_allocator().construct<partition_version>(mutation_partition::make_incomplete(s))
-                       : current_allocator().construct<partition_version>(mutation_partition(s.shared_from_this()));
+                       ? current_allocator().construct<partition_version>(pv_lifetime, mutation_partition::make_incomplete(s))
+                       : current_allocator().construct<partition_version>(pv_lifetime, mutation_partition(s.shared_from_this()));
     new_version->partition().set_static_row_continuous(_version->partition().static_row_continuous());
     new_version->insert_before(*_version);
     set_version(new_version);
@@ -308,7 +310,7 @@ void partition_entry::apply(const schema& s, mutation_partition&& mp, const sche
     if (s.version() != mp_schema.version()) {
         mp.upgrade(mp_schema, s);
     }
-    auto new_version = current_allocator().construct<partition_version>(std::move(mp));
+    auto new_version = current_allocator().construct<partition_version>(pv_lifetime, std::move(mp));
     if (!_snapshot) {
         try {
             _version->partition().apply_monotonically(s, std::move(new_version->partition()), no_cache_tracker);
@@ -627,7 +629,7 @@ mutation_partition partition_entry::squashed(const schema& s)
 
 void partition_entry::upgrade(schema_ptr from, schema_ptr to, mutation_cleaner& cleaner, cache_tracker* tracker)
 {
-    auto new_version = current_allocator().construct<partition_version>(squashed(from, to));
+    auto new_version = current_allocator().construct<partition_version>(pv_lifetime, squashed(from, to));
     auto old_version = &*_version;
     set_version(new_version);
     if (tracker) {
