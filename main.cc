@@ -490,6 +490,7 @@ int main(int ac, char** av) {
                 }
             };
             dbcfg.compaction_scheduling_group = make_sched_group("compaction", 1000);
+            dbcfg.memory_compaction_scheduling_group = make_sched_group("mem_compaction", 1000);
             dbcfg.streaming_scheduling_group = make_sched_group("streaming", 200);
             dbcfg.statement_scheduling_group = make_sched_group("statement", 1000);
             dbcfg.memtable_scheduling_group = make_sched_group("memtable", 1000);
@@ -745,8 +746,9 @@ int main(int ac, char** av) {
                     });
                 }).get();
             }
-            smp::invoke_on_all([&cfg] () {
-                return logalloc::shard_tracker().set_reclamation_step(cfg->lsa_reclamation_step());
+            smp::invoke_on_all([&] () {
+                logalloc::shard_tracker().set_reclamation_step(cfg->lsa_reclamation_step());
+                global_cache_tracker().set_compaction_scheduling_group(dbcfg.memory_compaction_scheduling_group);
             }).get();
             if (cfg->abort_on_lsa_bad_alloc()) {
                 smp::invoke_on_all([&cfg]() {
