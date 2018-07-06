@@ -382,7 +382,7 @@ private:
                                     _cache._schema, std::move(dk), std::move(mp));
                                 _cache._tracker.insert(*entry);
                                 entry->set_continuous(i->continuous());
-                                return _cache._partitions.insert(i, *entry);
+                                return _cache._partitions.insert_before(i, *entry);
                             }, [&] (auto i) {
                                 _cache._tracker.on_miss_already_populated();
                             });
@@ -856,7 +856,7 @@ cache_entry& row_cache::find_or_create(const dht::decorated_key& key, tombstone 
     return do_find_or_create_entry(key, previous, [&] (auto i) { // create
         auto entry = current_allocator().construct<cache_entry>(cache_entry::incomplete_tag{}, _schema, key, t);
         _tracker.insert(*entry);
-        return _partitions.insert(i, *entry);
+        return _partitions.insert_before(i, *entry);
     }, [&] (auto i) { // visit
         _tracker.on_miss_already_populated();
         cache_entry& e = *i;
@@ -873,7 +873,7 @@ void row_cache::populate(const mutation& m, const previous_entry_pointer* previo
         upgrade_entry(*entry);
         _tracker.insert(*entry);
         entry->set_continuous(i->continuous());
-        return _partitions.insert(i, *entry);
+        return _partitions.insert_before(i, *entry);
     }, [&] (auto i) {
         throw std::runtime_error(sprint("cache already contains entry for {}", m.key()));
     });
@@ -1035,7 +1035,7 @@ future<> row_cache::update(external_updater eu, memtable& m) {
                 partition_entry::make_evictable(*_schema, mutation_partition(_schema)));
             entry->set_continuous(cache_i->continuous());
             _tracker.insert(*entry);
-            _partitions.insert(cache_i, *entry);
+            _partitions.insert_before(cache_i, *entry);
             return entry->partition().apply_to_incomplete(*_schema, std::move(mem_e.partition()), *mem_e.schema(), _tracker.memtable_cleaner(),
                 alloc, _tracker.region(), _tracker, _underlying_phase, acc);
         } else {
@@ -1163,7 +1163,7 @@ row_cache::row_cache(schema_ptr s, snapshot_source src, cache_tracker& tracker, 
 {
     with_allocator(_tracker.allocator(), [this, cont] {
         cache_entry* entry = current_allocator().construct<cache_entry>(cache_entry::dummy_entry_tag());
-        _partitions.insert(*entry);
+        _partitions.insert_before(_partitions.end(), *entry);
         entry->set_continuous(bool(cont));
     });
 }
