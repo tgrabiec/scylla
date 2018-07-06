@@ -616,6 +616,14 @@ public:
         // FIXME: Avoid copy
         return _set.find(position_in_partition_with_schema(s.shared_from_this(), position_in_partition(pos))) != _set.end();
     }
+    // Returns true iff this set is fully contained in the other set.
+    bool contained_in(const schema& s, clustering_interval_set& other) const {
+        auto copy = _set;
+        for (auto&& i : other._set) {
+            copy.subtract(i);
+        }
+        return copy.empty();
+    }
     bool overlaps(const schema& s, const position_range& range) const {
         // FIXME: Avoid copy
         auto r = _set.equal_range(make_interval(s, range));
