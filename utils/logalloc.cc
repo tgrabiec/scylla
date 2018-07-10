@@ -308,7 +308,6 @@ struct segment;
 
 static logging::logger llogger("lsa");
 static logging::logger timing_logger("lsa-timing");
-static thread_local tracker tracker_instance;
 
 using clock = std::chrono::steady_clock;
 
@@ -396,10 +395,6 @@ void tracker::full_compaction() {
 
 void tracker::reclaim_all_free_segments() {
     return _impl->reclaim_all_free_segments();
-}
-
-tracker& shard_tracker() {
-    return tracker_instance;
 }
 
 struct segment {
@@ -955,6 +950,11 @@ size_t segment_pool::segments_in_use() const {
 }
 
 static thread_local segment_pool shard_segment_pool;
+static thread_local tracker tracker_instance;
+
+tracker& shard_tracker() {
+    return tracker_instance;
+}
 
 void segment::record_alloc(segment::size_type size) {
     shard_segment_pool.descriptor(this).record_alloc(size);
