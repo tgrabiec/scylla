@@ -54,5 +54,9 @@ struct tmpdir {
         return *this;
     }
     tmpdir & operator=(const tmpdir&) = delete;
+    // Will not remove the directory when this object is destroyed
+    void release() {
+        path = {};
+    }
     sstring path;
 };

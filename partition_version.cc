@@ -200,8 +200,8 @@ stop_iteration partition_snapshot::merge_partition_versions() {
         }
         while (auto prev = current->prev()) {
             _region.allocator().invalidate_references();
-            if (current->partition().apply_monotonically(*schema(), std::move(prev->partition()), _tracker, is_preemptible::yes) == stop_iteration::no) {
-                return stop_iteration::no;
+            while (current->partition().apply_monotonically(*schema(), std::move(prev->partition()), _tracker, is_preemptible::yes) == stop_iteration::no) {
+                //return stop_iteration::no;
             }
             if (prev->is_referenced()) {
                 _version.release();
@@ -477,7 +477,7 @@ coroutine partition_entry::apply_to_incomplete(const schema& s,
     // will yield sparse segments and add overhead due to increased LSA
     // segment compaction. This becomes especially significant for small
     // partitions where I saw 40% slow down.
-    const bool preemptible = s.clustering_key_size() > 0;
+    const bool preemptible = false; //s.clustering_key_size() > 0;
 
     if (s.version() != pe_schema.version()) {
         pe.upgrade(pe_schema.shared_from_this(), s.shared_from_this(), pe_cleaner, no_cache_tracker);

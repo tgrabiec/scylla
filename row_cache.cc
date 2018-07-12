@@ -870,10 +870,11 @@ void row_cache::populate(const mutation& m, const previous_entry_pointer* previo
     do_find_or_create_entry(m.decorated_key(), previous, [&] (auto i) {
         cache_entry* entry = current_allocator().construct<cache_entry>(
                 m.schema(), m.decorated_key(), m.partition());
-        upgrade_entry(*entry);
         _tracker.insert(*entry);
         entry->set_continuous(i->continuous());
-        return _partitions.insert_before(i, *entry);
+        i = _partitions.insert_before(i, *entry);
+        upgrade_entry(*i);
+        return i;
     }, [&] (auto i) {
         throw std::runtime_error(sprint("cache already contains entry for {}", m.key()));
     });

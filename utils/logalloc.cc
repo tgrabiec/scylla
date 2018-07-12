@@ -19,6 +19,8 @@
  * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+//#define DEBUG_LSA_SANITIZER
+
 #include <boost/range/algorithm/heap_algorithm.hpp>
 #include <boost/range/algorithm/remove.hpp>
 #include <boost/range/algorithm.hpp>
@@ -189,6 +191,7 @@ private:
 private:
     template<typename Function>
     void run_and_handle_errors(Function&& fn) noexcept {
+        memory::disable_failure_guard dfg;
         if (_broken) {
             return;
         }
@@ -428,7 +431,8 @@ struct segment {
 #endif
 };
 
-static constexpr size_t max_managed_object_size = segment_size * 0.1;
+static constexpr size_t max_managed_object_size = 0;
+//static constexpr size_t max_managed_object_size = segment_size * 0.1;
 static constexpr auto max_used_space_ratio_for_compaction = 0.85;
 static constexpr size_t max_used_space_for_compaction = segment_size * max_used_space_ratio_for_compaction;
 static constexpr size_t min_free_space_for_compaction = segment_size - max_used_space_for_compaction;

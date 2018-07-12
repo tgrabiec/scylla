@@ -1372,7 +1372,7 @@ public:
     explicit impl(generate_counters counters, local_shard_only lso = local_shard_only::yes) : _generate_counters(counters), _local_shard_only(lso) {
         std::random_device rd;
         // In case of errors, replace the seed with a fixed value to get a deterministic run.
-        auto seed = rd();
+        auto seed = 2139704581; //rd();
         std::cout << "Random seed: " << seed << "\n";
         _gen = std::mt19937(seed);
 

@@ -39,7 +39,7 @@ class memtable_snapshot_source {
     future<> _compactor;
 private:
     bool should_compact() const {
-        return !_closed && _memtables.size() >= 3;
+        return false; //!_closed && _memtables.size() >= 3;
     }
     lw_shared_ptr<memtable> new_memtable() {
         return make_lw_shared<memtable>(_s);
