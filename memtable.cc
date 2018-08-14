@@ -409,6 +409,8 @@ void memtable::revert_flushed_memory() noexcept {
     _flushed_memory = 0;
 }
 
+static logging::logger flush_log("flush_logger");
+
 class flush_memory_accounter {
     memtable& _mt;
 public:
@@ -417,8 +419,11 @@ public:
     }
     explicit flush_memory_accounter(memtable& mt)
         : _mt(mt)
-	{}
+	{
+        flush_log.trace("{}: table {}.{}", this, mt.schema()->ks_name(), mt.schema()->cf_name());
+	}
     ~flush_memory_accounter() {
+        flush_log.trace("{}: flushed {}, used {}", this, _mt._flushed_memory, _mt.occupancy().used_space());
         assert(_mt._flushed_memory <= _mt.occupancy().used_space());
     }
     uint64_t compute_size(memtable_entry& e, partition_snapshot& snp) {
@@ -432,7 +437,9 @@ class partition_snapshot_accounter {
     flush_memory_accounter& _accounter;
 public:
     partition_snapshot_accounter(const schema& s, flush_memory_accounter& acct)
-        : _schema(s), _accounter(acct) {}
+        : _schema(s), _accounter(acct) {
+        flush_log.trace("{}: table {}.{}", this, s.ks_name(), s.cf_name());
+    }
 
     // We will be passed mutation fragments here, and they are allocated using the standard
     // allocator. So we can't compute the size in memtable precisely. However, precise accounting is
@@ -441,11 +448,15 @@ public:
     // allocation. As long as our size read here is lesser or equal to the size in the memtables, we
     // are safe, and worst case we will allow a bit fewer requests in.
     void operator()(const range_tombstone& rt) {
-        _accounter.update_bytes_read(rt.memory_usage(_schema));
+        auto size = rt.memory_usage(_schema);
+        flush_log.trace("{}: accounting {}, size {}", this, rt, size);
+        _accounter.update_bytes_read(size);
     }
 
     void operator()(const static_row& sr) {
-        _accounter.update_bytes_read(sr.external_memory_usage(_schema));
+        auto size = sr.external_memory_usage(_schema);
+        flush_log.trace("{}, accounting {}, size {}", this, sr, size);
+        _accounter.update_bytes_read(size);
     }
 
     void operator()(const partition_start& ph) {}
@@ -459,7 +470,12 @@ public:
         // and we don't know which one(s) contributed to the generation of this mutation fragment.
         //
         // We will add the size of the struct here, and that should be good enough.
-        _accounter.update_bytes_read(sizeof(rows_entry) + cr.external_memory_usage(_schema));
+        auto size = sizeof(rows_entry) + cr.external_memory_usage(_schema);
+        flush_log.trace("{}: accounting {}, size {}", this, cr, size);
+        cr.cells().for_each_cell([this] (column_id id, const cell_and_hash& cah) {
+            flush_log.trace("{}:   cell {}: {}", this, id, cah.cell.external_memory_usage(*_schema.regular_column_at(id).type));
+        });
+        _accounter.update_bytes_read(size);
     }
 };
 
@@ -475,7 +491,9 @@ public:
         : impl(s)
         , iterator_reader(std::move(s), m, query::full_partition_range)
         , _flushed_memory(*m)
-    {}
+    {
+        flush_log.trace("{}: table {}.{}", this, schema()->ks_name(), schema()->cf_name());
+    }
     flush_reader(const flush_reader&) = delete;
     flush_reader(flush_reader&&) = delete;
     flush_reader& operator=(flush_reader&&) = delete;
@@ -497,6 +515,7 @@ private:
             });
         });
         if (key_and_snp) {
+            flush_log.trace("{}: partition {}, size {}", this, key_and_snp->first, component_size);
             _flushed_memory.update_bytes_read(component_size);
             update_last(key_and_snp->first);
             auto cr = query::clustering_key_filter_ranges::get_ranges(*schema(), schema()->full_slice(), key_and_snp->first.key());
