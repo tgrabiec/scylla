@@ -25,6 +25,8 @@
 #include "http/exception.hh"
 #include "log.hh"
 
+extern void set_read_delay(int micros);
+
 namespace api {
 
 namespace hs = httpd::system_json;
@@ -41,6 +43,15 @@ void set_system(http_context& ctx, routes& r) {
         } catch (boost::bad_lexical_cast& e) {
             throw bad_param_exception("Unknown logging level " + req.get_query_param("level"));
         }
+        return json::json_void();
+    });
+
+    hs::read_cpu_stall_inject.set(r, [](const_req req) {
+        unsigned shard = boost::lexical_cast<unsigned>(std::string(req.get_query_param("shard")));
+        auto micros = boost::lexical_cast<int>(std::string(req.get_query_param("micros")));
+        smp::submit_to(shard, [micros] {
+            set_read_delay(micros);
+        });
         return json::json_void();
     });
 

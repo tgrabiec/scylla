@@ -8,6 +8,38 @@
    ],
    "apis":[
       {
+         "path":"/system/read_cpu_stall_inject",
+         "operations":[
+            {
+               "method":"POST",
+               "summary":"Inject CPU stalls to reads",
+               "type":"void",
+               "nickname":"read_cpu_stall_inject",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+                  {
+                     "name":"shard",
+                     "description":"Shard which should experience the stall",
+                     "required":true,
+                     "allowMultiple":false,
+                     "type":"int",
+                     "paramType":"query"
+                  },
+                  {
+                     "name":"micros",
+                     "description":"Duration of the stall in microseconds",
+                     "required":true,
+                     "allowMultiple":false,
+                     "type":"int",
+                     "paramType":"query"
+                  }
+               ]
+            }
+         ]
+      },
+      {
          "path":"/system/logger",
          "operations":[
             {

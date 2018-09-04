@@ -547,6 +547,13 @@ create_single_key_sstable_reader(column_family* cf,
     return make_combined_reader(schema, std::move(readers), fwd, fwd_mr);
 }
 
+static thread_local int read_delay_micros = 0;
+
+void set_read_delay(int micros) {
+    dblog.info("Delaying sstable reads by {} us", micros);
+    read_delay_micros = micros;
+}
+
 flat_mutation_reader
 table::make_sstable_reader(schema_ptr s,
                                    lw_shared_ptr<sstables::sstable_set> sstables,
@@ -559,6 +566,11 @@ table::make_sstable_reader(schema_ptr s,
     auto* semaphore = service::get_local_streaming_read_priority().id() == pc.id()
         ? _config.streaming_read_concurrency_semaphore
         : _config.read_concurrency_semaphore;
+
+    if (read_delay_micros) {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(read_delay_micros);
+        while (std::chrono::steady_clock::now() < deadline) {}
+    }
 
     // CAVEAT: if make_sstable_reader() is called on a single partition
     // we want to optimize and read exactly this partition. As a
