@@ -123,24 +123,8 @@ public:
         _application_state[key] = std::move(value);
     }
 
-    void apply_application_state(application_state key, versioned_value&& value) {
-        auto&& e = _application_state[key];
-        if (e.version < value.version) {
-            e = std::move(value);
-        }
-    }
-
-    void apply_application_state(application_state key, const versioned_value& value) {
-        auto&& e = _application_state[key];
-        if (e.version < value.version) {
-            e = value;
-        }
-    }
-
-    void apply_application_state(const endpoint_state& es) {
-        for (auto&& e : es._application_state) {
-            apply_application_state(e.first, e.second);
-        }
+    void add_application_state(const endpoint_state& es) {
+        _application_state = es._application_state;
     }
 
     /* getters and setters */
