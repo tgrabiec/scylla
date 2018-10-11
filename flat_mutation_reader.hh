@@ -95,6 +95,7 @@ public:
         size_t max_buffer_size_in_bytes = 8 * 1024;
         bool _end_of_stream = false;
         schema_ptr _schema;
+        stdx::optional<position_in_partition> _last_pos;
         friend class flat_mutation_reader;
     protected:
         template<typename... Args>
@@ -102,6 +103,11 @@ public:
             seastar::memory::on_alloc_point(); // for exception safety tests
             _buffer.emplace_back(std::forward<Args>(args)...);
             _buffer_size += _buffer.back().memory_usage(*_schema);
+            if (!_buffer.back().is_partition_start()) {
+                position_in_partition::less_compare less(*_schema);
+                assert(_last_pos && !less(_buffer.back().position(), *_last_pos));
+            }
+            _last_pos.emplace(_buffer.back().position());
         }
         void clear_buffer() {
             _buffer.erase(_buffer.begin(), _buffer.end());
