@@ -93,6 +93,15 @@ struct table_config {
     int value_size;
 };
 
+class dataset;
+
+class dataset_acceptor {
+public:
+    virtual ~dataset_acceptor() = default;;
+    virtual bool can_run(dataset&) = 0;
+    virtual void run(column_family& cf, dataset& ds) = 0;
+};
+
 struct test_group {
     using requires_cache = seastar::bool_class<class requires_cache_tag>;
     enum type {
@@ -104,8 +113,63 @@ struct test_group {
     std::string message;
     requires_cache needs_cache;
     type partition_type;
-    void (*test_fn)(column_family& cf);
+    std::unique_ptr<dataset_acceptor> test_fn;
 };
+
+using generator_fn = std::function<stdx::optional<mutation>()>;
+
+class dataset {
+    std::string _name;
+    std::string _message;
+    std::string _create_table_statement;
+    std::string _table_name;
+public:
+    virtual ~dataset() = default;
+
+    // create_table_statement should be a sprint() pattern with %s in place of the table name
+    dataset(const std::string& name, const std::string& message, const std::string& create_table_statement)
+            : _name(name)
+            , _message(message)
+            , _create_table_statement(create_table_statement)
+            , _table_name([&name] {
+                std::string r(name);
+                std::replace(r.begin(), r.end(), '-', '_');
+                return r;
+            }()) {}
+
+    const std::string& name() const { return _name; }
+    const std::string& table_name() const { return _table_name; }
+    const std::string& description() const { return _message; }
+    const std::string& create_table_statement() const { return _create_table_statement; }
+
+    virtual generator_fn make_generator(schema_ptr, const table_config&) = 0;
+};
+
+template<typename DataSet>
+class dataset_acceptor_impl: public dataset_acceptor {
+    using test_fn = void (*)(column_family&, DataSet&);
+    test_fn _fn;
+private:
+    static DataSet* try_cast(dataset& ds) {
+        return dynamic_cast<DataSet*>(&ds);
+    }
+public:
+    dataset_acceptor_impl(test_fn fn) : _fn(fn) {}
+
+    bool can_run(dataset& ds) override {
+        return try_cast(ds) != nullptr;
+    }
+
+    void run(column_family& cf, dataset& ds) override {
+        _fn(cf, *try_cast(ds));
+    }
+};
+
+template<typename DataSet>
+std::unique_ptr<dataset_acceptor> make_test_fn(void (*fn)(column_family&, DataSet&)) {
+    return std::unique_ptr<dataset_acceptor>(
+        std::make_unique<dataset_acceptor_impl<DataSet>>(fn).release());
+}
 
 using stats_values = std::tuple<
     double, // time
@@ -129,7 +193,7 @@ using stats_values = std::tuple<
 
 
 struct output_writer {
-    virtual void write_test_group(const test_group& group, bool running) = 0;
+    virtual void write_test_group(const test_group& group, const dataset& ds, bool running) = 0;
 
     virtual void write_test_names(const output_items& param_names, const output_items& stats_names) = 0;
 
@@ -176,8 +240,8 @@ private:
         return stats_values_to_strings_impl(values, std::index_sequence_for<Ts...>{});
     };
 public:
-    void write_test_group(const test_group& group, bool running) override {
-        std::cout << std::endl << (running ? "running: " : "skipping: ") << group.name << std::endl;
+    void write_test_group(const test_group& group, const dataset& ds, bool running) override {
+        std::cout << std::endl << (running ? "running: " : "skipping: ") << group.name << " on dataset " << ds.name() << std::endl;
         if (running) {
             std::cout << group.message << ":" << std::endl;
         }
@@ -279,7 +343,7 @@ public:
         _metadata.run_date_time = get_run_date_time();
     }
 
-    void write_common_test_group(const std::string& name, const std::string& message) {
+    void write_common_test_group(const std::string& name, const std::string& message, const dataset& ds) {
         _static_param = stdx::nullopt;
         _test_count.clear();
         _root = Json::Value{Json::objectValue};
@@ -288,10 +352,11 @@ public:
         fs::create_directory(_current_dir);
         _tg_properties["name"] = name;
         _tg_properties["message"] = message;
+        _tg_properties["dataset"] = ds.name();
     }
 
-    void write_test_group(const test_group& group, bool running) override {
-        write_common_test_group(group.name, group.message);
+    void write_test_group(const test_group& group, const dataset& ds, bool running) override {
+        write_common_test_group(group.name, group.message, ds);
         _tg_properties["partition_type"] = group.partition_type == test_group::large_partition ? "large" : "small";
         _tg_properties["needs_cache"] = (group.needs_cache == test_group::requires_cache::yes);
     }
@@ -401,8 +466,8 @@ public:
         }
     }
 
-    void add_test_group(const test_group& group, bool running) {
-        _writer->write_test_group(group, running);
+    void add_test_group(const test_group& group, const dataset& ds, bool running) {
+        _writer->write_test_group(group, ds, running);
     }
 
     void set_test_param_names(output_items param_names, output_items stats_names) {
@@ -753,8 +818,107 @@ bytes make_blob(size_t blob_size) {
     return big_blob;
 }
 
-static test_result test_forwarding_with_restriction(column_family& cf, table_config& cfg, bool single_partition) {
-    auto first_key = cfg.n_rows / 2;
+// A dataset with one large partition with many rows.
+// Partition key: pk int [0]
+// Clusterint key: ck int [0 .. n_rows() - 1]
+class clustered_ds {
+public:
+    virtual int n_rows(const table_config&) = 0;
+};
+
+// A dataset with many partitions.
+// Partition key: pk int [0 .. n_partitions() - 1]
+class multipart_ds {
+public:
+    virtual int n_partitions(const table_config&) = 0;
+};
+
+class simple_large_part_ds : public clustered_ds, public dataset {
+public:
+    simple_large_part_ds(std::string name, std::string desc) : dataset(name, desc,
+        "create table %s (pk int, ck int, value blob, primary key (pk, ck))") {}
+
+    int n_rows(const table_config& cfg) override {
+        return cfg.n_rows;
+    }
+};
+
+class large_part_ds1 : public simple_large_part_ds {
+public:
+    large_part_ds1() : simple_large_part_ds("large-part-ds1", "One large partition with many small rows") {}
+
+    generator_fn make_generator(schema_ptr s, const table_config& cfg) override {
+        auto value = data_value(make_blob(cfg.value_size));
+        auto& value_cdef = *s->get_column_definition("value");
+        auto pk = partition_key::from_single_value(*s, data_value(0).serialize());
+        return [s, ck = 0, n_ck = n_rows(cfg), &value_cdef, value, pk] () mutable -> stdx::optional<mutation> {
+            if (ck == n_ck) {
+                return stdx::nullopt;
+            }
+            auto ts = api::new_timestamp();
+            mutation m(s, pk);
+            auto& row = m.partition().clustered_row(*s, clustering_key::from_single_value(*s, data_value(ck).serialize()));
+            row.cells().apply(value_cdef, atomic_cell::make_live(*value_cdef.type, ts, value.serialize()));
+            ++ck;
+            return m;
+        };
+    }
+};
+
+class large_part_ds2 : public simple_large_part_ds {
+public:
+    large_part_ds2() : simple_large_part_ds("large-part-ds2", "One large partition with just range tombstones") {}
+
+    generator_fn make_generator(schema_ptr s, const table_config& cfg) override {
+        auto value = data_value(make_blob(cfg.value_size));
+        auto& value_cdef = *s->get_column_definition("value");
+        auto pk = partition_key::from_single_value(*s, data_value(0).serialize());
+        auto base_gc = gc_clock::now();
+        return [s, ck = 0, n_ck = n_rows(cfg), &value_cdef, value, pk, base_gc] () mutable -> stdx::optional<mutation> {
+            if (ck == n_ck) {
+                return stdx::nullopt;
+            }
+            auto tomb = tombstone(api::new_timestamp(), base_gc + gc_clock::duration(ck));
+            mutation m(s, pk);
+            auto ckey = clustering_key::from_single_value(*s, data_value(ck).serialize());
+            m.partition().apply_delete(*s, range_tombstone(
+                position_in_partition::before_key(ckey),
+                position_in_partition::after_key(ckey),
+                tomb));
+            ++ck;
+            return m;
+        };
+    }
+};
+
+class small_part_ds1 : public multipart_ds, public dataset {
+public:
+    small_part_ds1() : dataset("small-part", "Many small partitions with no clustering key",
+        "create table %s (pk int, value blob, primary key (pk))") {}
+
+    generator_fn make_generator(schema_ptr s, const table_config& cfg) override {
+        auto value = data_value(make_blob(cfg.value_size));
+        auto& value_cdef = *s->get_column_definition("value");
+        return [s, pk = 0, n_pk = n_partitions(cfg), &value_cdef, value] () mutable -> stdx::optional<mutation> {
+            if (pk == n_pk) {
+                return stdx::nullopt;
+            }
+            auto ts = api::new_timestamp();
+            mutation m(s, partition_key::from_single_value(*s, data_value(pk).serialize()));
+            auto& row = m.partition().clustered_row(*s, clustering_key::make_empty());
+            row.cells().apply(value_cdef, atomic_cell::make_live(*value_cdef.type, ts, value.serialize()));
+            ++pk;
+            return m;
+        };
+    }
+
+    int n_partitions(const table_config& cfg) override {
+        return cfg.n_rows;
+    }
+};
+
+static test_result test_forwarding_with_restriction(column_family& cf, clustered_ds& ds, table_config& cfg, bool single_partition) {
+    auto first_key = ds.n_rows(cfg) / 2;
     auto slice = partition_slice_builder(*cf.schema())
         .with_range(query::clustering_range::make_starting_with(clustering_key::from_singular(*cf.schema(), first_key)))
         .build();
@@ -951,8 +1115,8 @@ void run_test_case(std::function<test_result()> fn) {
     });
 }
 
-void test_large_partition_single_key_slice(column_family& cf) {
-    auto n_rows = cfg.n_rows;
+void test_large_partition_single_key_slice(column_family& cf, clustered_ds& ds) {
+    auto n_rows = ds.n_rows(cfg);
 
     output_mgr->set_test_param_names({{"", "{:<2}"}, {"range", "{:<14}"}}, test_result::stats_names());
     struct first {
@@ -1075,8 +1239,8 @@ void test_large_partition_single_key_slice(column_family& cf) {
     });
 }
 
-void test_large_partition_skips(column_family& cf) {
-    auto n_rows = cfg.n_rows;
+void test_large_partition_skips(column_family& cf, clustered_ds& ds) {
+    auto n_rows = ds.n_rows(cfg);
 
     output_mgr->set_test_param_names({{"read", "{:<7}"}, {"skip", "{:<7}"}}, test_result::stats_names());
     auto do_test = [&] (int n_read, int n_skip) {
@@ -1126,8 +1290,8 @@ void test_large_partition_skips(column_family& cf) {
     }
 }
 
-void test_large_partition_slicing(column_family& cf) {
-    auto n_rows = cfg.n_rows;
+void test_large_partition_slicing(column_family& cf, clustered_ds& ds) {
+    auto n_rows = ds.n_rows(cfg);
 
     output_mgr->set_test_param_names({{"offset", "{:<7}"}, {"read", "{:<7}"}}, test_result::stats_names());
     auto test = [&] (int offset, int read) {
@@ -1150,8 +1314,8 @@ void test_large_partition_slicing(column_family& cf) {
     test(n_rows / 2, 4096);
 }
 
-void test_large_partition_slicing_clustering_keys(column_family& cf) {
-    auto n_rows = cfg.n_rows;
+void test_large_partition_slicing_clustering_keys(column_family& cf, clustered_ds& ds) {
+    auto n_rows = ds.n_rows(cfg);
 
     output_mgr->set_test_param_names({{"offset", "{:<7}"}, {"read", "{:<7}"}}, test_result::stats_names());
     auto test = [&] (int offset, int read) {
@@ -1174,8 +1338,8 @@ void test_large_partition_slicing_clustering_keys(column_family& cf) {
     test(n_rows / 2, 4096);
 }
 
-void test_large_partition_slicing_single_partition_reader(column_family& cf) {
-    auto n_rows = cfg.n_rows;
+void test_large_partition_slicing_single_partition_reader(column_family& cf, clustered_ds& ds) {
+    auto n_rows = ds.n_rows(cfg);
 
     output_mgr->set_test_param_names({{"offset", "{:<7}"}, {"read", "{:<7}"}}, test_result::stats_names());
     auto test = [&](int offset, int read) {
@@ -1198,8 +1362,8 @@ void test_large_partition_slicing_single_partition_reader(column_family& cf) {
     test(n_rows / 2, 4096);
 }
 
-void test_large_partition_select_few_rows(column_family& cf) {
-    auto n_rows = cfg.n_rows;
+void test_large_partition_select_few_rows(column_family& cf, clustered_ds& ds) {
+    auto n_rows = ds.n_rows(cfg);
 
     output_mgr->set_test_param_names({{"stride", "{:<7}"}, {"rows", "{:<7}"}}, test_result::stats_names());
     auto test = [&](int stride, int read) {
@@ -1219,26 +1383,26 @@ void test_large_partition_select_few_rows(column_family& cf) {
     test(2, n_rows / 2);
 }
 
-void test_large_partition_forwarding(column_family& cf) {
+void test_large_partition_forwarding(column_family& cf, clustered_ds& ds) {
     output_mgr->set_test_param_names({{"pk-scan", "{:<7}"}}, test_result::stats_names());
 
   run_test_case([&] {
-    auto r = test_forwarding_with_restriction(cf, cfg, false);
+    auto r = test_forwarding_with_restriction(cf, ds, cfg, false);
     check_fragment_count(r, 2);
     r.set_params(to_sstrings("yes"));
     return r;
   });
 
   run_test_case([&] {
-    auto r = test_forwarding_with_restriction(cf, cfg, true);
+    auto r = test_forwarding_with_restriction(cf, ds, cfg, true);
     check_fragment_count(r, 2);
     r.set_params(to_sstrings("no"));
     return r;
   });
 }
 
-void test_small_partition_skips(column_family& cf2) {
-    auto n_parts = cfg.n_rows;
+void test_small_partition_skips(column_family& cf2, multipart_ds& ds) {
+    auto n_parts = ds.n_partitions(cfg);
 
     output_mgr->set_test_param_names({{"", "{:<2}"}, {"read", "{:<7}"}, {"skip", "{:<7}"}}, test_result::stats_names());
     auto do_test = [&] (int n_read, int n_skip) {
@@ -1293,8 +1457,8 @@ void test_small_partition_skips(column_family& cf2) {
     }
 }
 
-void test_small_partition_slicing(column_family& cf2) {
-    auto n_parts = cfg.n_rows;
+void test_small_partition_slicing(column_family& cf2, multipart_ds& ds) {
+    auto n_parts = ds.n_partitions(cfg);
 
     output_mgr->set_test_param_names({{"offset", "{:<7}"}, {"read", "{:<7}"}}, test_result::stats_names());
     auto test = [&] (int offset, int read) {
@@ -1318,64 +1482,59 @@ void test_small_partition_slicing(column_family& cf2) {
 }
 
 static
-void populate(cql_test_env& env, table_config cfg) {
+auto make_datasets() {
+    std::map<std::string, std::unique_ptr<dataset>> dsets;
+    auto add = [&] (std::unique_ptr<dataset> ds) {
+        if (dsets.find(ds->name()) != dsets.end()) {
+            throw std::runtime_error(sprint("Dataset with name '%s'already exists", ds->name()));
+        }
+        auto name = ds->name();
+        dsets.emplace(std::move(name), std::move(ds));
+    };
+    add(std::unique_ptr<dataset>(new small_part_ds1));
+    add(std::unique_ptr<dataset>(new large_part_ds1));
+    add(std::unique_ptr<dataset>(new large_part_ds2));
+    return dsets;
+}
+
+static std::map<std::string, std::unique_ptr<dataset>> datasets = make_datasets();
+
+static
+table& find_table(database& db, dataset& ds) {
+    return db.find_column_family("ks", ds.table_name());
+}
+
+static
+void populate(cql_test_env& env, const table_config& cfg) {
     drop_keyspace_if_exists(env, "ks");
 
     env.execute_cql("CREATE KEYSPACE ks WITH REPLICATION = {'class' : 'SimpleStrategy', 'replication_factor' : 1};").get();
 
     std::cout << "Saving test config...\n";
     env.execute_cql("create table config (name text primary key, n_rows int, value_size int)").get();
-    env.execute_cql(sprint("insert into ks.config (name, n_rows, value_size) values ('%s', %d, %d)", cfg.name, cfg.n_rows, cfg.alue_size)).get();
-
-    std::cout << "Creating test tables...\n";
-
-    // Large partition with lots of rows
-    env.execute_cql("create table test (pk int, ck int, value blob, primary key (pk, ck))"
-                    " WITH compression = { 'sstable_compression' : '' };").get();
+    env.execute_cql(sprint("insert into ks.config (name, n_rows, value_size) values ('%s', %d, %d)", cfg.name, cfg.n_rows, cfg.value_size)).get();
 
     database& db = env.local_db();
 
-    {
-        std::cout << "Populating ks.test with " << cfg.n_rows << " rows...";
+    for (auto&& e : datasets) {
+        dataset& ds = *e.second;
 
-        auto insert_id = env.prepare("update test set \"value\" = ? where \"pk\" = 0 and \"ck\" = ?;").get0();
+        env.execute_cql(sprint(ds.create_table_statement() + " WITH compression = { 'sstable_compression' : '' };", ds.table_name())).get();
 
-        for (int ck = 0; ck < cfg.n_rows; ++ck) {
-            env.execute_prepared(insert_id, {{
-                                                 cql3::raw_value::make_value(data_value(make_blob(cfg.value_size)).serialize()),
-                                                 cql3::raw_value::make_value(data_value(ck).serialize())
-                                             }}).get();
-        }
+        column_family& cf = find_table(db, ds);
+        auto s = cf.schema();
 
-        column_family& cf = db.find_column_family("ks", "test");
+        cf.run_with_compaction_disabled([&] {
+            return seastar::async([&] {
+                auto gen = ds.make_generator(s, cfg);
+                while (auto mopt = gen()) {
+                    cf.active_memtable().apply(*mopt);
+                }
 
-        std::cout << "flushing...\n";
-        cf.flush().get();
-
-        std::cout << "compacting...\n";
-        cf.compact_all_sstables().get();
-    }
-
-    // Small partitions, but lots
-    env.execute_cql("create table small_part (pk int, value blob, primary key (pk))"
-                    " WITH compression = { 'sstable_compression' : '' };").get();
-
-    {
-        std::cout << "Populating small_part with " << cfg.n_rows << " partitions...";
-
-        auto insert_id = env.prepare("update small_part set \"value\" = ? where \"pk\" = ?;").get0();
-
-        for (int pk = 0; pk < cfg.n_rows; ++pk) {
-            env.execute_prepared(insert_id, {{
-                                                 cql3::raw_value::make_value(data_value(make_blob(cfg.value_size)).serialize()),
-                                                 cql3::raw_value::make_value(data_value(pk).serialize())
-                                             }}).get();
-        }
-
-        column_family& cf = db.find_column_family("ks", "small_part");
-
-        std::cout << "flushing...\n";
-        cf.flush().get();
+                std::cout << "flushing...\n";
+                cf.flush().get();
+            });
+        }).get();
 
         std::cout << "compacting...\n";
         cf.compact_all_sstables().get();
@@ -1388,7 +1547,7 @@ static std::initializer_list<test_group> test_groups = {
         "Testing effectiveness of caching of large partition, single-key slicing reads",
         test_group::requires_cache::yes,
         test_group::type::large_partition,
-        test_large_partition_single_key_slice,
+        make_test_fn(test_large_partition_single_key_slice),
     },
     {
         "large-partition-skips",
@@ -1396,42 +1555,42 @@ static std::initializer_list<test_group> test_groups = {
         "Reads whole range interleaving reads with skips according to read-skip pattern",
         test_group::requires_cache::no,
         test_group::type::large_partition,
-        test_large_partition_skips,
+        make_test_fn(test_large_partition_skips),
     },
     {
         "large-partition-slicing",
         "Testing slicing of large partition",
         test_group::requires_cache::no,
         test_group::type::large_partition,
-        test_large_partition_slicing,
+        make_test_fn(test_large_partition_slicing),
     },
     {
         "large-partition-slicing-clustering-keys",
         "Testing slicing of large partition using clustering keys",
         test_group::requires_cache::no,
         test_group::type::large_partition,
-        test_large_partition_slicing_clustering_keys,
+        make_test_fn(test_large_partition_slicing_clustering_keys),
     },
     {
         "large-partition-slicing-single-key-reader",
         "Testing slicing of large partition, single-partition reader",
         test_group::requires_cache::no,
         test_group::type::large_partition,
-        test_large_partition_slicing_single_partition_reader,
+        make_test_fn(test_large_partition_slicing_single_partition_reader),
     },
     {
         "large-partition-select-few-rows",
         "Testing selecting few rows from a large partition",
         test_group::requires_cache::no,
         test_group::type::large_partition,
-        test_large_partition_select_few_rows,
+        make_test_fn(test_large_partition_select_few_rows),
     },
     {
         "large-partition-forwarding",
         "Testing forwarding with clustering restriction in a large partition",
         test_group::requires_cache::no,
         test_group::type::large_partition,
-        test_large_partition_forwarding,
+        make_test_fn(test_large_partition_forwarding),
     },
     {
         "small-partition-skips",
@@ -1439,14 +1598,14 @@ static std::initializer_list<test_group> test_groups = {
         "Reads whole range interleaving reads with skips according to read-skip pattern",
         test_group::requires_cache::no,
         test_group::type::small_partition,
-        test_small_partition_skips,
+        make_test_fn(test_small_partition_skips),
     },
     {
         "small-partition-slicing",
         "Testing slicing small partitions",
         test_group::requires_cache::no,
         test_group::type::small_partition,
-        test_small_partition_slicing,
+        make_test_fn(test_small_partition_slicing),
     },
 };
 
@@ -1472,7 +1631,13 @@ int main(int argc, char** argv) {
                     test_groups | boost::adaptors::transformed([] (auto&& tc) { return tc.name; }))
                 ),
             "Test groups to run")
+        ("run-datasets", bpo::value<std::vector<std::string>>()->default_value(
+                boost::copy_range<std::vector<std::string>>(
+                    datasets | boost::adaptors::transformed([] (auto&& e) { return e.first; }))
+                ),
+            "Limit the datasets which are tested")
         ("list-tests", "Show available test groups")
+        ("list-datasets", "Show available datasets")
         ("populate", "populate the table")
         ("verbose", "Enables more logging")
         ("trace", "Enables trace-level logging")
@@ -1499,6 +1664,15 @@ int main(int argc, char** argv) {
                           << (tc.partition_type == test_group::type::large_partition
                               ? "\tlarge partition test\n" : "\tsmall partition test\n")
                           << "\tdescription:\n\t\t" << boost::replace_all_copy(tc.message, "\n", "\n\t\t") << "\n\n";
+            }
+            return make_ready_future<int>(0);
+        }
+
+        if (app.configuration().count("list-datasets")) {
+            std::cout << "Datasets:\n";
+            for (auto&& e : datasets) {
+                std::cout << "\tname: " << e.first << "\n"
+                          << "\tdescription:\n\t\t" << boost::replace_all_copy(e.second->description(), "\n", "\n\t\t") << "\n\n";
             }
             return make_ready_future<int>(0);
         }
@@ -1540,7 +1714,6 @@ int main(int argc, char** argv) {
                     }
 
                     database& db = env.local_db();
-                    column_family& cf = db.find_column_family("ks", "test");
 
                     cfg = read_config(env, name);
                     cache_enabled = app.configuration().count("enable-cache");
@@ -1562,32 +1735,41 @@ int main(int argc, char** argv) {
                         return requested_test_groups.count(tc.name) != 0;
                     });
 
-                    auto run_tests = [&] (column_family& cf, test_group::type type) {
-                        cf.run_with_compaction_disabled([&] {
-                            return seastar::async([&] {
-                                live_range = int_range({0}, {cfg.n_rows - 1});
+                    auto enabled_datasets = app.configuration()["run-datasets"].as<std::vector<std::string>>()
+                        | boost::adaptors::transformed([&](auto&& name) {
+                            if (datasets.find(name) == datasets.end()) {
+                                throw std::runtime_error(sprint("No such dataset: %s", name));
+                            }
+                            return datasets[name].get();
+                        });
+
+                    auto compaction_guard = make_compaction_disabling_guard(boost::copy_range<std::vector<table*>>(
+                        enabled_datasets | boost::adaptors::transformed([&] (auto&& ds) {
+                            return &find_table(db, *ds);
+                        })));
+
+                    auto run_tests = [&] (test_group::type type) {
                                 boost::for_each(
                                     enabled_test_groups
                                     | boost::adaptors::filtered([type] (auto&& tc) { return tc.partition_type == type; }),
-                                    [&cf] (auto&& tc) {
+                                    [&] (auto&& tc) {
+                                     for (auto&& ds : enabled_datasets) {
+                                      if (tc.test_fn->can_run(*ds)) {
                                         if (tc.needs_cache && !cache_enabled) {
-                                            output_mgr->add_test_group(tc, false);
+                                            output_mgr->add_test_group(tc, *ds, false);
                                         } else {
-                                            output_mgr->add_test_group(tc, true);
+                                            output_mgr->add_test_group(tc, *ds, true);
                                             on_test_group();
-                                            tc.test_fn(cf);
+                                            tc.test_fn->run(find_table(db, *ds), *ds);
                                         }
+                                      }
+                                     }
                                     }
                                 );
-                            });
-                        }).get();
                     };
 
-                    run_tests(cf, test_group::type::large_partition);
-
-                    column_family& cf2 = db.find_column_family("ks", "small_part");
-                    run_tests(cf2, test_group::type::small_partition);
-
+                    run_tests(test_group::type::large_partition);
+                    run_tests(test_group::type::small_partition);
                 }
             });
         }, db_cfg).then([] {
