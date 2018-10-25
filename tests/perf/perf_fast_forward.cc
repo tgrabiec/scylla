@@ -283,7 +283,7 @@ public:
     }
 };
 
-static const std::string output_dir {"perf_fast_forward_output/"};
+static std::string output_dir;
 
 std::string get_run_date_time() {
     using namespace boost::posix_time;
@@ -357,7 +357,7 @@ public:
         _test_count.clear();
         _root = Json::Value{Json::objectValue};
         _tg_properties = Json::Value{Json::objectValue};
-        _current_dir = output_dir + name + "/";
+        _current_dir = output_dir + "/" + name + "/";
         fs::create_directory(_current_dir);
         _tg_properties["name"] = name;
         _tg_properties["message"] = message;
@@ -464,41 +464,52 @@ public:
 
 class output_manager {
 private:
-    std::unique_ptr<output_writer> _writer;
+    std::vector<std::unique_ptr<output_writer>> _writers;
     output_items _param_names;
     output_items _stats_names;
 public:
 
     output_manager(sstring format) {
+        _writers.push_back(std::make_unique<text_output_writer>());
         if (format == "text") {
-            _writer = std::make_unique<text_output_writer>();
+            // already used
         } else if (format == "json") {
-            _writer = std::make_unique<json_output_writer>();
+            _writers.push_back(std::make_unique<json_output_writer>());
         } else {
             throw std::runtime_error(sprint("Unsupported output format: %s", format));
         }
     }
 
     void add_test_group(const test_group& group, const dataset& ds, bool running) {
-        _writer->write_test_group(group, ds, running);
+        for (auto&& w : _writers) {
+            w->write_test_group(group, ds, running);
+        }
     }
 
     void add_dataset_population(const dataset& ds) {
-        _writer->write_dataset_population(ds);
+        for (auto&& w : _writers) {
+            w->write_dataset_population(ds);
+        }
     }
 
     void set_test_param_names(output_items param_names, output_items stats_names) {
         _param_names = std::move(param_names);
         _stats_names = std::move(stats_names);
-        _writer->write_test_names(_param_names, _stats_names);
+        for (auto&& w : _writers) {
+            w->write_test_names(_param_names, _stats_names);
+        }
     }
 
     void add_test_values(const sstring_vec& params, const stats_values& stats) {
-        _writer->write_test_values(params, stats, _param_names, _stats_names);
+        for (auto&& w : _writers) {
+            w->write_test_values(params, stats, _param_names, _stats_names);
+        }
     }
 
     void add_test_static_param(sstring name, sstring description) {
-        _writer->write_test_static_param(name, description);
+        for (auto&& w : _writers) {
+            w->write_test_static_param(name, description);
+        }
     }
 };
 
@@ -835,12 +846,16 @@ bytes make_blob(size_t blob_size) {
     return big_blob;
 }
 
-// A dataset with one large partition with many rows.
+// A dataset with one large partition with many clustered fragments.
 // Partition key: pk int [0]
 // Clusterint key: ck int [0 .. n_rows() - 1]
 class clustered_ds {
 public:
     virtual int n_rows(const table_config&) = 0;
+
+    clustering_key make_ck(const schema& s, int ck) {
+        return clustering_key::from_single_value(s, data_value(ck).serialize());
+    }
 };
 
 // A dataset with many partitions.
@@ -868,17 +883,50 @@ public:
         auto value = data_value(make_blob(cfg.value_size));
         auto& value_cdef = *s->get_column_definition("value");
         auto pk = partition_key::from_single_value(*s, data_value(0).serialize());
-        return [s, ck = 0, n_ck = n_rows(cfg), &value_cdef, value, pk] () mutable -> stdx::optional<mutation> {
+        return [this, s, ck = 0, n_ck = n_rows(cfg), &value_cdef, value, pk] () mutable -> stdx::optional<mutation> {
             if (ck == n_ck) {
                 return stdx::nullopt;
             }
             auto ts = api::new_timestamp();
             mutation m(s, pk);
-            auto& row = m.partition().clustered_row(*s, clustering_key::from_single_value(*s, data_value(ck).serialize()));
+            auto& row = m.partition().clustered_row(*s, make_ck(*s, ck));
             row.cells().apply(value_cdef, atomic_cell::make_live(*value_cdef.type, ts, value.serialize()));
             ++ck;
             return m;
         };
+    }
+};
+
+class small_part_with_static_ds : public multipart_ds, public dataset {
+public:
+    small_part_with_static_ds() : dataset("small-part-static",
+        "Many small partitions with one clustering row and some having a static row",
+        "create table %s (pk int, ck int, s1 int static, value blob, primary key (pk, ck))") {}
+
+    generator_fn make_generator(schema_ptr s, const table_config& cfg) override {
+        auto value = data_value(make_blob(cfg.value_size));
+        auto& value_cdef = *s->get_column_definition("value");
+        auto& s1_cdef = *s->get_column_definition("s1");
+        return [s, pk = 0, n_pk = n_partitions(cfg), &value_cdef, &s1_cdef, value] () mutable -> stdx::optional<mutation> {
+            if (pk == n_pk) {
+                return stdx::nullopt;
+            }
+            auto ts = api::new_timestamp();
+            mutation m(s, partition_key::from_single_value(*s, data_value(pk).serialize()));
+            auto ck = clustering_key::from_single_value(*s, data_value(0).serialize());
+            auto& row = m.partition().clustered_row(*s, ck);
+            row.cells().apply(value_cdef, atomic_cell::make_live(*value_cdef.type, ts, value.serialize()));
+            if (pk % 2 == 0) {
+                m.partition().static_row().apply(s1_cdef,
+                    atomic_cell::make_live(*s1_cdef.type, ts, value.serialize()));
+            }
+            ++pk;
+            return m;
+        };
+    }
+
+    int n_partitions(const table_config& cfg) override {
+        return cfg.n_rows;
     }
 };
 
@@ -891,13 +939,13 @@ public:
         auto& value_cdef = *s->get_column_definition("value");
         auto pk = partition_key::from_single_value(*s, data_value(0).serialize());
         auto base_gc = gc_clock::now();
-        return [s, ck = 0, n_ck = n_rows(cfg), &value_cdef, value, pk, base_gc] () mutable -> stdx::optional<mutation> {
+        return [this, s, ck = 0, n_ck = n_rows(cfg), &value_cdef, value, pk, base_gc] () mutable -> stdx::optional<mutation> {
             if (ck == n_ck) {
                 return stdx::nullopt;
             }
             auto tomb = tombstone(api::new_timestamp(), base_gc + gc_clock::duration(ck));
             mutation m(s, pk);
-            auto ckey = clustering_key::from_single_value(*s, data_value(ck).serialize());
+            auto ckey = make_ck(*s, ck);
             m.partition().apply_delete(*s, range_tombstone(
                 position_in_partition::before_key(ckey),
                 position_in_partition::after_key(ckey),
@@ -905,6 +953,10 @@ public:
             ++ck;
             return m;
         };
+    }
+
+    int n_rows(const table_config& cfg) override {
+        return cfg.n_rows * 10;
     }
 };
 
@@ -1061,8 +1113,10 @@ void print(const test_result& tr) {
 class result_collector {
     std::vector<std::vector<test_result>> results;
 public:
+    size_t result_count() const {
+        return results.size();
+    }
     void add(test_result rs) {
-        print(rs);
         add(test_result_vector{std::move(rs)});
     }
     void add(test_result_vector rs) {
@@ -1503,7 +1557,7 @@ auto make_datasets() {
     std::map<std::string, std::unique_ptr<dataset>> dsets;
     auto add = [&] (std::unique_ptr<dataset> ds) {
         if (dsets.find(ds->name()) != dsets.end()) {
-            throw std::runtime_error(sprint("Dataset with name '%s'already exists", ds->name()));
+            throw std::runtime_error(sprint("Dataset with name '%s' already exists", ds->name()));
         }
         auto name = ds->name();
         dsets.emplace(std::move(name), std::move(ds));
@@ -1511,6 +1565,7 @@ auto make_datasets() {
     add(std::unique_ptr<dataset>(new small_part_ds1));
     add(std::unique_ptr<dataset>(new large_part_ds1));
     add(std::unique_ptr<dataset>(new large_part_ds2));
+    add(std::unique_ptr<dataset>(new small_part_with_static_ds));
     return dsets;
 }
 
@@ -1522,7 +1577,7 @@ table& find_table(database& db, dataset& ds) {
 }
 
 static
-void populate(cql_test_env& env, const table_config& cfg, size_t flush_threshold) {
+void populate(const std::vector<dataset*>& datasets, cql_test_env& env, const table_config& cfg, size_t flush_threshold) {
     drop_keyspace_if_exists(env, "ks");
 
     env.execute_cql("CREATE KEYSPACE ks WITH REPLICATION = {'class' : 'SimpleStrategy', 'replication_factor' : 1};").get();
@@ -1533,8 +1588,8 @@ void populate(cql_test_env& env, const table_config& cfg, size_t flush_threshold
 
     database& db = env.local_db();
 
-    for (auto&& e : datasets) {
-        dataset& ds = *e.second;
+    for (dataset* ds_ptr : datasets) {
+        dataset& ds = *ds_ptr;
         output_mgr->add_dataset_population(ds);
 
         env.execute_cql(sprint(ds.create_table_statement() + " WITH compression = { 'sstable_compression' : '' };", ds.table_name())).get();
@@ -1559,6 +1614,11 @@ void populate(cql_test_env& env, const table_config& cfg, size_t flush_threshold
                         r.set_params(to_sstrings(flush_threshold));
                         rc.add(std::move(r));
                     }
+                }
+
+                if (!rc.result_count()) {
+                    print_error("Not enough data to cross the flush threshold. \n"
+                                "Lower the flush threshold or increase the amount of data\n");
                 }
 
                 rc.done();
@@ -1663,11 +1723,11 @@ int main(int argc, char** argv) {
                     test_groups | boost::adaptors::transformed([] (auto&& tc) { return tc.name; }))
                 ),
             "Test groups to run")
-        ("run-datasets", bpo::value<std::vector<std::string>>()->default_value(
+        ("datasets", bpo::value<std::vector<std::string>>()->default_value(
                 boost::copy_range<std::vector<std::string>>(
                     datasets | boost::adaptors::transformed([] (auto&& e) { return e.first; }))
                 ),
-            "Limit the datasets which are tested")
+            "Use only the following datasets")
         ("list-tests", "Show available test groups")
         ("list-datasets", "Show available datasets")
         ("populate", "populate the table")
@@ -1683,6 +1743,7 @@ int main(int argc, char** argv) {
         ("output-format", bpo::value<sstring>()->default_value("text"), "Output file for results. 'text' (default) or 'json'")
         ("test-case-duration", bpo::value<double>()->default_value(1), "Duration in seconds of a single test case (0 for a single run).")
         ("data-directory", bpo::value<sstring>()->default_value("./perf_large_partition_data"), "Data directory")
+        ("output-directory", bpo::value<sstring>()->default_value("./perf_fast_forward_output"), "Results output directory (for 'json')")
         ("sstable-format", bpo::value<std::string>()->default_value("mc"), "Sstable format version to use during population")
         ;
 
@@ -1713,6 +1774,8 @@ int main(int argc, char** argv) {
         sstring datadir = app.configuration()["data-directory"].as<sstring>();
         ::mkdir(datadir.c_str(), S_IRWXU);
 
+        output_dir = app.configuration()["output-directory"].as<sstring>();
+
         db_cfg.enable_cache(app.configuration().count("enable-cache"));
         db_cfg.enable_commitlog(false);
         db_cfg.data_file_directories({datadir}, db::config::config_source::CommandLine);
@@ -1737,11 +1800,20 @@ int main(int argc, char** argv) {
 
                 output_mgr = std::make_unique<output_manager>(app.configuration()["output-format"].as<sstring>());
 
+                auto enabled_dataset_names = app.configuration()["datasets"].as<std::vector<std::string>>();
+                auto enabled_datasets = boost::copy_range<std::vector<dataset*>>(enabled_dataset_names
+                                        | boost::adaptors::transformed([&](auto&& name) {
+                    if (datasets.find(name) == datasets.end()) {
+                        throw std::runtime_error(sprint("No such dataset: %s", name));
+                    }
+                    return datasets[name].get();
+                }));
+
                 if (app.configuration().count("populate")) {
                     int n_rows = app.configuration()["rows"].as<int>();
                     int value_size = app.configuration()["value-size"].as<int>();
                     table_config cfg{name, n_rows, value_size};
-                    populate(env, cfg, app.configuration()["flush-threshold"].as<size_t>());
+                    populate(enabled_datasets, env, cfg, app.configuration()["flush-threshold"].as<size_t>());
                 } else {
                     if (smp::count != 1) {
                         throw std::runtime_error("The test must be run with one shard");
@@ -1768,14 +1840,6 @@ int main(int argc, char** argv) {
                     auto enabled_test_groups = test_groups | boost::adaptors::filtered([&] (auto&& tc) {
                         return requested_test_groups.count(tc.name) != 0;
                     });
-
-                    auto enabled_datasets = app.configuration()["run-datasets"].as<std::vector<std::string>>()
-                        | boost::adaptors::transformed([&](auto&& name) {
-                            if (datasets.find(name) == datasets.end()) {
-                                throw std::runtime_error(sprint("No such dataset: %s", name));
-                            }
-                            return datasets[name].get();
-                        });
 
                     auto compaction_guard = make_compaction_disabling_guard(boost::copy_range<std::vector<table*>>(
                         enabled_datasets | boost::adaptors::transformed([&] (auto&& ds) {
