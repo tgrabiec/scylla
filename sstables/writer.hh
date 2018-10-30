@@ -52,6 +52,10 @@ public:
         _offset.offset += s.size();
         return _out.write(s);
     }
+    output_stream<char>::place_holder write_placeholder(size_t size) {
+        _offset.offset += size;
+        return _out.write_placeholder(size);
+    }
     future<> flush() {
         return _out.flush();
     }

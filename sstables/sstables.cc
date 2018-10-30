@@ -32,6 +32,7 @@
 #include "core/thread.hh"
 #include <seastar/core/shared_future.hh>
 #include <seastar/core/byteorder.hh>
+#include <seastar/core/simple-stream.hh>
 #include <iterator>
 
 #include "types.hh"
@@ -224,6 +225,15 @@ write(sstable_version_types v, file_writer& out, T i) {
     i = net::hton(*nr);
     auto p = reinterpret_cast<const char*>(&i);
     out.write(p, sizeof(T)).get();
+}
+
+template <typename T>
+inline typename std::enable_if_t<std::is_integral<T>::value, void>
+write(seastar::simple_memory_output_stream out, T i) {
+    auto *nr = reinterpret_cast<const net::packed<T> *>(&i);
+    i = net::hton(*nr);
+    auto p = reinterpret_cast<const char*>(&i);
+    out.write(p, sizeof(T));
 }
 
 template <typename T>
@@ -2796,14 +2806,14 @@ private:
                     const row_time_properties& properties, bytes_view cell_path = {});
 
     // Writes information about row liveness (formerly 'row marker')
-    void write_liveness_info(file_writer& writer, const row_marker& marker);
+    void write_liveness_info(file_writer& writer, const row_marker& marker, row_flags& flags);
 
     // Writes a CQL collection (list, set or map)
     void write_collection(file_writer& writer, const column_definition& cdef, collection_mutation_view collection,
                           const row_time_properties& properties, bool has_complex_deletion);
 
-    void write_cells(file_writer& writer, column_kind kind, const row& row_body, const row_time_properties& properties, bool has_complex_deletion = false);
-    void write_row_body(file_writer& writer, const clustering_row& row, bool has_complex_deletion);
+    void write_cells(file_writer& writer, column_kind kind, const row& row_body, const row_time_properties& properties, row_flags&);
+    void write_row_body(file_writer& writer, const clustering_row& row, row_flags&);
     void write_static_row(const row& static_row);
 
     // Clustered is a term used to denote an entity that has a clustering key prefix
@@ -3163,7 +3173,7 @@ void sstable_writer_m::write_cell(file_writer& writer, atomic_cell_view cell, co
     _sst.get_stats().on_cell_write();
 }
 
-void sstable_writer_m::write_liveness_info(file_writer& writer, const row_marker& marker) {
+void sstable_writer_m::write_liveness_info(file_writer& writer, const row_marker& marker, row_flags& flags) {
     if (marker.is_missing()) {
         return;
     }
@@ -3171,12 +3181,14 @@ void sstable_writer_m::write_liveness_info(file_writer& writer, const row_marker
     uint64_t timestamp = marker.timestamp();
     _c_stats.update_timestamp(timestamp);
     write_delta_timestamp(writer, timestamp);
+    flags |= row_flags::has_timestamp;
 
-    auto write_expiring_liveness_info = [this, &writer] (uint32_t ttl, uint64_t ldt) {
+    auto write_expiring_liveness_info = [&] (uint32_t ttl, uint64_t ldt) {
         _c_stats.update_ttl(ttl);
         _c_stats.update_local_deletion_time(ldt);
         write_delta_ttl(writer, ttl);
         write_delta_local_deletion_time(writer, ldt);
+        flags |= row_flags::has_ttl;
     };
     if (!marker.is_live()) {
         write_expiring_liveness_info(expired_liveness_ttl, marker.deletion_time().time_since_epoch().count());
@@ -3211,16 +3223,16 @@ void sstable_writer_m::write_collection(file_writer& writer, const column_defini
 }
 
 void sstable_writer_m::write_cells(file_writer& writer, column_kind kind, const row& row_body,
-        const row_time_properties& properties, bool has_complex_deletion) {
+        const row_time_properties& properties, row_flags& rflags) {
     // Note that missing columns are written based on the whole set of regular columns as defined by schema.
     // This differs from Origin where all updated columns are tracked and the set of filled columns of a row
     // is compared with the set of all columns filled in the memtable. So our encoding may be less optimal in some cases
     // but still valid.
     write_missing_columns(writer, _schema, row_body);
-    row_body.for_each_cell([this, &writer, kind, &properties, has_complex_deletion] (column_id id, const atomic_cell_or_collection& c) {
+    row_body.for_each_cell([this, &writer, kind, &properties, &rflags] (column_id id, const atomic_cell_or_collection& c) {
         auto&& column_definition = _schema.column_at(kind, id);
         if (!column_definition.is_atomic()) {
-            write_collection(writer, column_definition, c.as_collection_mutation(), properties, has_complex_deletion);
+            write_collection(writer, column_definition, c.as_collection_mutation(), properties, bool(rflags & row_flags::has_complex_deletion));
             return;
         }
         atomic_cell_view cell = c.as_atomic_cell(column_definition);
@@ -3230,13 +3242,14 @@ void sstable_writer_m::write_cells(file_writer& writer, column_kind kind, const 
     });
 }
 
-void sstable_writer_m::write_row_body(file_writer& writer, const clustering_row& row, bool has_complex_deletion) {
-    write_liveness_info(writer, row.marker());
+void sstable_writer_m::write_row_body(file_writer& writer, const clustering_row& row, row_flags& flags) {
+    write_liveness_info(writer, row.marker(), flags);
     if (row.tomb()) {
         auto dt = to_deletion_time(row.tomb().tomb());
         _c_stats.update_timestamp(dt.marked_for_delete_at);
         _c_stats.update_local_deletion_time(dt.local_deletion_time);
         write_delta_deletion_time(writer, dt);
+        flags |= row_flags::has_deletion;
     }
     row_time_properties properties;
     if (!row.marker().is_missing()) {
@@ -3247,7 +3260,7 @@ void sstable_writer_m::write_row_body(file_writer& writer, const clustering_row&
         }
     }
 
-    return write_cells(writer, column_kind::regular_column, row.cells(), properties, has_complex_deletion);
+    return write_cells(writer, column_kind::regular_column, row.cells(), properties, flags);
 }
 
 template <typename Func>
@@ -3275,7 +3288,7 @@ void sstable_writer_m::write_static_row(const row& static_row) {
     write(_sst.get_version(), *_data_writer, flags);
     write(_sst.get_version(), *_data_writer, row_extended_flags::is_static);
 
-    write_cells(_tmp_writer, column_kind::static_column, static_row, row_time_properties{});
+    write_cells(_tmp_writer, column_kind::static_column, static_row, row_time_properties{}, flags);
     _tmp_writer.flush().get();
 
     uint64_t row_body_size = _tmp_bufs.size() + unsigned_vint::serialized_size(0);
@@ -3319,16 +3332,8 @@ static bool row_has_complex_deletion(const schema& s, const row& r) {
 void sstable_writer_m::write_clustered(const clustering_row& clustered_row, uint64_t prev_row_size) {
     row_flags flags = row_flags::none;
     row_extended_flags ext_flags = row_extended_flags::none;
-    const row_marker& marker = clustered_row.marker();
-    if (!marker.is_missing()) {
-        flags |= row_flags::has_timestamp;
-        if (!marker.is_live() || marker.is_expiring()) {
-            flags |= row_flags::has_ttl;
-        }
-    }
 
     if (clustered_row.tomb().tomb()) {
-        flags |= row_flags::has_deletion;
         if (clustered_row.tomb().tomb() && clustered_row.tomb().is_shadowable()) {
             ext_flags = row_extended_flags::has_shadowable_deletion;
         }
@@ -3341,20 +3346,25 @@ void sstable_writer_m::write_clustered(const clustering_row& clustered_row, uint
     if (has_complex_deletion) {
         flags |= row_flags::has_complex_deletion;
     }
-    write(_sst.get_version(), *_data_writer, flags);
+
+    auto flags_ph = _data_writer->write_placeholder(1);
+
     if (ext_flags != row_extended_flags::none) {
         write(_sst.get_version(), *_data_writer, ext_flags);
     }
 
     write_clustering_prefix(*_data_writer, _schema, clustered_row.key(), ephemerally_full_prefix{_schema.is_compact_table()});
 
-    write_row_body(_tmp_writer, clustered_row, has_complex_deletion);
+    write_row_body(_tmp_writer, clustered_row, flags);
     _tmp_writer.flush().get();
 
     uint64_t row_body_size = _tmp_bufs.size() + unsigned_vint::serialized_size(prev_row_size);
     write_vint(*_data_writer, row_body_size);
     write_vint(*_data_writer, prev_row_size);
     flush_tmp_bufs();
+
+    write(flags_ph.get_stream(), static_cast<uint8_t>(flags));
+    flags_ph.close().get();
 
     // Collect statistics
     if (_schema.clustering_key_size()) {
