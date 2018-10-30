@@ -21,41 +21,11 @@
 
 #pragma once
 
-#if __has_include(<boost/container/small_vector.hpp>)
-
-#include <boost/container/small_vector.hpp>
-
-#if BOOST_VERSION >= 106000
+#include <seastar/util/small_vector.hh>
 
 namespace utils {
 
 template <typename T, size_t N>
-using small_vector = boost::container::small_vector<T, N>;
+using small_vector = seastar::small_vector<T, N>;
 
 }
-
-#else
-
-#include <vector>
-
-namespace utils {
-
-// Older versions of boost have a double-free bug, so use std::vector instead.
-template<typename T, size_t N>
-using small_vector = std::vector<T>;
-
-}
-
-#endif
-
-#else
-
-namespace utils {
-
-#include <vector>
-template <typename T, size_t N>
-using small_vector = std::vector<T>;
-
-}
-
-#endif
