@@ -1117,6 +1117,7 @@ public:
         return results.size();
     }
     void add(test_result rs) {
+        print(rs);
         add(test_result_vector{std::move(rs)});
     }
     void add(test_result_vector rs) {
