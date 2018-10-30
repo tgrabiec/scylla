@@ -127,51 +127,66 @@ class checksummed_file_data_sink_impl : public data_sink_impl {
     data_sink _out;
     struct checksum& _c;
     uint32_t& _full_checksum;
+    circular_buffer<temporary_buffer<char>> _bufs;
+    condition_variable _cv;
+    bool _closed = false;
+    future<> _worker;
 public:
     checksummed_file_data_sink_impl(file f, struct checksum& c, uint32_t& full_file_checksum, file_output_stream_options options)
             : _out(make_file_data_sink(std::move(f), std::move(options)))
             , _c(c)
             , _full_checksum(full_file_checksum)
+            , _worker(worker())
             {}
 
     future<> put(net::packet data) {
-        size_t chunk_offset = 0;
-        uint32_t per_chunk_checksum = ChecksumType::init_checksum();
-        for (auto&& f : data.fragments()) {
-            size_t offset = 0;
-            while (offset < f.size) {
-                size_t size = std::min(size_t(_c.chunk_size) - chunk_offset, f.size);
-                per_chunk_checksum = ChecksumType::checksum(per_chunk_checksum, f.base + offset, size);
-                offset += size;
-                chunk_offset += size;
-                if (chunk_offset == _c.chunk_size || offset == f.size) {
-                    _full_checksum = ChecksumType::checksum_combine(_full_checksum, per_chunk_checksum, chunk_offset);
-                    _c.checksums.push_back(per_chunk_checksum);
-                    per_chunk_checksum = ChecksumType::init_checksum();
-                    chunk_offset = 0;
-                }
-            }
+        for (auto&& buf : data.release()) {
+            _bufs.emplace_back(std::move(buf));
         }
-        return _out.put(std::move(data));
+        _cv.signal();
+        return make_ready_future<>();
     }
     virtual future<> put(temporary_buffer<char> buf) override {
+        _bufs.emplace_back(std::move(buf));
+        _cv.signal();
+        return make_ready_future<>();
+    }
+
+    future<> worker() {
         // bufs will usually be a multiple of chunk size, but this won't be the case for
         // the last buffer being flushed.
+        return repeat([this] {
+            if (_bufs.empty()) {
+                if (_closed) {
+                    return make_ready_future<stop_iteration>(stop_iteration::yes);
+                }
+                return _cv.wait().then([this] {
+                    return stop_iteration::no;
+                });
+            }
+            temporary_buffer<char> buf = std::move(_bufs.front());
+            _bufs.pop_front();
+            for (size_t offset = 0; offset < buf.size(); offset += _c.chunk_size) {
+                size_t size = std::min(size_t(_c.chunk_size), buf.size() - offset);
+                uint32_t per_chunk_checksum = ChecksumType::init_checksum();
 
-        for (size_t offset = 0; offset < buf.size(); offset += _c.chunk_size) {
-            size_t size = std::min(size_t(_c.chunk_size), buf.size() - offset);
-            uint32_t per_chunk_checksum = ChecksumType::init_checksum();
-
-            per_chunk_checksum = ChecksumType::checksum(per_chunk_checksum, buf.begin() + offset, size);
-            _full_checksum = ChecksumType::checksum_combine(_full_checksum, per_chunk_checksum, size);
-            _c.checksums.push_back(per_chunk_checksum);
-        }
-        return _out.put(std::move(buf));
+                per_chunk_checksum = ChecksumType::checksum(per_chunk_checksum, buf.begin() + offset, size);
+                _full_checksum = ChecksumType::checksum_combine(_full_checksum, per_chunk_checksum, size);
+                _c.checksums.push_back(per_chunk_checksum);
+            }
+            return _out.put(std::move(buf)).then([this] {
+                return stop_iteration::no;
+            });
+        });
     }
 
     virtual future<> close() {
-        // Nothing to do, because close at the file_stream level will call flush on us.
-        return _out.close();
+        _closed = true;
+        _cv.signal();
+        return _worker.then([this] {
+            // Nothing to do, because close at the file_stream level will call flush on us.
+            return _out.close();
+        });
     }
 };
 
