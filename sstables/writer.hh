@@ -130,7 +130,26 @@ public:
             , _full_checksum(full_file_checksum)
             {}
 
-    future<> put(net::packet data) { abort(); }
+    future<> put(net::packet data) {
+        size_t chunk_offset = 0;
+        uint32_t per_chunk_checksum = ChecksumType::init_checksum();
+        for (auto&& f : data.fragments()) {
+            size_t offset = 0;
+            while (offset < f.size) {
+                size_t size = std::min(size_t(_c.chunk_size) - chunk_offset, f.size);
+                per_chunk_checksum = ChecksumType::checksum(per_chunk_checksum, f.base + offset, size);
+                offset += size;
+                chunk_offset += size;
+                if (chunk_offset == _c.chunk_size || offset == f.size) {
+                    _full_checksum = ChecksumType::checksum_combine(_full_checksum, per_chunk_checksum, chunk_offset);
+                    _c.checksums.push_back(per_chunk_checksum);
+                    per_chunk_checksum = ChecksumType::init_checksum();
+                    chunk_offset = 0;
+                }
+            }
+        }
+        return _out.put(std::move(data));
+    }
     virtual future<> put(temporary_buffer<char> buf) override {
         // bufs will usually be a multiple of chunk size, but this won't be the case for
         // the last buffer being flushed.
