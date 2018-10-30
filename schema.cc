@@ -235,6 +235,8 @@ void schema::rebuild() {
 
     _v3_columns = v3_columns::from_v2_schema(*this);
     _full_slice = make_shared(partition_slice_builder(*this).build());
+    _clustering_key_size = column_offset(column_kind::static_column) - column_offset(column_kind::clustering_key);
+    _regular_column_count = _raw._columns.size() - column_offset(column_kind::regular_column);
 }
 
 const column_mapping& schema::get_column_mapping() const {
@@ -1127,18 +1129,8 @@ schema::partition_key_size() const {
 }
 
 column_count_type
-schema::clustering_key_size() const {
-    return column_offset(column_kind::static_column) - column_offset(column_kind::clustering_key);
-}
-
-column_count_type
 schema::static_columns_count() const {
     return column_offset(column_kind::regular_column) - column_offset(column_kind::static_column);
-}
-
-column_count_type
-schema::regular_columns_count() const {
-    return _raw._columns.size() - column_offset(column_kind::regular_column);
 }
 
 schema::const_iterator_range_type
