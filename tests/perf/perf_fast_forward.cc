@@ -905,6 +905,39 @@ public:
     }
 };
 
+class small_part_with_static_ds : public multipart_ds, public dataset {
+public:
+    small_part_with_static_ds() : dataset("small-part-static",
+        "Many small partitions with one clustering row and some having a static row",
+        "create table %s (pk int, ck int, s1 int static, value blob, primary key (pk, ck))") {}
+
+    generator_fn make_generator(schema_ptr s, const table_config& cfg) override {
+        auto value = data_value(make_blob(cfg.value_size));
+        auto& value_cdef = *s->get_column_definition("value");
+        auto& s1_cdef = *s->get_column_definition("s1");
+        return [s, pk = 0, n_pk = n_partitions(cfg), &value_cdef, &s1_cdef, value] () mutable -> stdx::optional<mutation> {
+            if (pk == n_pk) {
+                return stdx::nullopt;
+            }
+            auto ts = api::new_timestamp();
+            mutation m(s, partition_key::from_single_value(*s, data_value(pk).serialize()));
+            auto ck = clustering_key::from_single_value(*s, data_value(0).serialize());
+            auto& row = m.partition().clustered_row(*s, ck);
+            row.cells().apply(value_cdef, atomic_cell::make_live(*value_cdef.type, ts, value.serialize()));
+            if (pk % 2 == 0) {
+                m.partition().static_row().apply(s1_cdef,
+                    atomic_cell::make_live(*s1_cdef.type, ts, value.serialize()));
+            }
+            ++pk;
+            return m;
+        };
+    }
+
+    int n_partitions(const table_config& cfg) override {
+        return cfg.n_rows;
+    }
+};
+
 class large_part_ds2 : public simple_large_part_ds {
 public:
     large_part_ds2() : simple_large_part_ds("large-part-ds2", "One large partition with just range tombstones") {}
@@ -1540,6 +1573,7 @@ auto make_datasets() {
     add(std::unique_ptr<dataset>(new small_part_ds1));
     add(std::unique_ptr<dataset>(new large_part_ds1));
     add(std::unique_ptr<dataset>(new large_part_ds2));
+    add(std::unique_ptr<dataset>(new small_part_with_static_ds));
     return dsets;
 }
 
