@@ -905,6 +905,36 @@ public:
     }
 };
 
+class large_part_ds2 : public simple_large_part_ds {
+public:
+    large_part_ds2() : simple_large_part_ds("large-part-ds2", "One large partition with just range tombstones") {}
+
+    generator_fn make_generator(schema_ptr s, const table_config& cfg) override {
+        auto value = data_value(make_blob(cfg.value_size));
+        auto& value_cdef = *s->get_column_definition("value");
+        auto pk = partition_key::from_single_value(*s, data_value(0).serialize());
+        auto base_gc = gc_clock::now();
+        return [this, s, ck = 0, n_ck = n_rows(cfg), &value_cdef, value, pk, base_gc] () mutable -> stdx::optional<mutation> {
+            if (ck == n_ck) {
+                return stdx::nullopt;
+            }
+            auto tomb = tombstone(api::new_timestamp(), base_gc + gc_clock::duration(ck));
+            mutation m(s, pk);
+            auto ckey = make_ck(*s, ck);
+            m.partition().apply_delete(*s, range_tombstone(
+                position_in_partition::before_key(ckey),
+                position_in_partition::after_key(ckey),
+                tomb));
+            ++ck;
+            return m;
+        };
+    }
+
+    int n_rows(const table_config& cfg) override {
+        return cfg.n_rows * 10;
+    }
+};
+
 class small_part_ds1 : public multipart_ds, public dataset {
 public:
     small_part_ds1() : dataset("small-part", "Many small partitions with no clustering key",
@@ -1509,6 +1539,7 @@ auto make_datasets() {
     };
     add(std::unique_ptr<dataset>(new small_part_ds1));
     add(std::unique_ptr<dataset>(new large_part_ds1));
+    add(std::unique_ptr<dataset>(new large_part_ds2));
     return dsets;
 }
 
