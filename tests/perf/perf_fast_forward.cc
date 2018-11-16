@@ -93,6 +93,7 @@ struct table_config {
     sstring name;
     int n_rows;
     int value_size;
+    bool with_compression;
 };
 
 class dataset;
@@ -1600,7 +1601,10 @@ void populate(const std::vector<dataset*>& datasets, cql_test_env& env, const ta
         dataset& ds = *ds_ptr;
         output_mgr->add_dataset_population(ds);
 
-        env.execute_cql(sprint(ds.create_table_statement() + " WITH compression = { 'sstable_compression' : '' };", ds.table_name())).get();
+        env.execute_cql(sprint(ds.create_table_statement()
+                               + (cfg.with_compression ? " WITH compression = { 'sstable_compression': 'LZ4Compressor' };"
+                                                       : " WITH compression = { 'sstable_compression' : '' };"),
+            ds.table_name())).get();
 
         column_family& cf = find_table(db, ds);
         auto s = cf.schema();
@@ -1745,6 +1749,7 @@ int main(int argc, char** argv) {
         ("enable-cache", "Enables cache")
         ("keep-cache-across-test-groups", "Clears the cache between test groups")
         ("keep-cache-across-test-cases", "Clears the cache between test cases in each test group")
+        ("with-compression", "Generates compressed sstables")
         ("rows", bpo::value<int>()->default_value(1000000), "Number of CQL rows in a partition. Relevant only for population.")
         ("value-size", bpo::value<int>()->default_value(100), "Size of value stored in a cell. Relevant only for population.")
         ("name", bpo::value<std::string>()->default_value("default"), "Name of the configuration")
@@ -1829,7 +1834,8 @@ int main(int argc, char** argv) {
                     int n_rows = app.configuration()["rows"].as<int>();
                     int value_size = app.configuration()["value-size"].as<int>();
                     auto flush_threshold = app.configuration()["flush-threshold"].as<size_t>();
-                    table_config cfg{name, n_rows, value_size};
+                    bool with_compression = app.configuration().count("with-compression");
+                    table_config cfg{name, n_rows, value_size, with_compression};
                     populate(enabled_datasets, env, cfg, flush_threshold);
                 } else {
                     if (smp::count != 1) {
