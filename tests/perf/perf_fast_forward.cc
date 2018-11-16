@@ -1611,7 +1611,7 @@ void populate(const std::vector<dataset*>& datasets, cql_test_env& env, const ta
         size_t fragments = 0;
         result_collector rc;
 
-        output_mgr->set_test_param_names({{"flush_threshold", "{:<7}"}}, test_result::stats_names());
+        output_mgr->set_test_param_names({{"flush@ (MiB)", "{:<12}"}}, test_result::stats_names());
 
         cf.run_with_compaction_disabled([&] {
             return seastar::async([&] {
@@ -1623,7 +1623,7 @@ void populate(const std::vector<dataset*>& datasets, cql_test_env& env, const ta
                         metrics_snapshot before;
                         cf.flush().get();
                         auto r = test_result(std::move(before), std::exchange(fragments, 0));
-                        r.set_params(to_sstrings(flush_threshold));
+                        r.set_params({format("{:d}", flush_threshold / MB)});
                         rc.add(std::move(r));
                     }
                 }
