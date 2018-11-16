@@ -526,7 +526,11 @@ public:
 
         // compute 32-bit checksum for compressed data.
         uint32_t per_chunk_checksum = ChecksumType::checksum(compressed.get(), len);
-        _full_checksum = ChecksumType::checksum_combine(_full_checksum, per_chunk_checksum, len);
+        if constexpr (ChecksumType::prefer_combine()) {
+            _full_checksum = ChecksumType::checksum_combine(_full_checksum, per_chunk_checksum, len);
+        } else {
+            _full_checksum = ChecksumType::checksum(_full_checksum, compressed.get(), len);
+        }
 
         // write checksum into buffer after compressed data.
         write_be<uint32_t>(compressed.get_write() + len, per_chunk_checksum);

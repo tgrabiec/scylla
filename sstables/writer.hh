@@ -140,7 +140,11 @@ public:
             uint32_t per_chunk_checksum = ChecksumType::init_checksum();
 
             per_chunk_checksum = ChecksumType::checksum(per_chunk_checksum, buf.begin() + offset, size);
-            _full_checksum = ChecksumType::checksum_combine(_full_checksum, per_chunk_checksum, size);
+            if constexpr (ChecksumType::prefer_combine()) {
+                _full_checksum = ChecksumType::checksum_combine(_full_checksum, per_chunk_checksum, size);
+            } else {
+                _full_checksum = ChecksumType::checksum(_full_checksum, buf.begin() + offset, size);
+            }
             _c.checksums.push_back(per_chunk_checksum);
         }
         return _out.put(std::move(buf));
