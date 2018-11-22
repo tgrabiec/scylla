@@ -1039,7 +1039,7 @@ seastar_deps = 'practically_anything_can_change_so_lets_run_it_every_time_and_re
 args.user_cflags += " " + pkg_config("--cflags", "jsoncpp")
 libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-llz4', '-lz', '-lsnappy', pkg_config("--libs", "jsoncpp"),
                  maybe_static(args.staticboost, '-lboost_filesystem'), ' -lcrypt', ' -lcryptopp',
-                 maybe_static(args.staticboost, '-lboost_date_time'), ])
+                 maybe_static(args.staticboost, '-lboost_date_time')])
 
 xxhash_dir = 'xxHash'
 
@@ -1116,7 +1116,7 @@ with open(buildfile, 'w') as f:
     for mode in build_modes:
         modeval = modes[mode]
         f.write(textwrap.dedent('''\
-            cxxflags_{mode} = {opt} -DXXH_PRIVATE_API -I. -I $builddir/{mode}/gen -I seastar/include -I seastar/include -I seastar/build/{mode}/gen/include
+            cxxflags_{mode} = {opt} -DXXH_PRIVATE_API -I. -I $builddir/{mode}/gen -I seastar/include -I seastar/include -I libs/libdeflate/ -I seastar/build/{mode}/gen/include
             rule cxx.{mode}
               command = $cxx -MD -MT $out -MF $out.d {seastar_cflags} $cxxflags $cxxflags_{mode} $obj_cxxflags -c -o $out $in
               description = CXX $out
@@ -1179,6 +1179,9 @@ with open(buildfile, 'w') as f:
             if binary.endswith('.a'):
                 f.write('build $builddir/{}/{}: ar.{} {}\n'.format(mode, binary, mode, str.join(' ', objs)))
             else:
+                objs.extend(['$builddir/' + mode + '/' + artifact for artifact in [
+                    'libs/libdeflate/libdeflate.a'
+                ]])
                 if binary.startswith('tests/'):
                     local_libs = '$libs'
                     if binary not in tests_not_using_seastar_test_framework or binary in pure_boost_tests:
@@ -1269,6 +1272,10 @@ with open(buildfile, 'w') as f:
             ''').format(**locals()))
         f.write('build build/{mode}/scylla-package.tar.gz: package build/{mode}/scylla build/{mode}/iotune build/SCYLLA-RELEASE-FILE build/SCYLLA-VERSION-FILE | always\n'.format(**locals()))
         f.write('    mode = {mode}\n'.format(**locals()))
+        f.write('rule libdeflate.{mode}\n'.format(**locals()))
+        f.write('    command = make -C libs/libdeflate BUILD_DIR=../../build/{mode}/libs/libdeflate/\n'.format(**locals()))
+        f.write('build build/{mode}/libs/libdeflate/libdeflate.a: libdeflate.{mode}\n'.format(**locals()))
+
     f.write('build {}: phony\n'.format(seastar_deps))
     f.write(textwrap.dedent('''\
         rule configure

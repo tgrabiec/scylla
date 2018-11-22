@@ -134,6 +134,7 @@ target_compile_options(scylla PUBLIC
 # available dynamically, though.
 target_include_directories(scylla PUBLIC
         .
+        libs/libdeflate
         ${SEASTAR_DPDK_INCLUDE_DIRS}
         ${SEASTAR_INCLUDE_DIRS}
         ${Boost_INCLUDE_DIRS}
