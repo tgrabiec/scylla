@@ -115,6 +115,28 @@ abstract_replication_strategy::get_cached_endpoints() {
 static
 void
 insert_token_range_to_sorted_container_while_unwrapping(
+    const dht::token& prev_tok,
+    const dht::token& tok,
+    dht::token_range_vector& ret) {
+    if (prev_tok < tok) {
+        ret.emplace_back(
+            dht::token_range::bound(prev_tok, false),
+            dht::token_range::bound(tok, true));
+    } else {
+        ret.emplace_back(
+            dht::token_range::bound(prev_tok, false),
+            stdx::nullopt);
+        // Insert in front to maintain sorded order
+        ret.emplace(
+            ret.begin(),
+            stdx::nullopt,
+            dht::token_range::bound(tok, true));
+    }
+}
+
+static
+void
+insert_token_range_to_sorted_container_while_unwrapping_good(
         const dht::token& prev_tok,
         const dht::token& tok,
         dht::token_range_vector& ret) {
@@ -150,6 +172,22 @@ abstract_replication_strategy::get_ranges(inet_address ep) const {
         for (inet_address a : calculate_natural_endpoints(tok, _token_metadata)) {
             if (a == ep) {
                 insert_token_range_to_sorted_container_while_unwrapping(prev_tok, tok, ret);
+                break;
+            }
+        }
+        prev_tok = tok;
+    }
+    return ret;
+}
+
+dht::token_range_vector
+abstract_replication_strategy::get_ranges_good(inet_address ep) const {
+    dht::token_range_vector ret;
+    auto prev_tok = _token_metadata.sorted_tokens().back();
+    for (auto tok : _token_metadata.sorted_tokens()) {
+        for (inet_address a : calculate_natural_endpoints(tok, _token_metadata)) {
+            if (a == ep) {
+                insert_token_range_to_sorted_container_while_unwrapping_good(prev_tok, tok, ret);
                 break;
             }
         }

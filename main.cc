@@ -282,6 +282,41 @@ static stdx::optional<std::vector<sstring>> parse_hinted_handoff_enabled(sstring
     return dcs;
 }
 
+
+static bool belongs_to_current_node(const dht::token& t, const dht::token_range_vector& sorted_owned_ranges) {
+    auto low = std::lower_bound(sorted_owned_ranges.begin(), sorted_owned_ranges.end(), t,
+        [] (const range<dht::token>& a, const dht::token& b) {
+            // check that range a is before token b.
+            return a.after(b, dht::token_comparator());
+        });
+
+    if (low != sorted_owned_ranges.end()) {
+        const dht::token_range& r = *low;
+        return r.contains(t, dht::token_comparator());
+    }
+
+    return false;
+}
+
+static void find_lost_ranges(database& db, sstring ks_name) {
+    std::cerr << "Checking keyspace " << ks_name << "\n";
+    const locator::token_metadata& tm = service::get_local_storage_service().get_token_metadata();
+    auto&& rs = db.find_keyspace(ks_name).get_replication_strategy();
+    for (auto&& ep : tm.get_all_endpoints()) {
+        std::cerr << "Checking endpoint " << ep << " ...\n";
+        auto ranges = rs.get_ranges(ep);
+        auto good_ranges = rs.get_ranges_good(ep);
+        for (auto&& r : good_ranges) {
+            auto end_tok = r.end() ? r.end()->value() : dht::maximum_token();
+            assert(belongs_to_current_node(end_tok, good_ranges));
+            if (!belongs_to_current_node(end_tok, ranges)) {
+                std::cerr << "Missing range @" << ep << ": " << r << "\n";
+            }
+        }
+        std::cerr << "Ranges @" << ep << ": " << to_string(ranges) << "\n";
+    }
+}
+
 int main(int ac, char** av) {
   int return_value = 0;
   try {
@@ -810,6 +845,13 @@ int main(int ac, char** av) {
             }
             api::set_server_done(ctx).get();
             supervisor::notify("serving");
+
+            database& d = db.local();
+            for (auto&& ks_e : d.keyspaces()) {
+                auto ks_name = ks_e.first;
+                find_lost_ranges(d, ks_name);
+            }
+
             // Register at_exit last, so that storage_service::drain_on_shutdown will be called first
             engine().at_exit([] {
                 return repair_shutdown(service::get_local_storage_service().db());
