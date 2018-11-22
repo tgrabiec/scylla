@@ -77,11 +77,12 @@ endif
 
 COMMON_HEADERS := $(wildcard common/*.h)
 DEFAULT_TARGETS :=
+BUILD_DIR ?= ./
 
 #### Library
 
-STATIC_LIB := libdeflate$(STATIC_LIB_SUFFIX)
-SHARED_LIB := libdeflate$(SHARED_LIB_SUFFIX)
+STATIC_LIB := $(BUILD_DIR)/libdeflate$(STATIC_LIB_SUFFIX)
+SHARED_LIB := $(BUILD_DIR)/libdeflate$(SHARED_LIB_SUFFIX)
 
 LIB_CFLAGS += $(CFLAGS) -fvisibility=hidden -D_ANSI_SOURCE
 
@@ -111,19 +112,20 @@ ifndef DISABLE_GZIP
     endif
 endif
 
-STATIC_LIB_OBJ := $(LIB_SRC:.c=.o)
-SHARED_LIB_OBJ := $(LIB_SRC:.c=.shlib.o)
+STATIC_LIB_OBJ := $(addprefix $(BUILD_DIR), $(LIB_SRC:.c=.o))
+SHARED_LIB_OBJ := $(addprefix $(BUILD_DIR), $(LIB_SRC:.c=.shlib.o))
 
 # Compile static library object files
-$(STATIC_LIB_OBJ): %.o: %.c $(LIB_HEADERS) $(COMMON_HEADERS) .lib-cflags
+$(STATIC_LIB_OBJ): $(BUILD_DIR)%.o: %.c $(LIB_HEADERS) $(COMMON_HEADERS) .lib-cflags
+	mkdir -p $(@D)
 	$(QUIET_CC) $(CC) -o $@ -c $(LIB_CFLAGS) $<
 
 # Compile shared library object files
-$(SHARED_LIB_OBJ): %.shlib.o: %.c $(LIB_HEADERS) $(COMMON_HEADERS) .lib-cflags
+$(SHARED_LIB_OBJ): $(BUILD_DIR)%.shlib.o: %.c $(LIB_HEADERS) $(COMMON_HEADERS) .lib-cflags
 	$(QUIET_CC) $(CC) -o $@ -c $(LIB_CFLAGS) $(SHARED_LIB_CFLAGS) -DLIBDEFLATE_DLL $<
 
 # Create static library
-$(STATIC_LIB):$(STATIC_LIB_OBJ)
+$(STATIC_LIB): $(STATIC_LIB_OBJ)
 	$(QUIET_AR) $(AR) cr $@ $+
 
 DEFAULT_TARGETS += $(STATIC_LIB)
@@ -226,7 +228,8 @@ clean:
 		programs/*.o programs/*.obj \
 		$(DEFAULT_TARGETS) $(TEST_PROGRAMS) programs/config.h \
 		libdeflate.lib libdeflatestatic.lib \
-		.lib-cflags .prog-cflags
+		.lib-cflags .prog-cflags \
+		$(STATIC_LIB_OBJ) $(STATIC_LIB)
 
 realclean: clean
 	rm -f tags cscope* run_tests.log
