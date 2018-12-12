@@ -513,6 +513,10 @@ public:
         }
     }
 
+    void log_test_values(const sstring_vec& params, const stats_values& stats) {
+        _writers[0]->write_test_values(params, stats, _param_names, _stats_names);
+    }
+
     void add_test_static_param(sstring name, sstring description) {
         for (auto&& w : _writers) {
             w->write_test_static_param(name, description);
@@ -1085,6 +1089,9 @@ public:
         add(test_result_vector{std::move(rs)});
     }
     void add(test_result_vector rs) {
+        for (auto&& r : rs) {
+            output_mgr->log_test_values(r.get_params(), r.get_stats_values());
+        }
         if (results.empty()) {
             results.resize(rs.size());
         }
