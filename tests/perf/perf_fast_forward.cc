@@ -873,31 +873,52 @@ public:
 };
 
 class simple_large_part_ds : public clustered_ds, public dataset {
+protected:
+    int _column_count;
+    size_t _value_size;
+    size_t _row_count;
 public:
-    simple_large_part_ds(std::string name, std::string desc) : dataset(name, desc,
-        "create table {} (pk int, ck int, value blob, primary key (pk, ck))") {}
+    simple_large_part_ds(std::string name, unsigned column_count, size_t value_size, size_t row_count)
+        : dataset(name, "One large partition with many small rows",
+            [column_count] {
+                return format("create table {{}} (pk int, ck int, {} primary key (pk, ck))",
+                    ::join("", boost::irange(0u, column_count) | boost::adaptors::transformed([] (int i) {
+                        return format("value{:d} blob, ", i);
+                    })));
+            }().c_str())
+        , _column_count(column_count)
+        , _value_size(value_size)
+        , _row_count(row_count)
+    { }
 
     int n_rows(const table_config& cfg) override {
-        return cfg.n_rows;
+        return _row_count;
     }
-};
 
-class large_part_ds1 : public simple_large_part_ds {
-public:
-    large_part_ds1() : simple_large_part_ds("large-part-ds1", "One large partition with many small rows") {}
+    void add_param_names(output_items& param_names) override {
+        param_names.emplace_back(output_item{"cell sz (B)", "{:<11}"});
+        param_names.emplace_back(output_item{"cells", "{:<5}"});
+    }
+
+    void add_params(sstring_vec& values) override {
+        values.emplace_back(format("{:d}", _value_size));
+        values.emplace_back(format("{:d}", _column_count));
+    }
 
     generator_fn make_generator(schema_ptr s, const table_config& cfg) override {
-        auto value = data_value(make_blob(cfg.value_size));
-        auto& value_cdef = *s->get_column_definition("value");
+        auto value = data_value(make_blob(_value_size));
         auto pk = partition_key::from_single_value(*s, data_value(0).serialize());
-        return [this, s, ck = 0, n_ck = n_rows(cfg), &value_cdef, value, pk] () mutable -> std::optional<mutation> {
+        return [this, s, ck = 0, n_ck = n_rows(cfg), value, pk] () mutable -> std::optional<mutation> {
             if (ck == n_ck) {
                 return std::nullopt;
             }
             auto ts = api::new_timestamp();
             mutation m(s, pk);
             auto& row = m.partition().clustered_row(*s, make_ck(*s, ck));
-            row.cells().apply(value_cdef, atomic_cell::make_live(*value_cdef.type, ts, value.serialize()));
+            for (int i = 0; i < _column_count; ++i) {
+                auto& cdef = s->regular_column_at(i);
+                row.cells().apply(cdef, atomic_cell::make_live(*cdef.type, ts, value.serialize()));
+            }
             ++ck;
             return m;
         };
@@ -1508,7 +1529,13 @@ auto make_datasets() {
         dsets.emplace(std::move(name), std::move(ds));
     };
     add(std::make_unique<small_part_ds1>());
-    add(std::make_unique<large_part_ds1>());
+    add(std::make_unique<simple_large_part_ds>("large-part-ds1",   1,      8, 8000000));
+    add(std::make_unique<simple_large_part_ds>("large-part-ds2",   1,    100, 2000000));
+    add(std::make_unique<simple_large_part_ds>("large-part-ds3",   1,   1000, 2000000));
+    add(std::make_unique<simple_large_part_ds>("large-part-ds4",   1, 100000,   20000));
+    add(std::make_unique<simple_large_part_ds>("large-part-ds5",   6,    100, 2000000));
+    add(std::make_unique<simple_large_part_ds>("large-part-ds6",  32,     16, 1000000));
+    add(std::make_unique<simple_large_part_ds>("large-part-ds7", 128,     16,  200000));
     return dsets;
 }
 
