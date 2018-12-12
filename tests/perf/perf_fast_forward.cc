@@ -146,6 +146,9 @@ public:
     const std::string& create_table_statement() const { return _create_table_statement; }
 
     virtual generator_fn make_generator(schema_ptr, const table_config&) = 0;
+
+    virtual void add_param_names(output_items&) {}
+    virtual void add_params(sstring_vec&) {}
 };
 
 // Adapts a function which accepts DataSet& as its argument to a dataset_acceptor
@@ -1540,7 +1543,9 @@ void populate(const std::vector<dataset*>& datasets, cql_test_env& env, const ta
         size_t fragments = 0;
         result_collector rc;
 
-        output_mgr->set_test_param_names({{"flush@ (MiB)", "{:<12}"}}, test_result::stats_names());
+        output_items param_names = {{"flush@ (MiB)", "{:<12}"}};
+        ds_ptr->add_param_names(param_names);
+        output_mgr->set_test_param_names(param_names, test_result::stats_names());
 
         cf.run_with_compaction_disabled([&] {
             return seastar::async([&] {
@@ -1552,7 +1557,9 @@ void populate(const std::vector<dataset*>& datasets, cql_test_env& env, const ta
                         metrics_snapshot before;
                         cf.flush().get();
                         auto r = test_result(std::move(before), std::exchange(fragments, 0));
-                        r.set_params({format("{:d}", flush_threshold / MB)});
+                        sstring_vec params = {format("{:d}", flush_threshold / MB)};
+                        ds_ptr->add_params(params);
+                        r.set_params(params);
                         rc.add(std::move(r));
                     }
                 }
