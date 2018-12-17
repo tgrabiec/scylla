@@ -46,11 +46,17 @@ std::ostream& operator<<(std::ostream& out, const partition_key::with_schema_wra
 }
 
 std::ostream& operator<<(std::ostream& out, const partition_key_view& pk) {
-    return out << "pk{" << to_hex(pk.representation()) << "}";
+    with_linearized_managed_bytes([&] {
+        out << "pk{" << to_hex(pk.representation()) << "}";
+    });
+    return out;
 }
 
 std::ostream& operator<<(std::ostream& out, const clustering_key_prefix& ckp) {
-    return out << "ckp{" << to_hex(ckp) << "}";
+    with_linearized_managed_bytes([&] {
+        out << "ckp{" << to_hex(ckp) << "}";
+    });
+    return out;
 }
 
 const legacy_compound_view<partition_key_view::c_type>
