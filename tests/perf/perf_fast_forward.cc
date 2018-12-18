@@ -92,11 +92,7 @@ struct table_config {
     sstring name;
     int n_rows;
     int value_size;
-    bool with_compression;
-
-    sstring compressor() const {
-        return {with_compression ? "LZ4Compressor" : ""};
-    }
+    sstring compressor;
 };
 
 class dataset;
@@ -1575,7 +1571,7 @@ void populate(const std::vector<dataset*>& datasets, cql_test_env& env, const ta
         output_mgr->add_dataset_population(ds);
 
         env.execute_cql(format("{} WITH compression = {{ 'sstable_compression': '{}' }};",
-            ds.create_table_statement(), cfg.compressor())).get();
+            ds.create_table_statement(), cfg.compressor)).get();
 
         column_family& cf = find_table(db, ds);
         auto s = cf.schema();
@@ -1808,7 +1804,8 @@ int main(int argc, char** argv) {
                     int value_size = app.configuration()["value-size"].as<int>();
                     auto flush_threshold = app.configuration()["flush-threshold"].as<size_t>();
                     bool with_compression = app.configuration().count("with-compression");
-                    table_config cfg{name, n_rows, value_size, with_compression};
+                    auto compressor = with_compression ? "LZ4Compressor" : "";
+                    table_config cfg{name, n_rows, value_size, compressor};
                     populate(enabled_datasets, env, cfg, flush_threshold);
                 } else {
                     if (smp::count != 1) {
