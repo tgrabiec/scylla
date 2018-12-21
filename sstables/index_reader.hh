@@ -85,6 +85,7 @@ private:
 
     temporary_buffer<char> _key;
     uint32_t _promoted_index_size;
+    uint32_t _promoted_index_end;
     uint64_t _position;
     uint64_t _partition_header_length = 0;
     std::optional<deletion_time> _deletion_time;
@@ -108,6 +109,7 @@ public:
     }
 
     processing_result process_state(temporary_buffer<char>& data) {
+        auto current_pos = [&] { return this->position() - data.size(); };
         auto read_vint_or_uint64 = [this] (temporary_buffer<char>& data) {
             return is_mc_format() ? this->read_unsigned_vint(data) : this->read_64(data);
         };
@@ -124,6 +126,7 @@ public:
             _state = state::KEY_SIZE;
             break;
         case state::KEY_SIZE:
+            _entry_offset = current_pos();
             if (this->read_16(data) != continuous_data_consumer::read_status::ready) {
                 _state = state::KEY_BYTES;
                 break;
@@ -146,6 +149,7 @@ public:
             }
         case state::PARTITION_HEADER_LENGTH_1:
             _promoted_index_size = get_uint32();
+            _promoted_index_end = current_pos() + _promoted_index_size;
             if (_promoted_index_size == 0) {
                 _state = state::CONSUME_ENTRY;
                 goto state_CONSUME_ENTRY;
@@ -182,19 +186,9 @@ public:
             }
         state_CONSUME_ENTRY:
         case state::CONSUME_ENTRY: {
-            auto entry_header_length = is_mc_format()
-                    ? sizeof(uint16_t) + unsigned_vint::serialized_size(_position) + unsigned_vint::serialized_size(_promoted_index_size)
-                    : sizeof(uint16_t) + sizeof(uint64_t) + sizeof(uint32_t);
-            auto len = entry_header_length + _key.size() + _promoted_index_size;
-            size_t delta = 0;
+            _promoted_index_size = _promoted_index_end - current_pos();
             if (_deletion_time) {
                 _num_pi_blocks = get_uint32();
-                delta = is_mc_format()
-                        ? (unsigned_vint::serialized_size(_partition_header_length) + sizeof(uint32_t)
-                           + sizeof(uint64_t) + unsigned_vint::serialized_size(_num_pi_blocks))
-                        : sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t);
-
-                _promoted_index_size -= delta;
             }
             auto data_size = data.size();
             std::optional<input_stream<char>> promoted_index_stream;
@@ -206,8 +200,7 @@ public:
                 } else {
                     promoted_index_stream = make_prepended_input_stream(
                             std::move(data),
-                            make_file_input_stream(_index_file, _entry_offset + _key.size() + entry_header_length + delta + data_size,
-                                   _promoted_index_size - data_size, _options).detach());
+                            make_file_input_stream(_index_file, this->position(), _promoted_index_size - data_size, _options).detach());
                 }
             } else {
                 _num_pi_blocks = 0;
@@ -224,7 +217,6 @@ public:
                 }
             }
             _consumer.consume_entry(index_entry{std::move(_key), _position, std::move(index)}, _entry_offset);
-            _entry_offset += len;
             _deletion_time = std::nullopt;
             _num_pi_blocks = 0;
             _state = state::START;
