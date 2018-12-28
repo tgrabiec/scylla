@@ -659,9 +659,7 @@ void test_all_data_is_read_back(populate_fn populate) {
 
     for_each_mutation([&populate] (const mutation& m) mutable {
         auto ms = populate(m.schema(), {m});
-        mutation copy(m);
-        copy.partition().compact_for_compaction(*copy.schema(), always_gc, gc_clock::now());
-        assert_that(ms.make_reader(m.schema())).produces_compacted(copy);
+        assert_that(ms.make_reader(m.schema())).produces(m);
     });
 }
 
