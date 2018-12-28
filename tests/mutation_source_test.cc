@@ -32,6 +32,7 @@
 #include "mutation_rebuilder.hh"
 #include "random-utils.hh"
 #include "cql3/cql3_type.hh"
+#include "cql_test_env.hh"
 #include <boost/algorithm/string/join.hpp>
 
 // partitions must be sorted by decorated key
@@ -1552,6 +1553,10 @@ public:
             return ccb.build(timestamp_dist(_gen));
         };
 
+        auto random_tombstone = [&] {
+            return tombstone(timestamp_dist(_gen), expiry_dist(_gen));
+        };
+
         auto set_random_cells = [&] (row& r, column_kind kind) {
             auto columns_to_set = column_count_dist(_gen);
             for (column_id i = 0; i < columns_to_set; ++i) {
@@ -1581,6 +1586,9 @@ public:
                                     atomic_cell::collection_member::yes));
                         }
                     }
+                    if (_bool_dist(_gen)) {
+                        m.tomb = random_tombstone();
+                    }
                     std::sort(m.cells.begin(), m.cells.end(), [] (auto&& c1, auto&& c2) {
                             return timeuuid_type->as_less_comparator()(c1.first, c2.first);
                     });
@@ -1599,10 +1607,6 @@ public:
                 auto cell = _bool_dist(_gen) ? get_live_cell() : get_dead_cell();
                 r.apply(_schema->column_at(kind, cid), std::move(cell));
             }
-        };
-
-        auto random_tombstone = [&] {
-            return tombstone(timestamp_dist(_gen), expiry_dist(_gen));
         };
 
         auto random_row_marker = [&] {

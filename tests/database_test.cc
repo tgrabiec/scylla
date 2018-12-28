@@ -32,6 +32,7 @@
 #include "mutation_source_test.hh"
 #include "schema_registry.hh"
 #include "service/migration_manager.hh"
+#include "make_random_string.hh"
 
 SEASTAR_TEST_CASE(test_querying_with_limits) {
     return do_with_cql_env([](cql_test_env& e) {
@@ -106,4 +107,68 @@ SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_sourc
         });
         return make_ready_future<>();
     }).get();
+}
+
+
+schema_ptr make_4009_schema(cql_test_env& env) {
+    env.execute_cql("CREATE TABLE ks.tbl ("
+                    " field1 text,"
+                    " field2 smallint,"
+                    " field3 tinyint,"
+                    " field4 timeuuid,"
+                    " field5 smallint,"
+                    " field6 smallint,"
+                    " field7 inet,"
+                    " field8 map<text, text>,"
+                    " PRIMARY KEY ((field1, field2, field3), field4)"
+                    " ) WITH CLUSTERING ORDER BY (field4 DESC)"
+                    " AND bloom_filter_fp_chance = 0.1"
+                    " AND caching = {'keys': 'ALL', 'rows_per_partition': 'NONE'}"
+                    " AND comment = ''"
+                    " AND compaction = {"
+                    " 'class': 'org.apache.cassandra.db.compaction.TimeWindowCompactionStrategy',"
+                    " 'compaction_window_unit': 'DAYS',"
+                    " 'compaction_window_size': 7"
+                    " }"
+                    " AND compression = {"
+                    " 'sstable_compression': 'org.apache.cassandra.io.compress.LZ4Compressor',"
+                    " 'chunk_length_kb': '64'"
+                    " }"
+                    " AND crc_check_chance = 1.0"
+                    " AND dclocal_read_repair_chance = 0.1"
+                    " AND default_time_to_live = 0"
+                    " AND gc_grace_seconds = 864000"
+                    " AND max_index_interval = 2048"
+                    " AND memtable_flush_period_in_ms = 0"
+                    " AND min_index_interval = 128"
+                    " AND read_repair_chance = 0.0"
+                    " AND speculative_retry = '99PERCENTILE';").get();
+    return env.local_db().find_schema("ks", "tbl");
+}
+
+SEASTAR_THREAD_TEST_CASE(test_4009) {
+    db::config cfg;
+    cfg.enable_sstables_mc_format() = true;
+    do_with_cql_env([] (cql_test_env& e) {
+        auto s = make_4009_schema(e);
+        for (int i = 0; i < 100; ++i) {
+            auto pk = utils::UUID_gen::get_time_UUID();
+            for (int j = 0; j < 100; ++j) {
+                auto ck = utils::UUID_gen::get_time_UUID();
+                e.execute_cql(
+                    format("insert into ks.tbl (field1, field2, field3, field4, field5, field6, field7, field8) values"
+                           " ('{}', 123, 124, {}, 1, 2, '127.0.0.1', {{'a': 'asd', '{}': '{}', '123': '123123'}});",
+                        pk,
+                        ck,
+                        to_hex(to_bytes(make_random_string(32))),
+                        to_hex(to_bytes(make_random_string(1*1024*1024))))).get();
+            }
+        }
+        e.local_db().flush_all_memtables().get();
+        auto rd = e.local_db().find_column_family(s->id()).make_streaming_reader(s, {query::full_partition_range});
+        rd.consume_pausable([&] (mutation_fragment&& mf) {
+            return stop_iteration::no;
+        }, db::no_timeout).get();
+        return make_ready_future<>();
+    }, cfg).get();
 }
