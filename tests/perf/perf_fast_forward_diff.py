@@ -3,6 +3,7 @@ import json
 import sys
 import os
 from termcolor import colored
+import argparse
 
 class Result:
     def __init__(self, path, params):
@@ -13,11 +14,48 @@ class Result:
         frags = self.params['frag/s']
         return float(frags[1] - frags[0])/frags[0]
 
+
+def diff_line(stat, left_v, right_v):
+    align = '%-10s'
+    annotation = None
+    try:
+        if left_v:
+            change = (right_v - left_v) * 100. / left_v
+            if change:
+                change_tolerance = 0 if stat in should_be_equal else 1
+                less_is_better = not stat in more_is_better and not stat in should_be_equal
+                if (less_is_better and change < 0) or (stat in more_is_better and change > 0):
+                    color = 'green'
+                elif abs(change) > change_tolerance:
+                    color = 'red'
+                else:
+                    color = 'yellow'
+                annotation = colored(align % ('(%s%.2f%%)' % (('', '+')[change >= 0], change)), color)
+        elif right_v:
+            if stat in should_be_equal or not stat in more_is_better:
+                color = 'red'
+            else:
+                color = 'grey'
+            annotation = colored(align % '(+inf)', color)
+    except TypeError:
+        pass
+    if annotation:
+        return "%-10s %s : %-20s %-20s " % (stat, annotation, left_v, right_v)
+    else:
+        return "%-21s : %-20s %-20s " % (stat, left_v, right_v)
+
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Compare results of perf_fast_forward")
+    parser.add_argument('--short', action="store_true", help="Show short summary")
+    parser.add_argument('older')
+    parser.add_argument('newer')
+    args = parser.parse_args()
+
     if len(sys.argv) != 3:
         print("Usage: %s <left:path-to-result-directory> <right:path-to-result-directory> " % sys.argv[0], file=sys.stderr)
-    left = sys.argv[1]
-    right = sys.argv[2]
+    left = args.older
+    right = args.newer
 
     more_is_better = set(['frag/s', 'max f/s', 'min f/s'])
     should_be_equal = set(['frags'])
@@ -51,33 +89,18 @@ if __name__ == "__main__":
                         params[stat] = (left_v, right_v)
                     results.append(Result(path, params))
 
-    for result in sorted(results, key=lambda r: r.throughput_relative_change()):
-        print("\n === Comparing %s === \n" % result.path)
-        align = '%-10s'
-        for stat, (left_v, right_v) in result.params.items():
-            annotation = None
-            try:
-                if left_v:
-                    change = (right_v - left_v) * 100. / left_v
-                    if change:
-                        change_tolerance = 0 if stat in should_be_equal else 1
-                        less_is_better = not stat in more_is_better and not stat in should_be_equal
-                        if (less_is_better and change < 0) or (stat in more_is_better and change > 0):
-                            color = 'green'
-                        elif abs(change) > change_tolerance:
-                            color = 'red'
-                        else:
-                            color = 'yellow'
-                        annotation = colored(align % ('(%s%.2f%%)' % (('', '+')[change >= 0], change)), color)
-                elif right_v:
-                    if stat in should_be_equal or not stat in more_is_better:
-                        color = 'red'
-                    else:
-                        color = 'grey'
-                    annotation = colored(align % '(+inf)', color)
-            except TypeError:
-                pass
-            if annotation:
-                print("%-10s %s : %-20s %-20s " % (stat, annotation, left_v, right_v))
-            else:
-                print("%-21s : %-20s %-20s " % (stat, left_v, right_v))
+    filtered_results = sorted(results, key=lambda r: r.throughput_relative_change())
+
+    for result in filtered_results:
+        if 'skip' in result.params and result.params['skip'] == ('0', '0'):
+            pass
+        else:
+            continue
+
+        if args.short:
+            frag_rate = result.params['frag/s']
+            print("%s %s" % (diff_line('frag/s', frag_rate[0], frag_rate[1]), result.path))
+        else:
+            print("\n === %s === \n" % result.path)
+            for stat, (left_v, right_v) in result.params.items():
+                print(diff_line(stat, left_v, right_v))

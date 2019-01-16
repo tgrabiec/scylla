@@ -497,12 +497,12 @@ class scylla_task_histogram(gdb.Command):
                 addr = (mem_start + idx * page_size + idx2 * objsize).reinterpret_cast(vptr_type).dereference()
                 if addr >= text_start and addr <= text_end:
                     vptr_count[int(addr)] += 1
-            if scanned_pages >= limit or len(vptr_count) >= limit:
-                break
+            # if scanned_pages >= limit or len(vptr_count) >= limit:
+            #     break
 
         for vptr, count in sorted(vptr_count.items(), key=lambda e: -e[1])[:30]:
             sym = resolve(vptr)
-            if sym:
+            if sym and 'task' in sym:
                 gdb.write('%10d: 0x%x %s\n' % (count, vptr, sym))
 
 
@@ -1269,7 +1269,7 @@ class seastar_thread_context(object):
         holder = gdb.Value(holder_addr).reinterpret_cast(self.ulong_type.pointer())
         saved = holder.dereference()
         gdb.execute('set *(void**)%s = 0' % holder_addr)
-        if gdb.parse_and_eval('arch_prctl(0x1003, %d)' % holder_addr) != 0:
+        if gdb.parse_and_eval('(int) arch_prctl(0x1003, %d)' % holder_addr) != 0:
             raise Exception('arch_prctl() failed')
         fs_base = holder.dereference()
         gdb.execute('set *(void**)%s = %s' % (holder_addr, saved))
