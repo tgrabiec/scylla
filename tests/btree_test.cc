@@ -67,10 +67,23 @@ BOOST_AUTO_TEST_CASE(test_consistent_with_std_set) {
         auto value = tests::random::get_int<int>();
         std::cout << "rnd check " << value << "\n";
 
-        auto in_reference = reference_set.find(item(value)) != reference_set.end();
-        auto in_set = set.find(item(value)) != set.end();
+        {
+            auto in_reference = reference_set.find(item(value)) != reference_set.end();
+            auto in_set = set.find(item(value)) != set.end();
 
-        BOOST_REQUIRE_EQUAL(in_reference, in_set);
+            BOOST_REQUIRE_EQUAL(in_reference, in_set);
+        }
+
+        {
+            auto i1 = reference_set.lower_bound(item(value));
+            auto i2 = set.lower_bound(item(value));
+
+            if (i1 == reference_set.end()) {
+                BOOST_REQUIRE(i2 == set.end());
+            } else {
+                BOOST_REQUIRE_EQUAL(i1->value, i2->value);
+            }
+        }
     }
 
     for (auto&& k : reference_set) {
@@ -87,18 +100,18 @@ BOOST_AUTO_TEST_CASE(test_consistent_with_std_set) {
     for (auto&& v : values) {
         std::cout << "remove " << v << "\n";
 
-        auto i = set.find(v);
-        BOOST_REQUIRE(i != set.end());
-        i = set.erase(i);
+        auto i1 = set.find(v);
+        BOOST_REQUIRE(i1 != set.end());
+        i1 = set.erase(i1);
 
-        auto ref_i = reference_set.erase(reference_set.find(v));
+        auto i2 = reference_set.erase(reference_set.find(v));
 
         BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
 
-        if (i == set.end()) {
-            BOOST_REQUIRE(ref_i == reference_set.end());
+        if (i1 == set.end()) {
+            BOOST_REQUIRE(i2 == reference_set.end());
         } else {
-            BOOST_REQUIRE_EQUAL(*i, *ref_i);
+            BOOST_REQUIRE_EQUAL(*i1, *i2);
         }
     }
 

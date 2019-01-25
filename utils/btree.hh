@@ -298,7 +298,48 @@ private:
     }
 public:
     iterator insert(T item, LessComparator less = LessComparator()) {
-        return insert_into_subtree(root, std::move(item), less, true, false);
+        reference<node>* ref = &root;
+        bool is_root = true;
+        bool is_right_child = false;
+
+        while (*ref) {
+            is_root = false;
+            if (less(item, (*ref)->item)) {
+                ref = &(*ref)->left;
+                is_right_child = false;
+            } else {
+                ref = &(*ref)->right;
+                is_right_child = true;
+            }
+        }
+
+        // FIXME: rebalance
+        *ref = make_node(std::move(item), is_root, is_right_child);
+        return iterator(ref->get());
+    }
+
+    iterator lower_bound(T item, LessComparator less = LessComparator()) {
+        node* n = root.get();
+        while (n) {
+            if (less(item, n->item)) {
+                if (n->left) {
+                    n = n->left.get();
+                } else {
+                    return iterator(n);
+                }
+            } else if (less(n->item, item)) {
+                if (n->right) {
+                    n = n->right.get();
+                } else {
+                    auto i = iterator(n);
+                    ++i;
+                    return i;
+                }
+            } else {
+                return iterator(n);
+            }
+        }
+        return end();
     }
 
     iterator find(T item, LessComparator less = LessComparator()) {
