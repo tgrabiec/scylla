@@ -63,6 +63,10 @@ BOOST_AUTO_TEST_CASE(test_consistent_with_std_set) {
         BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
     }
 
+    btree<item> set2;
+    set2.clone_from(set, [] (item i) { return i; });
+    BOOST_REQUIRE_EQUAL_COLLECTIONS(set2.begin(), set2.end(), reference_set.begin(), reference_set.end());
+
     for (int i = 0; i < 100; ++i) {
         auto value = tests::random::get_int<int>();
         std::cout << "rnd check " << value << "\n";

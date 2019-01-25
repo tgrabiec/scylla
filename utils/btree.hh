@@ -159,6 +159,13 @@ struct btree_node : public referenceable<btree_node<T>> {
         : flags((IS_ROOT * is_root) | (IS_RIGHT_CHILD * is_right_child))
     { }
 
+    template<typename Cloner>
+    btree_node(const btree_node& other, Cloner& cloner)
+        : flags(other.flags)
+    {
+        _item.data = cloner(other._item.data);
+    }
+
     template<typename... Args>
     void emplace(Args&&... args) {
         _item.data = T(std::forward<Args>(args)...);
@@ -246,13 +253,12 @@ public:
 // LSA-managed ordered collection of T.
 template <typename T, typename LessComparator = std::less<T>>
 class btree {
-    static constexpr size_t max_node_size = 8*1024;
-    static constexpr size_t node_capacity = max_node_size / sizeof(T);
+    //static constexpr size_t max_node_size = 8*1024;
+    //static constexpr size_t node_capacity = max_node_size / sizeof(T);
 private:
     using node = btree_node<T>;
-private:
     reference<node> root;
-public:
+public: // Iterators
     // Not stable across allocator's reference invalidation
     template<bool IsConst>
     class iterator_impl {
@@ -341,10 +347,11 @@ private:
         }
         return *ref;
     }
-    static reference<node> make_node(bool is_root, bool is_right) {
-        return reference<node>(*current_allocator().construct<node>(is_root, is_right));
+    template<typename... Args>
+    static reference<node> make_node(Args&&... args) {
+        return reference<node>(*current_allocator().construct<node>(std::forward<Args>(args)...));
     }
-public:
+public: // Insertion
     class placeholder {
         node* _node;
     public:
@@ -409,13 +416,11 @@ public:
     //
     // The placeholder must be either filled with emplace() or destroyed
     // before any other method is invoked on this instance.
-    placeholder insert_before(iterator it) {
-        // FIXME: rebalance
+    placeholder insert_before(iterator it, LessComparator less = LessComparator()) {
         if (!it._node) {
-            auto&& ref = end_ref();
-            ref = make_node(false, true);
-            return placeholder(ref.get());
+            return insert_back();
         } else {
+            // FIXME: rebalance
             auto old_left = std::move(it._node->left);
             it._node->left = make_node(false, false);
             it._node->left->left = std::move(old_left);
@@ -423,11 +428,73 @@ public:
         }
     }
 
+    // Inserts a place holder for an item which is after all items.
+    //
+    // The placeholder must be either filled with emplace() or destroyed
+    // before any other method is invoked on this instance.
+    placeholder insert_back(LessComparator less = LessComparator()) {
+        // FIXME: rebalance
+        auto&& ref = end_ref();
+        ref = make_node(false, true);
+        return placeholder(ref.get());
+    }
+
+    template<typename Cloner>
+    void clone_from(const btree& other, const Cloner& cloner) {
+        clear();
+
+        const node* other_node = other.root.get();
+        if (!other_node) {
+            return;
+        }
+
+        root = make_node(*other_node, cloner);
+        node* this_node = root.get();
+        while (other_node->left) {
+            other_node = other_node->left.get();
+            this_node->left = make_node(*other_node, cloner);
+            this_node = this_node->left.get();
+        }
+
+        while (other_node) {
+            if (other_node->right) {
+                other_node = &*other_node->right;
+                this_node->right = make_node(*other_node, cloner);
+                this_node = this_node->right.get();
+                while (other_node->left) {
+                    other_node = &*other_node->left;
+                    this_node->left = make_node(*other_node, cloner);
+                    this_node = this_node->left.get();
+                }
+            } else {
+                bool was_right;
+                do {
+                    was_right = other_node->is_right_child();
+                    other_node = other_node->parent();
+                    this_node = this_node->parent();
+                } while (other_node && was_right);
+            }
+        }
+    }
+
     iterator insert(T item, LessComparator less = LessComparator()) {
         placeholder ph = insert_placeholder(item, less);
         return ph.emplace(std::move(item));
     }
+public: // Erasing
+    void clear() {
+        root = {}; // FIXME: avoid recursion
+    }
 
+    ~btree() {
+        clear();
+    }
+
+    iterator erase(iterator it) noexcept {
+        node* next = it._node->erase_and_dispose();
+        return iterator(next);
+    }
+public: // Querying
     template<typename Key>
     const_iterator lower_bound(const Key& key, LessComparator less = LessComparator()) const {
         const node* n = root.get();
@@ -476,10 +543,5 @@ public:
     template<typename Key>
     iterator find(const Key& key, LessComparator less = LessComparator()) {
         return std::as_const(*this).find(key, less).unconst();
-    }
-
-    iterator erase(iterator it) noexcept {
-        node* next = it._node->erase_and_dispose();
-        return iterator(next);
     }
 };
