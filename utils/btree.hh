@@ -107,6 +107,96 @@ reference<T>& referenceable<T>::referer() {
     return *boost::intrusive::get_parent_from_member(_backref, &reference<T>::_ref);
 }
 
+template <typename T>
+struct btree_node : public referenceable<btree_node<T>> {
+    const uint8_t IS_ROOT = 0x01;
+    const uint8_t IS_RIGHT_CHILD = 0x02;
+
+    reference<btree_node> left;
+    reference<btree_node> right;
+
+    T item; // FIXME: many
+    uint8_t flags;
+
+    bool is_left_child() const { return !is_right_child(); }
+    bool is_right_child() const { return flags & IS_RIGHT_CHILD; }
+    bool is_root() const { return flags & IS_ROOT; }
+    void set_is_root(bool is_root) const { flags = (flags & ~IS_ROOT) | (IS_ROOT * is_root); }
+    void set_is_right_child(bool is_right) const { flags = (flags & ~IS_RIGHT_CHILD) | (IS_RIGHT_CHILD * is_right_child); }
+
+    btree_node* parent() {
+        if (is_root()) {
+            return nullptr;
+        }
+        return boost::intrusive::get_parent_from_member(&this->referer(),
+            is_right_child() ? &btree_node::right : &btree_node::left);
+    }
+
+    btree_node(T&& it, bool is_root, bool is_right_child)
+        : item(std::move(it))
+        , flags((IS_ROOT * is_root) | (IS_RIGHT_CHILD * is_right_child))
+    { }
+
+    btree_node(btree_node&&) noexcept = default;
+
+    btree_node* erase_and_dispose() noexcept {
+        auto old_flags = flags;
+
+        if (!right) {
+            auto old_left = std::move(left);
+            if (old_left) {
+                old_left->flags = old_flags;
+            }
+
+            // Find successor
+            auto next = this;
+            {
+                bool was_right;
+                do {
+                    was_right = next->is_right_child();
+                    next = next->parent();
+                } while (next && was_right);
+            }
+
+            this->referer() = std::move(old_left);
+            return next;
+        } else {
+            auto old_left = std::move(left);
+            auto old_right = std::move(right);
+            btree_node* node = &*old_right;
+            if (!node->left) {
+                old_right->left = std::move(old_left);
+                old_right->flags = old_flags;
+                this->referer() = std::move(old_right);
+                return node;
+            } else {
+                while (node->left) {
+                    node = &*node->left;
+                }
+                auto node_right = std::move(node->right);
+                if (node_right) {
+                    node_right->flags = node->flags;
+                }
+                node->left = std::move(old_left);
+                node->right = std::move(old_right);
+                node->flags = old_flags;
+                this->referer() = std::exchange(node->referer(), std::move(node_right));
+                return node;
+            }
+        }
+    }
+};
+
+template<typename T>
+class rbtree_auto_unlink_hook {
+public:
+    void erase_and_dispose() noexcept {
+        T* item = static_cast<T*>(this);
+        btree_node<T>* node = boost::intrusive::get_parent_from_member(item, &btree_node<T>::item);
+        node->erase_and_dispose();
+    }
+};
+
 // LSA-managed ordered collection of T.
 template <typename T, typename LessComparator = std::less<T>>
 class btree {
@@ -118,91 +208,9 @@ private:
         ~maybe_item() {}
         T data;
     };
-    struct node : public referenceable<node> {
-        const uint8_t IS_ROOT = 0x01;
-        const uint8_t IS_RIGHT_CHILD = 0x02;
-
-        reference<node> left;
-        reference<node> right;
-
-        T item; // FIXME: many
-        uint8_t flags;
-
-        bool is_left_child() const { return !is_right_child(); }
-        bool is_right_child() const { return flags & IS_RIGHT_CHILD; }
-        bool is_root() const { return flags & IS_ROOT; }
-        void set_is_root(bool is_root) const { flags = (flags & ~IS_ROOT) | (IS_ROOT * is_root); }
-        void set_is_right_child(bool is_right) const { flags = (flags & ~IS_RIGHT_CHILD) | (IS_RIGHT_CHILD * is_right_child); }
-
-        node* parent() {
-            if (is_root()) {
-                return nullptr;
-            }
-            return boost::intrusive::get_parent_from_member(&this->referer(), is_right_child() ? &node::right : &node::left);
-        }
-
-        node(T&& it, bool is_root, bool is_right_child)
-            : item(std::move(it))
-            , flags((IS_ROOT * is_root) | (IS_RIGHT_CHILD * is_right_child))
-        { }
-        node(node&&) noexcept = default;
-
-        node* successor_in_subtree() {
-            node* node = this;
-            if (node->right) {
-                node = &*node->right;
-                while (node->left) {
-                    node = &*node->left;
-                }
-            }
-            return node;
-        }
-
-        void unlink_and_destroy() noexcept {
-            auto old_flags = flags;
-
-            if (!right) {
-                auto old_left = std::move(left);
-                if (old_left) {
-                    old_left->flags = old_flags;
-                }
-                this->referer() = std::move(old_left);
-            } else {
-                auto old_left = std::move(left);
-                auto old_right = std::move(right);
-                node* node = &*old_right;
-                if (!node->left) {
-                    old_right->left = std::move(old_left);
-                    old_right->flags = old_flags;
-                    this->referer() = std::move(old_right);
-                } else {
-                    while (node->left) {
-                        node = &*node->left;
-                    }
-                    auto node_right = std::move(node->right);
-                    if (node_right) {
-                        node_right->flags = node->flags;
-                    }
-                    node->left = std::move(old_left);
-                    node->right = std::move(old_right);
-                    node->flags = old_flags;
-                    this->referer() = std::exchange(node->referer(), std::move(node_right));
-                }
-            }
-        }
-    };
+    using node = btree_node<T>;
 private:
     reference<node> root;
-public:
-    //template<auto_unlink_member_hook T::* Member>
-    //class auto_unlink_member_hook {
-    //public:
-    //    void unlink_and_destroy() noexcept {
-    //        T* item = boost::intrusive::get_parent_from_member(this, Member);
-    //        node* node = boost::intrusive::get_parent_from_member(item, &node::item);
-    //        node->unlink_and_destroy();
-    //    }
-    //};
 public:
     // Not stable across allocator's reference invalidation
     class iterator {
@@ -307,7 +315,8 @@ public:
         return end();
     }
 
-    void erase(iterator it) noexcept {
-        it._node->unlink_and_destroy();
+    iterator erase(iterator it) noexcept {
+        node* next = it._node->erase_and_dispose();
+        return iterator(next);
     }
 };

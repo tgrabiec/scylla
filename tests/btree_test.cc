@@ -89,14 +89,20 @@ BOOST_AUTO_TEST_CASE(test_consistent_with_std_set) {
 
         auto i = set.find(v);
         BOOST_REQUIRE(i != set.end());
-        set.erase(i);
+        i = set.erase(i);
 
-        reference_set.erase(reference_set.find(v));
+        auto ref_i = reference_set.erase(reference_set.find(v));
 
         BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
+
+        if (i == set.end()) {
+            BOOST_REQUIRE(ref_i == reference_set.end());
+        } else {
+            BOOST_REQUIRE_EQUAL(*i, *ref_i);
+        }
     }
 
-    for (int i = 0; i < 100; ++i) {
+    for (int i = 0; i < 1000; ++i) {
         auto value = i;
         std::cout << "insert " << value << "\n";
         set.insert(item(value));
@@ -105,7 +111,7 @@ BOOST_AUTO_TEST_CASE(test_consistent_with_std_set) {
         BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
     }
 
-    for (int v = 0; v < 100; ++v) {
+    for (int v = 0; v < 1000; ++v) {
         std::cout << "remove " << v << "\n";
 
         auto i = set.find(v);
