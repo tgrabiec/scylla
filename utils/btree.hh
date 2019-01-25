@@ -48,7 +48,12 @@ public:
         }
     }
 
-    reference<T>* referer();
+    bool is_referenced() const {
+        return _backref;
+    }
+
+    // Must be called only when is_referenced().
+    reference<T>& referer();
 };
 
 template<typename T>
@@ -98,8 +103,8 @@ public:
 };
 
 template<typename T>
-reference<T>* referenceable<T>::referer() {
-    return boost::intrusive::get_parent_from_member(_backref, &reference<T>::_ref);
+reference<T>& referenceable<T>::referer() {
+    return *boost::intrusive::get_parent_from_member(_backref, &reference<T>::_ref);
 }
 
 // LSA-managed ordered collection of T.
@@ -121,7 +126,7 @@ private:
         reference<node> right;
 
         T item; // FIXME: many
-        uint8_t flags = 0;
+        uint8_t flags;
 
         bool is_left_child() const { return !is_right_child(); }
         bool is_right_child() const { return flags & IS_RIGHT_CHILD; }
@@ -133,7 +138,7 @@ private:
             if (is_root()) {
                 return nullptr;
             }
-            return boost::intrusive::get_parent_from_member(this->referer(), is_right_child() ? &node::right : &node::left);
+            return boost::intrusive::get_parent_from_member(&this->referer(), is_right_child() ? &node::right : &node::left);
         }
 
         node(T&& it, bool is_root, bool is_right_child)
@@ -141,14 +146,69 @@ private:
             , flags((IS_ROOT * is_root) | (IS_RIGHT_CHILD * is_right_child))
         { }
         node(node&&) noexcept = default;
+
+        node* successor_in_subtree() {
+            node* node = this;
+            if (node->right) {
+                node = &*node->right;
+                while (node->left) {
+                    node = &*node->left;
+                }
+            }
+            return node;
+        }
+
+        void unlink_and_destroy() noexcept {
+            auto old_flags = flags;
+
+            if (!right) {
+                auto old_left = std::move(left);
+                if (old_left) {
+                    old_left->flags = old_flags;
+                }
+                this->referer() = std::move(old_left);
+            } else {
+                auto old_left = std::move(left);
+                auto old_right = std::move(right);
+                node* node = &*old_right;
+                if (!node->left) {
+                    old_right->left = std::move(old_left);
+                    old_right->flags = old_flags;
+                    this->referer() = std::move(old_right);
+                } else {
+                    while (node->left) {
+                        node = &*node->left;
+                    }
+                    auto node_right = std::move(node->right);
+                    if (node_right) {
+                        node_right->flags = node->flags;
+                    }
+                    node->left = std::move(old_left);
+                    node->right = std::move(old_right);
+                    node->flags = old_flags;
+                    this->referer() = std::exchange(node->referer(), std::move(node_right));
+                }
+            }
+        }
     };
 private:
     reference<node> root;
+public:
+    //template<auto_unlink_member_hook T::* Member>
+    //class auto_unlink_member_hook {
+    //public:
+    //    void unlink_and_destroy() noexcept {
+    //        T* item = boost::intrusive::get_parent_from_member(this, Member);
+    //        node* node = boost::intrusive::get_parent_from_member(item, &node::item);
+    //        node->unlink_and_destroy();
+    //    }
+    //};
 public:
     // Not stable across allocator's reference invalidation
     class iterator {
         node* _node = nullptr;
     public:
+        friend class btree;
         using iterator_category = std::bidirectional_iterator_tag;
         using value_type = T;
         using difference_type = ssize_t;
@@ -199,11 +259,13 @@ public:
     };
 
     iterator begin() {
-        reference<node>* node = &root;
-        while ((*node)->left) {
-            node = &(*node)->left;
+        node* node = root.get();
+        if (node) {
+            while (node->left) {
+                node = node->left.get();
+            }
         }
-        return iterator(node->get());
+        return iterator(node);
     }
 
     iterator end() {
@@ -214,6 +276,7 @@ private:
         return reference<node>(*current_allocator().construct<node>(std::move(item), is_root, is_right));
     }
     iterator insert_into_subtree(reference<node>& ref, T&& item, LessComparator& less, bool is_root, bool is_right) {
+        // FIXME: rebalance
         if (!ref) {
             ref = make_node(std::move(item), is_root, is_right);
             return iterator(ref.get());
@@ -228,5 +291,23 @@ private:
 public:
     iterator insert(T item, LessComparator less = LessComparator()) {
         return insert_into_subtree(root, std::move(item), less, true, false);
+    }
+
+    iterator find(T item, LessComparator less = LessComparator()) {
+        node* n = root.get();
+        while (n) {
+            if (less(item, n->item)) {
+                n = n->left.get();
+            } else if (less(n->item, item)) {
+                n = n->right.get();
+            } else {
+                return iterator(n);
+            }
+        }
+        return end();
+    }
+
+    void erase(iterator it) noexcept {
+        it._node->unlink_and_destroy();
     }
 };

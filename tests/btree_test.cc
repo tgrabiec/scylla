@@ -23,6 +23,8 @@
 
 #include <boost/test/unit_test.hpp>
 #include <boost/range/algorithm/for_each.hpp>
+#include <boost/range/algorithm/random_shuffle.hpp>
+#include <boost/range/adaptors.hpp>
 #include <seastar/util/variant_utils.hh>
 #include <map>
 
@@ -40,17 +42,77 @@ struct item {
     friend std::ostream& operator<<(std::ostream& out, const item& it) {
         return out << it.value;
     }
+
+    static auto transformed_to_value() {
+        return boost::adaptors::transformed([] (const item& i) { return i.value; });
+    }
 };
 
-BOOST_AUTO_TEST_CASE(test_consistent_with_map) {
+BOOST_AUTO_TEST_CASE(test_consistent_with_std_set) {
     std::set<item> reference_set;
     btree<item> set;
+
+    BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
 
     while (reference_set.size() < 1000) {
         auto value = tests::random::get_int<int>();
         std::cout << "insert " << value << "\n";
         set.insert(item(value));
         reference_set.insert(item(value));
+
+        BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
+    }
+
+    for (int i = 0; i < 100; ++i) {
+        auto value = tests::random::get_int<int>();
+        std::cout << "rnd check " << value << "\n";
+
+        auto in_reference = reference_set.find(item(value)) != reference_set.end();
+        auto in_set = set.find(item(value)) != set.end();
+
+        BOOST_REQUIRE_EQUAL(in_reference, in_set);
+    }
+
+    for (auto&& k : reference_set) {
+        std::cout << "check " << k.value << "\n";
+
+        auto i = set.find(k);
+        BOOST_REQUIRE(i != set.end());
+        BOOST_REQUIRE_EQUAL(k.value, i->value);
+    }
+
+    auto values = boost::copy_range<std::vector<int>>(reference_set | item::transformed_to_value());
+    boost::random_shuffle(values);
+
+    for (auto&& v : values) {
+        std::cout << "remove " << v << "\n";
+
+        auto i = set.find(v);
+        BOOST_REQUIRE(i != set.end());
+        set.erase(i);
+
+        reference_set.erase(reference_set.find(v));
+
+        BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
+    }
+
+    for (int i = 0; i < 100; ++i) {
+        auto value = i;
+        std::cout << "insert " << value << "\n";
+        set.insert(item(value));
+        reference_set.insert(item(value));
+
+        BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
+    }
+
+    for (int v = 0; v < 100; ++v) {
+        std::cout << "remove " << v << "\n";
+
+        auto i = set.find(v);
+        BOOST_REQUIRE(i != set.end());
+        set.erase(i);
+
+        reference_set.erase(reference_set.find(v));
 
         BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
     }
