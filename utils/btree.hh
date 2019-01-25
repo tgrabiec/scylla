@@ -54,6 +54,7 @@ public:
 
     // Must be called only when is_referenced().
     reference<T>& referer();
+    const reference<T>& referer() const;
 };
 
 template<typename T>
@@ -95,6 +96,7 @@ public:
     }
 
     T* get() { return _ref; }
+    const T* get() const { return _ref; }
     T* operator->() { return _ref; }
     const T* operator->() const { return _ref; }
     T& operator*() { return *_ref; }
@@ -104,6 +106,11 @@ public:
 
 template<typename T>
 reference<T>& referenceable<T>::referer() {
+    return *boost::intrusive::get_parent_from_member(_backref, &reference<T>::_ref);
+}
+
+template<typename T>
+const reference<T>& referenceable<T>::referer() const {
     return *boost::intrusive::get_parent_from_member(_backref, &reference<T>::_ref);
 }
 
@@ -136,12 +143,16 @@ struct btree_node : public referenceable<btree_node<T>> {
     void set_is_right_child(bool is_right) const { flags = (flags & ~IS_RIGHT_CHILD) | (IS_RIGHT_CHILD * is_right_child); }
     void set_position_flags(uint8_t new_flags) { flags = (flags & ~POSITION_FLAGS) | (new_flags & POSITION_FLAGS); }
 
-    btree_node* parent() {
+    const btree_node* parent() const {
         if (is_root()) {
             return nullptr;
         }
         return boost::intrusive::get_parent_from_member(&this->referer(),
             is_right_child() ? &btree_node::right : &btree_node::left);
+    }
+
+    btree_node* parent() {
+        return const_cast<btree_node*>(std::as_const(*this).parent());
     }
 
     btree_node(bool is_root, bool is_right_child)
@@ -243,23 +254,25 @@ private:
     reference<node> root;
 public:
     // Not stable across allocator's reference invalidation
-    class iterator {
-        node* _node = nullptr;
+    template<bool IsConst>
+    class iterator_impl {
+        using node_ptr = std::conditional_t<IsConst, const node*, node*>;
+        node_ptr _node = nullptr;
     public:
         friend class btree;
         using iterator_category = std::bidirectional_iterator_tag;
-        using value_type = T;
+        using value_type = std::conditional_t<IsConst, const T, T>;
         using difference_type = ssize_t;
-        using pointer = T*;
-        using reference = T&;
+        using pointer = value_type*;
+        using reference = value_type&;
     public:
-        explicit iterator(node* n) : _node(n) {}
-        iterator() = default;
+        explicit iterator_impl(node_ptr n) : _node(n) {}
+        iterator_impl() = default;
 
-        T& operator*() { return _node->item(); }
-        T* operator->() { return &_node->item(); }
+        reference operator*() { return _node->item(); }
+        pointer operator->() { return &_node->item(); }
 
-        iterator& operator++() {
+        iterator_impl& operator++() {
             if (_node->right) {
                 _node = &*_node->right;
                 while (_node->left) {
@@ -274,42 +287,60 @@ public:
             }
             return *this;
         }
-        iterator operator++(int) {
-            iterator it = *this;
+        iterator_impl operator++(int) {
+            iterator_impl it = *this;
             operator++();
             return it;
         }
-        iterator& operator--() {
+        iterator_impl& operator--() {
             // FIXME
             return *this;
         }
-        iterator operator--(int) {
-            iterator it = *this;
+        iterator_impl operator--(int) {
+            iterator_impl it = *this;
             operator--();
             return it;
         }
-        bool operator==(const iterator& other) const {
+        bool operator==(const iterator_impl& other) const {
             return _node == other._node;
         }
-        bool operator!=(const iterator& other) const {
+        bool operator!=(const iterator_impl& other) const {
             return !(*this == other);
+        }
+        iterator_impl<false> unconst() const {
+            return iterator_impl<false>(const_cast<node*>(_node));
         }
     };
 
-    iterator begin() {
-        node* node = root.get();
+    using iterator = iterator_impl<false>;
+    using const_iterator = iterator_impl<true>;
+
+    iterator begin() { return std::as_const(*this).begin().unconst(); }
+    iterator end() { return std::as_const(*this).end().unconst(); }
+
+    const_iterator begin() const {
+        const node* node = root.get();
         if (node) {
             while (node->left) {
                 node = node->left.get();
             }
         }
-        return iterator(node);
+        return const_iterator(node);
     }
 
-    iterator end() {
-        return iterator();
+    const_iterator end() const {
+        return const_iterator();
     }
 private:
+    reference<node>& end_ref() {
+        reference<node>* ref = &root;
+        if (ref) {
+            while ((*ref)->right) {
+                ref = &(*ref)->right;
+            }
+        }
+        return *ref;
+    }
     static reference<node> make_node(bool is_root, bool is_right) {
         return reference<node>(*current_allocator().construct<node>(is_root, is_right));
     }
@@ -357,31 +388,86 @@ public:
         return placeholder(ref->get());
     }
 
+    // Inserts a place holder for item where the key should be
+    // using the given successor hint to avoid lookup when possible.
+    //
+    // The placeholder must be either filled with emplace() or destroyed
+    // before any other method is invoked on this instance.
+    template<typename Key>
+    placeholder insert_placeholder(iterator successor_hint, const Key& key, LessComparator less) {
+        if (!successor_hint._node) {
+            auto&& ref = end_ref();
+            if (less(ref->item(), key)) {
+                ref->left = make_node(false, true);
+                return placeholder(ref->left.get());
+            }
+        }
+        return insert_placeholder(key, less);
+    }
+
+    // Inserts a place holder for an item right before the item referred to by the given iterator.
+    //
+    // The placeholder must be either filled with emplace() or destroyed
+    // before any other method is invoked on this instance.
+    placeholder insert_before(iterator it) {
+        // FIXME: rebalance
+        if (!it._node) {
+            auto&& ref = end_ref();
+            ref = make_node(false, true);
+            return placeholder(ref.get());
+        } else {
+            auto old_left = std::move(it._node->left);
+            it._node->left = make_node(false, false);
+            it._node->left->left = std::move(old_left);
+            return placeholder(it._node->left.get());
+        }
+    }
+
     iterator insert(T item, LessComparator less = LessComparator()) {
         placeholder ph = insert_placeholder(item, less);
         return ph.emplace(std::move(item));
     }
 
     template<typename Key>
-    iterator lower_bound(const Key& key, LessComparator less = LessComparator()) {
-        node* n = root.get();
+    const_iterator lower_bound(const Key& key, LessComparator less = LessComparator()) const {
+        const node* n = root.get();
         while (n) {
             if (less(key, n->item())) {
                 if (n->left) {
                     n = n->left.get();
                 } else {
-                    return iterator(n);
+                    return const_iterator(n);
                 }
             } else if (less(n->item(), key)) {
                 if (n->right) {
                     n = n->right.get();
                 } else {
-                    auto i = iterator(n);
+                    auto i = const_iterator(n);
                     ++i;
                     return i;
                 }
             } else {
-                return iterator(n);
+                return const_iterator(n);
+            }
+        }
+        return end();
+    }
+
+    template<typename Key>
+    iterator lower_bound(const Key& key, LessComparator less = LessComparator()) {
+        return std::as_const(*this).lower_bound(key, less).unconst();
+    }
+
+    template<typename Key>
+    const_iterator find(const Key& key, LessComparator less = LessComparator()) const {
+        const node* n = root.get();
+        while (n) {
+            if (less(key, n->item())) {
+                n = n->left.get();
+            } else if (less(n->item(), key)) {
+                n = n->right.get();
+            } else {
+                return const_iterator(n);
             }
         }
         return end();
@@ -389,17 +475,7 @@ public:
 
     template<typename Key>
     iterator find(const Key& key, LessComparator less = LessComparator()) {
-        node* n = root.get();
-        while (n) {
-            if (less(key, n->item())) {
-                n = n->left.get();
-            } else if (less(n->item(), key)) {
-                n = n->right.get();
-            } else {
-                return iterator(n);
-            }
-        }
-        return end();
+        return std::as_const(*this).find(key, less).unconst();
     }
 
     iterator erase(iterator it) noexcept {
