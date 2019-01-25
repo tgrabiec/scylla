@@ -109,20 +109,32 @@ reference<T>& referenceable<T>::referer() {
 
 template <typename T>
 struct btree_node : public referenceable<btree_node<T>> {
+    union maybe_item {
+        maybe_item() noexcept {}
+        ~maybe_item() {}
+        T data;
+    };
+
     const uint8_t IS_ROOT = 0x01;
     const uint8_t IS_RIGHT_CHILD = 0x02;
+    const uint8_t HAS_ITEM = 0x04;
+
+    // Flags which describe node's position in the tree, not its contents.
+    const uint8_t POSITION_FLAGS = IS_ROOT | IS_RIGHT_CHILD;
 
     reference<btree_node> left;
     reference<btree_node> right;
 
-    T item; // FIXME: many
+    maybe_item _item; // FIXME: store many
     uint8_t flags;
 
     bool is_left_child() const { return !is_right_child(); }
     bool is_right_child() const { return flags & IS_RIGHT_CHILD; }
     bool is_root() const { return flags & IS_ROOT; }
+    bool has_item() const { return flags & HAS_ITEM; }
     void set_is_root(bool is_root) const { flags = (flags & ~IS_ROOT) | (IS_ROOT * is_root); }
     void set_is_right_child(bool is_right) const { flags = (flags & ~IS_RIGHT_CHILD) | (IS_RIGHT_CHILD * is_right_child); }
+    void set_position_flags(uint8_t new_flags) { flags = (flags & ~POSITION_FLAGS) | (new_flags & POSITION_FLAGS); }
 
     btree_node* parent() {
         if (is_root()) {
@@ -132,12 +144,34 @@ struct btree_node : public referenceable<btree_node<T>> {
             is_right_child() ? &btree_node::right : &btree_node::left);
     }
 
-    btree_node(T&& it, bool is_root, bool is_right_child)
-        : item(std::move(it))
-        , flags((IS_ROOT * is_root) | (IS_RIGHT_CHILD * is_right_child))
+    btree_node(bool is_root, bool is_right_child)
+        : flags((IS_ROOT * is_root) | (IS_RIGHT_CHILD * is_right_child))
     { }
 
-    btree_node(btree_node&&) noexcept = default;
+    template<typename... Args>
+    void emplace(Args&&... args) {
+        _item.data = T(std::forward<Args>(args)...);
+        flags |= HAS_ITEM;
+    }
+
+    btree_node(btree_node&& other) noexcept
+        : left(std::move(other.left))
+        , right(std::move(other.right))
+        , flags(other.flags)
+    {
+        if (other.has_item()) {
+            _item.data = std::move(other._item.data);
+        }
+    }
+
+    ~btree_node() {
+        if (flags & HAS_ITEM) {
+            _item.data.~T();
+        }
+    }
+
+    T& item() { return _item.data; }
+    const T& item() const { return _item.data; }
 
     btree_node* erase_and_dispose() noexcept {
         auto old_flags = flags;
@@ -145,7 +179,7 @@ struct btree_node : public referenceable<btree_node<T>> {
         if (!right) {
             auto old_left = std::move(left);
             if (old_left) {
-                old_left->flags = old_flags;
+                old_left->set_position_flags(old_flags);
             }
 
             // Find successor
@@ -166,7 +200,7 @@ struct btree_node : public referenceable<btree_node<T>> {
             btree_node* node = &*old_right;
             if (!node->left) {
                 old_right->left = std::move(old_left);
-                old_right->flags = old_flags;
+                old_right->set_position_flags(old_flags);
                 this->referer() = std::move(old_right);
                 return node;
             } else {
@@ -175,11 +209,11 @@ struct btree_node : public referenceable<btree_node<T>> {
                 }
                 auto node_right = std::move(node->right);
                 if (node_right) {
-                    node_right->flags = node->flags;
+                    node_right->set_position_flags(node->flags);
                 }
                 node->left = std::move(old_left);
                 node->right = std::move(old_right);
-                node->flags = old_flags;
+                node->set_position_flags(old_flags);
                 this->referer() = std::exchange(node->referer(), std::move(node_right));
                 return node;
             }
@@ -192,7 +226,8 @@ class rbtree_auto_unlink_hook {
 public:
     void erase_and_dispose() noexcept {
         T* item = static_cast<T*>(this);
-        btree_node<T>* node = boost::intrusive::get_parent_from_member(item, &btree_node<T>::item);
+        btree_node<T>* node = boost::intrusive::get_parent_from_member(
+            boost::intrusive::get_parent_from_member(item, &btree_node<T>::maybe_item::data), &btree_node<T>::item);
         node->erase_and_dispose();
     }
 };
@@ -203,11 +238,6 @@ class btree {
     static constexpr size_t max_node_size = 8*1024;
     static constexpr size_t node_capacity = max_node_size / sizeof(T);
 private:
-    union maybe_item {
-        maybe_item() noexcept {}
-        ~maybe_item() {}
-        T data;
-    };
     using node = btree_node<T>;
 private:
     reference<node> root;
@@ -226,8 +256,8 @@ public:
         explicit iterator(node* n) : _node(n) {}
         iterator() = default;
 
-        T& operator*() { return _node->item; }
-        T* operator->() { return &_node->item; }
+        T& operator*() { return _node->item(); }
+        T* operator->() { return &_node->item(); }
 
         iterator& operator++() {
             if (_node->right) {
@@ -280,31 +310,40 @@ public:
         return iterator();
     }
 private:
-    static reference<node> make_node(T&& item, bool is_root, bool is_right) {
-        return reference<node>(*current_allocator().construct<node>(std::move(item), is_root, is_right));
-    }
-    iterator insert_into_subtree(reference<node>& ref, T&& item, LessComparator& less, bool is_root, bool is_right) {
-        // FIXME: rebalance
-        if (!ref) {
-            ref = make_node(std::move(item), is_root, is_right);
-            return iterator(ref.get());
-        }
-        // FIXME: avoid recursion
-        if (less(item, ref->item)) {
-            return insert_into_subtree(ref->left, std::move(item), less, false, false);
-        } else {
-            return insert_into_subtree(ref->right, std::move(item), less, false, true);
-        }
+    static reference<node> make_node(bool is_root, bool is_right) {
+        return reference<node>(*current_allocator().construct<node>(is_root, is_right));
     }
 public:
-    iterator insert(T item, LessComparator less = LessComparator()) {
+    class placeholder {
+        node* _node;
+    public:
+        placeholder(node* node) : _node(node) {}
+        placeholder(placeholder&&) = default;
+        placeholder(const placeholder&) = delete;
+        ~placeholder() {
+            if (_node) {
+                _node->erase_and_dispose();
+            }
+        }
+        template<typename... Args>
+        iterator emplace(Args... args) {
+            _node->emplace(std::forward<Args>(args)...);
+            return iterator(std::exchange(_node, nullptr));
+        }
+    };
+
+    // Inserts a placeholder into the tree where the key should be.
+    // The placeholder must be either filled with emplace() or destroyed
+    // before any other method is invoked on this instance.
+    template<typename Key>
+    placeholder insert_placeholder(const Key& key, LessComparator less) {
         reference<node>* ref = &root;
         bool is_root = true;
         bool is_right_child = false;
 
         while (*ref) {
             is_root = false;
-            if (less(item, (*ref)->item)) {
+            if (less(key, (*ref)->item())) {
                 ref = &(*ref)->left;
                 is_right_child = false;
             } else {
@@ -314,20 +353,26 @@ public:
         }
 
         // FIXME: rebalance
-        *ref = make_node(std::move(item), is_root, is_right_child);
-        return iterator(ref->get());
+        *ref = make_node(is_root, is_right_child);
+        return placeholder(ref->get());
     }
 
-    iterator lower_bound(T item, LessComparator less = LessComparator()) {
+    iterator insert(T item, LessComparator less = LessComparator()) {
+        placeholder ph = insert_placeholder(item, less);
+        return ph.emplace(std::move(item));
+    }
+
+    template<typename Key>
+    iterator lower_bound(const Key& key, LessComparator less = LessComparator()) {
         node* n = root.get();
         while (n) {
-            if (less(item, n->item)) {
+            if (less(key, n->item())) {
                 if (n->left) {
                     n = n->left.get();
                 } else {
                     return iterator(n);
                 }
-            } else if (less(n->item, item)) {
+            } else if (less(n->item(), key)) {
                 if (n->right) {
                     n = n->right.get();
                 } else {
@@ -342,12 +387,13 @@ public:
         return end();
     }
 
-    iterator find(T item, LessComparator less = LessComparator()) {
+    template<typename Key>
+    iterator find(const Key& key, LessComparator less = LessComparator()) {
         node* n = root.get();
         while (n) {
-            if (less(item, n->item)) {
+            if (less(key, n->item())) {
                 n = n->left.get();
-            } else if (less(n->item, item)) {
+            } else if (less(n->item(), key)) {
                 n = n->right.get();
             } else {
                 return iterator(n);
