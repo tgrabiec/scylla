@@ -241,17 +241,6 @@ struct btree_node : public referenceable<btree_node<T>> {
     }
 };
 
-template<typename T>
-class rbtree_auto_unlink_hook {
-public:
-    void erase_and_dispose() noexcept {
-        T* item = static_cast<T*>(this);
-        btree_node<T>* node = boost::intrusive::get_parent_from_member(
-            boost::intrusive::get_parent_from_member(item, &btree_node<T>::maybe_item::data), &btree_node<T>::item);
-        node->erase_and_dispose();
-    }
-};
-
 // LSA-managed ordered collection of T.
 template <typename T, typename LessComparator = std::less<T>>
 class btree {
@@ -346,6 +335,14 @@ public: // Iterators
         operator iterator_impl<true>() const {
             return iterator_impl<true>(_tree, _node);
         }
+        // Erases node under iterator.
+        // The iterator will point to the successor.
+        iterator_impl& erase() noexcept {
+            node_ptr node = _node;
+            operator++();
+            node->erase_and_dispose();
+            return *this;
+        }
     };
 
     using iterator = iterator_impl<false>;
@@ -375,11 +372,29 @@ public: // Iterators
     const_reverse_iterator rend() const { return std::make_reverse_iterator(begin()); }
     reverse_iterator rbegin() { return std::make_reverse_iterator(end()); }
     reverse_iterator rend() { return std::make_reverse_iterator(begin()); }
+
+    static iterator iterator_to(T& item) {
+        typename node::maybe_item* it = boost::intrusive::get_parent_from_member(&item, &node::maybe_item::data);
+        node* n = boost::intrusive::get_parent_from_member(it, &node::_item);
+        // FIXME: nullptr is not really correct, but benign if iterator is not advanced till end() and back
+        return iterator(nullptr, n);
+    }
+
+    static bool is_only_member(T& item) {
+        iterator it = iterator_to(item);
+        return it._node->is_root() && !it._node->left && !it._node->right;
+    }
+
+    static btree& container_of_only_member(T& item) {
+        iterator it = iterator_to(item);
+        assert(it._node->is_root());
+        return *boost::intrusive::get_parent_from_member(&it._node->referer(), &btree::_root);
+    }
 private:
     reference<node>& end_ref() {
         reference<node>* ref = &_root;
         if (*ref) {
-            while ((*ref)->right) {
+            while (*ref) {
                 ref = &(*ref)->right;
             }
         }
@@ -391,11 +406,15 @@ private:
     }
 public: // Insertion
     class placeholder {
-        node* _node;
-        btree* _tree;
+        btree* _tree = nullptr;
+        node* _node = nullptr;
     public:
-        placeholder(btree* tree, node* node) : _node(node), _tree(tree) {}
-        placeholder(placeholder&&) = default;
+        placeholder(btree* tree, node* node) : _tree(tree), _node(node) {}
+        placeholder() = default;
+        placeholder(placeholder&& other)
+            : _tree(other._tree)
+            , _node(std::exchange(other._node, nullptr))
+        { }
         placeholder(const placeholder&) = delete;
         ~placeholder() {
             if (_node) {
@@ -407,6 +426,9 @@ public: // Insertion
             _node->emplace(std::forward<Args>(args)...);
             return iterator(_tree, std::exchange(_node, nullptr));
         }
+        explicit operator bool() const {
+            return _node;
+        }
     };
 
     // Inserts a placeholder into the tree where the key should be.
@@ -415,18 +437,19 @@ public: // Insertion
     //
     // Does not invalidate iterators.
     template<typename Key>
-    placeholder insert_placeholder(const Key& key, LessComparator less) {
+    placeholder insert_placeholder(const Key& key, LessComparator less = LessComparator()) {
         reference<node>* ref = &_root;
         bool is_root = true;
         bool is_right_child = false;
 
         while (*ref) {
             is_root = false;
-            if (less(key, (*ref)->item())) {
-                ref = &(*ref)->left;
+            node& n = **ref;
+            if (less(key, n.item())) {
+                ref = &n.left;
                 is_right_child = false;
             } else {
-                ref = &(*ref)->right;
+                ref = &n.right;
                 is_right_child = true;
             }
         }
@@ -434,6 +457,37 @@ public: // Insertion
         // FIXME: rebalance
         *ref = make_node(is_root, is_right_child);
         return placeholder(this, ref->get());
+    }
+
+    // Inserts a placeholder into the tree where the key should be, unless
+    // it already exists, then does nothing.
+    // The placeholder must be either filled with emplace() or destroyed
+    // before any other method is invoked on this instance.
+    //
+    // Does not invalidate iterators.
+    template<typename Key>
+    std::pair<iterator, placeholder> insert_check(const Key& key, LessComparator less = LessComparator()) {
+        reference<node>* ref = &_root;
+        bool is_root = true;
+        bool is_right_child = false;
+
+        while (*ref) {
+            is_root = false;
+            node& n = **ref;
+            if (less(key, n.item())) {
+                ref = &n.left;
+                is_right_child = false;
+            } else if (less(n.item(), key)) {
+                ref = &n.right;
+                is_right_child = true;
+            } else {
+                return std::make_pair(iterator(this, &n), placeholder());
+            }
+        }
+
+        // FIXME: rebalance
+        *ref = make_node(is_root, is_right_child);
+        return std::make_pair(iterator(this, ref->get()), placeholder(this, ref->get()));
     }
 
     // Inserts a place holder for item where the key should be
@@ -598,6 +652,11 @@ public: // Querying
     template<typename Key>
     iterator lower_bound(const Key& key, LessComparator less = LessComparator()) {
         return std::as_const(*this).lower_bound(key, less).unconst();
+    }
+
+    template<typename Key>
+    iterator upper_bound(const Key& key, LessComparator less = LessComparator()) {
+        return std::as_const(*this).upper_bound(key, less).unconst();
     }
 
     template<typename Key>

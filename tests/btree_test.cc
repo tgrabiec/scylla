@@ -53,16 +53,19 @@ struct item_less_cmp {
     bool operator()(const item& i1, int i2) const { return i1.value < i2; }
 };
 
+using set_type = std::set<item, item_less_cmp>;
+using btree_type = btree<item, item_less_cmp>;
+
 BOOST_AUTO_TEST_CASE(test_erase) {
-    std::set<item, item_less_cmp> reference_set;
-    btree<item, item_less_cmp> set;
+    set_type reference_set;
+    btree_type set;
 
     for (int i = 0; i < 100; ++i) {
         set.insert(item(i));
         reference_set.insert(item(i));
     }
 
-    auto check_iterators = [&] (btree<item, item_less_cmp>::iterator i1, std::set<item, item_less_cmp>::iterator i2) {
+    auto check_iterators = [&] (btree_type::iterator i1, set_type::iterator i2) {
         if (i1 == set.end()) {
             BOOST_REQUIRE(i2 == reference_set.end());
         } else {
@@ -107,8 +110,8 @@ BOOST_AUTO_TEST_CASE(test_erase) {
 }
 
 BOOST_AUTO_TEST_CASE(test_reverse_iteration) {
-    std::set<item, item_less_cmp> reference_set;
-    btree<item, item_less_cmp> set;
+    set_type reference_set;
+    btree_type set;
 
     BOOST_REQUIRE_EQUAL_COLLECTIONS(set.rbegin(), set.rend(), reference_set.rbegin(), reference_set.rend());
 
@@ -132,7 +135,7 @@ BOOST_AUTO_TEST_CASE(test_reverse_iteration) {
 }
 
 BOOST_AUTO_TEST_CASE(test_end_iterator_is_valid) {
-    btree<item, item_less_cmp> set;
+    btree_type set;
 
     set.insert(item(0));
     set.insert(item(1));
@@ -141,8 +144,8 @@ BOOST_AUTO_TEST_CASE(test_end_iterator_is_valid) {
 }
 
 BOOST_AUTO_TEST_CASE(test_insertion_in_empty) {
-    std::set<item, item_less_cmp> reference_set;
-    btree<item, item_less_cmp> set;
+    set_type reference_set;
+    btree_type set;
 
     set.insert_back().emplace(3);
     reference_set.insert(reference_set.end(), item(3));
@@ -157,42 +160,131 @@ BOOST_AUTO_TEST_CASE(test_insertion_in_empty) {
 
     BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
 
+    set.insert_placeholder(set.end(), 5).emplace(5);
+    reference_set.insert(reference_set.end(), item(5));
+
+    set.insert_placeholder(set.end(), 3).emplace(3);
+    reference_set.insert(reference_set.end(), item(3));
+
+    set.insert_placeholder(set.end(), 2).emplace(2);
+    reference_set.insert(reference_set.end(), item(2));
+
+    BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
+
     set.clear();
     reference_set.clear();
 
-    set.insert_before(set.end(), 4).emplace(4);
+    set.insert_before(set.end()).emplace(4);
     reference_set.insert(reference_set.end(), item(4));
 
     BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
 
-    set.insert_before(set.end(), 5).emplace(5);
+    set.insert_before(set.end()).emplace(5);
     reference_set.insert(reference_set.end(), item(5));
 
     BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
 }
 
+BOOST_AUTO_TEST_CASE(test_intrusive_extensions) {
+    set_type reference_set;
+    btree_type set;
+
+    set.insert_back().emplace(3);
+    reference_set.insert(reference_set.end(), item(3));
+
+    BOOST_REQUIRE_EQUAL(btree_type::iterator_to(*set.begin())->value, 3);
+    BOOST_REQUIRE(btree_type::is_only_member(*set.begin()));
+    BOOST_REQUIRE(&btree_type::container_of_only_member(*set.begin()) == &set);
+
+    set.insert_back().emplace(4);
+    reference_set.insert(reference_set.end(), item(4));
+
+    BOOST_REQUIRE(!btree_type::is_only_member(*set.begin()));
+
+    BOOST_REQUIRE_EQUAL(btree_type::iterator_to(*set.begin()).erase()->value, 4);
+    reference_set.erase(reference_set.begin());
+
+    BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
+}
+
+BOOST_AUTO_TEST_CASE(test_insert_check) {
+    set_type reference_set;
+    btree_type set;
+
+    set.insert_back().emplace(3);
+    reference_set.insert(item(3));
+
+    {
+        auto result = set.insert_check(3);
+        BOOST_REQUIRE(!result.second);
+        BOOST_REQUIRE(result.first->value == 3);
+    }
+
+    {
+        auto result = set.insert_check(4);
+        reference_set.insert(item(4));
+        BOOST_REQUIRE(result.second);
+        result.second.emplace(4);
+        BOOST_REQUIRE(result.first->value == 4);
+    }
+
+    BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
+}
+
 BOOST_AUTO_TEST_CASE(test_consistent_with_std_set) {
-    std::set<item, item_less_cmp> reference_set;
-    btree<item, item_less_cmp> set;
+    set_type reference_set;
+    btree_type set;
 
     BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
 
-    while (reference_set.size() < 1000) {
-        auto value = tests::random::get_int<int>();
-        std::cout << "insert " << value << "\n";
+    set_type unique_ints;
+    while (unique_ints.size() < 1000) {
+        unique_ints.insert(item(tests::random::get_int<int>()));
+    }
+
+    for (auto&& value : unique_ints) {
         set.insert(item(value));
         reference_set.insert(item(value));
 
         BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
     }
 
-    btree<item, item_less_cmp> set2;
+    set.clear();
+    reference_set.clear();
+
+    for (auto&& value : unique_ints) {
+        set.insert_placeholder(value).emplace(item(value));
+        reference_set.insert(item(value));
+
+        BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
+    }
+
+    set.clear();
+    reference_set.clear();
+
+    for (auto&& value : unique_ints) {
+        set.insert_placeholder(set.end(), value).emplace(item(value));
+        reference_set.insert(item(value));
+
+        BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
+    }
+
+    set.clear();
+    reference_set.clear();
+
+    for (auto&& value : unique_ints) {
+        set.insert_before(set.upper_bound(value)).emplace(item(value));
+        reference_set.insert(item(value));
+
+        BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
+    }
+
+    btree_type set2;
     set2.clone_from(set, [] (item i) { return i; });
     BOOST_REQUIRE_EQUAL_COLLECTIONS(set2.begin(), set2.end(), reference_set.begin(), reference_set.end());
 
     for (int i = 0; i < 100; ++i) {
         auto value = tests::random::get_int<int>();
-        std::cout << "rnd check " << value << "\n";
 
         {
             auto in_reference = reference_set.find(item(value)) != reference_set.end();
@@ -225,8 +317,6 @@ BOOST_AUTO_TEST_CASE(test_consistent_with_std_set) {
     }
 
     for (auto&& k : reference_set) {
-        std::cout << "check " << k.value << "\n";
-
         auto i = set.find(k);
         BOOST_REQUIRE(i != set.end());
         BOOST_REQUIRE_EQUAL(k.value, i->value);
@@ -236,8 +326,6 @@ BOOST_AUTO_TEST_CASE(test_consistent_with_std_set) {
     boost::random_shuffle(values);
 
     for (auto&& v : values) {
-        std::cout << "remove " << v << "\n";
-
         auto i1 = set.find(v);
         BOOST_REQUIRE(i1 != set.end());
         i1 = set.erase(i1);
@@ -255,7 +343,6 @@ BOOST_AUTO_TEST_CASE(test_consistent_with_std_set) {
 
     for (int i = 0; i < 1000; ++i) {
         auto value = i;
-        std::cout << "insert " << value << "\n";
         set.insert(item(value));
         reference_set.insert(item(value));
 
@@ -263,8 +350,6 @@ BOOST_AUTO_TEST_CASE(test_consistent_with_std_set) {
     }
 
     for (int v = 0; v < 1000; ++v) {
-        std::cout << "remove " << v << "\n";
-
         auto i = set.find(v);
         BOOST_REQUIRE(i != set.end());
         set.erase(i);
