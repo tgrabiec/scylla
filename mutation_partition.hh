@@ -47,6 +47,7 @@
 #include "intrusive_set_external_comparator.hh"
 #include "utils/with_relational_operators.hh"
 #include "utils/preempt.hh"
+#include "utils/btree.hh"
 
 class mutation_fragment;
 class clustering_row;
@@ -929,7 +930,7 @@ public:
 // in the doc in partition_version.hh.
 class mutation_partition final {
 public:
-    using rows_type = intrusive_set_external_comparator<rows_entry, &rows_entry::_link>;
+    using rows_type = btree<rows_entry, rows_entry::compare>;
     friend class rows_entry;
     friend class size_calculator;
 private:
