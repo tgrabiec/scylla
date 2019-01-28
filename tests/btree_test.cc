@@ -37,7 +37,6 @@ struct item {
     item(int v) : value(v) {}
     bool operator==(const item& other) const { return value == other.value; }
     bool operator!=(const item& other) const { return !(*this == other); }
-    bool operator<(const item& other) const { return value < other.value; }
 
     friend std::ostream& operator<<(std::ostream& out, const item& it) {
         return out << it.value;
@@ -48,9 +47,103 @@ struct item {
     }
 };
 
+struct item_less_cmp {
+    bool operator()(const item& i1, const item& i2) const { return i1.value < i2.value; }
+    bool operator()(int i1, const item& i2) const { return i1 < i2.value; }
+    bool operator()(const item& i1, int i2) const { return i1.value < i2; }
+};
+
+BOOST_AUTO_TEST_CASE(test_erase) {
+    std::set<item, item_less_cmp> reference_set;
+    btree<item, item_less_cmp> set;
+
+    for (int i = 0; i < 100; ++i) {
+        set.insert(item(i));
+        reference_set.insert(item(i));
+    }
+
+    auto check_iterators = [&] (btree<item, item_less_cmp>::iterator i1, std::set<item, item_less_cmp>::iterator i2) {
+        if (i1 == set.end()) {
+            BOOST_REQUIRE(i2 == reference_set.end());
+        } else {
+            BOOST_REQUIRE_EQUAL(i1->value, i2->value);
+        }
+    };
+
+    {
+        auto i1 = set.erase(set.lower_bound(3), set.lower_bound(10));
+        auto i2 = reference_set.erase(reference_set.lower_bound(3), reference_set.lower_bound(10));
+        BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
+        check_iterators(i1, i2);
+    }
+
+    {
+        auto i1 = set.erase(set.lower_bound(0), set.lower_bound(5));
+        auto i2 = reference_set.erase(reference_set.lower_bound(0), reference_set.lower_bound(5));
+        BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
+        check_iterators(i1, i2);
+    }
+
+    {
+        auto i1 = set.erase(set.lower_bound(10), set.lower_bound(10));
+        auto i2 = reference_set.erase(reference_set.lower_bound(10), reference_set.lower_bound(10));
+        BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
+        check_iterators(i1, i2);
+    }
+
+    {
+        auto i1 = set.erase(set.lower_bound(10), set.lower_bound(11));
+        auto i2 = reference_set.erase(reference_set.lower_bound(10), reference_set.lower_bound(11));
+        BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
+        check_iterators(i1, i2);
+    }
+
+    {
+        auto i1 = set.erase(set.begin(), set.end());
+        auto i2 = reference_set.erase(reference_set.begin(), reference_set.end());
+        BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
+        check_iterators(i1, i2);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_reverse_iteration) {
+    std::set<item, item_less_cmp> reference_set;
+    btree<item, item_less_cmp> set;
+
+    BOOST_REQUIRE_EQUAL_COLLECTIONS(set.rbegin(), set.rend(), reference_set.rbegin(), reference_set.rend());
+
+    for (int i = 0; i < 100; ++i) {
+        set.insert(item(i));
+        reference_set.insert(item(i));
+    }
+
+    auto i1 = std::prev(set.end());
+    int i = 99;
+    while (true) {
+        BOOST_REQUIRE_EQUAL(i1->value, i);
+        if (i == 0) {
+            break;
+        }
+        --i1;
+        --i;
+    }
+
+    BOOST_REQUIRE_EQUAL_COLLECTIONS(set.rbegin(), set.rend(), reference_set.rbegin(), reference_set.rend());
+}
+
+BOOST_AUTO_TEST_CASE(test_end_iterator_is_valid) {
+    std::set<item, item_less_cmp> reference_set;
+    btree<item, item_less_cmp> set;
+
+    set.insert(item(0));
+    set.insert(item(1));
+
+    BOOST_REQUIRE(std::prev(set.end()) == set.find(1));
+}
+
 BOOST_AUTO_TEST_CASE(test_consistent_with_std_set) {
-    std::set<item> reference_set;
-    btree<item> set;
+    std::set<item, item_less_cmp> reference_set;
+    btree<item, item_less_cmp> set;
 
     BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
 
@@ -63,7 +156,7 @@ BOOST_AUTO_TEST_CASE(test_consistent_with_std_set) {
         BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
     }
 
-    btree<item> set2;
+    btree<item, item_less_cmp> set2;
     set2.clone_from(set, [] (item i) { return i; });
     BOOST_REQUIRE_EQUAL_COLLECTIONS(set2.begin(), set2.end(), reference_set.begin(), reference_set.end());
 

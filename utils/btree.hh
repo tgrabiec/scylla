@@ -21,8 +21,9 @@
 
 #pragma once
 
-#include "utils/logalloc.hh"
+#include <iterator>
 #include <boost/intrusive/parent_from_member.hpp>
+#include "utils/logalloc.hh"
 
 template<typename T>
 class reference;
@@ -52,6 +53,7 @@ public:
         return _backref;
     }
 
+    // Returns a reference to the reference<> pointing to this object.
     // Must be called only when is_referenced().
     reference<T>& referer();
     const reference<T>& referer() const;
@@ -163,12 +165,12 @@ struct btree_node : public referenceable<btree_node<T>> {
     btree_node(const btree_node& other, Cloner& cloner)
         : flags(other.flags)
     {
-        _item.data = cloner(other._item.data);
+        new (&_item.data) T(cloner(other._item.data));
     }
 
     template<typename... Args>
     void emplace(Args&&... args) {
-        _item.data = T(std::forward<Args>(args)...);
+        new (&_item.data) T(std::forward<Args>(args)...);
         flags |= HAS_ITEM;
     }
 
@@ -178,7 +180,7 @@ struct btree_node : public referenceable<btree_node<T>> {
         , flags(other.flags)
     {
         if (other.has_item()) {
-            _item.data = std::move(other._item.data);
+            new (&_item.data) T(std::move(other._item.data));
         }
     }
 
@@ -257,13 +259,19 @@ class btree {
     //static constexpr size_t node_capacity = max_node_size / sizeof(T);
 private:
     using node = btree_node<T>;
-    reference<node> root;
+    reference<node> _root;
+public:
+    btree() = default;
+    ~btree() { clear(); }
+    btree(btree&&) noexcept = default;
 public: // Iterators
     // Not stable across allocator's reference invalidation
     template<bool IsConst>
     class iterator_impl {
         using node_ptr = std::conditional_t<IsConst, const node*, node*>;
+        using tree_ptr = std::conditional_t<IsConst, const btree*, btree*>;
         node_ptr _node = nullptr;
+        tree_ptr _tree = nullptr;
     public:
         friend class btree;
         using iterator_category = std::bidirectional_iterator_tag;
@@ -272,11 +280,11 @@ public: // Iterators
         using pointer = value_type*;
         using reference = value_type&;
     public:
-        explicit iterator_impl(node_ptr n) : _node(n) {}
+        explicit iterator_impl(tree_ptr tree, node_ptr n) : _node(n), _tree(tree) {}
         iterator_impl() = default;
 
-        reference operator*() { return _node->item(); }
-        pointer operator->() { return &_node->item(); }
+        reference operator*() const { return _node->item(); }
+        pointer operator->() const { return &_node->item(); }
 
         iterator_impl& operator++() {
             if (_node->right) {
@@ -299,7 +307,26 @@ public: // Iterators
             return it;
         }
         iterator_impl& operator--() {
-            // FIXME
+            if (!_node) {
+                _node = &*_tree->_root;
+                while (_node && _node->right) {
+                    _node = &*_node->right;
+                }
+            } else {
+                if (_node->left) {
+                    _node = &*_node->left;
+                    while (_node->right) {
+                        _node = &*_node->right;
+                    }
+                } else {
+                    bool was_left;
+                    do {
+                        was_left = _node->is_left_child();
+                        _node = _node->parent();
+                        assert(_node); // --begin() is invalid.
+                    } while (was_left);
+                }
+            }
             return *this;
         }
         iterator_impl operator--(int) {
@@ -314,32 +341,43 @@ public: // Iterators
             return !(*this == other);
         }
         iterator_impl<false> unconst() const {
-            return iterator_impl<false>(const_cast<node*>(_node));
+            return iterator_impl<false>(const_cast<btree*>(_tree), const_cast<node*>(_node));
+        }
+        operator iterator_impl<true>() const {
+            return iterator_impl<true>(_tree, _node);
         }
     };
 
     using iterator = iterator_impl<false>;
     using const_iterator = iterator_impl<true>;
+    using reverse_iterator = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
 
     iterator begin() { return std::as_const(*this).begin().unconst(); }
     iterator end() { return std::as_const(*this).end().unconst(); }
 
     const_iterator begin() const {
-        const node* node = root.get();
+        const node* node = _root.get();
         if (node) {
             while (node->left) {
                 node = node->left.get();
             }
         }
-        return const_iterator(node);
+        return const_iterator(this, node);
     }
 
+    // Never invalidated by mutators.
     const_iterator end() const {
-        return const_iterator();
+        return const_iterator(this, nullptr);
     }
+
+    const_reverse_iterator rbegin() const { return std::make_reverse_iterator(end()); }
+    const_reverse_iterator rend() const { return std::make_reverse_iterator(begin()); }
+    reverse_iterator rbegin() { return std::make_reverse_iterator(end()); }
+    reverse_iterator rend() { return std::make_reverse_iterator(begin()); }
 private:
     reference<node>& end_ref() {
-        reference<node>* ref = &root;
+        reference<node>* ref = &_root;
         if (ref) {
             while ((*ref)->right) {
                 ref = &(*ref)->right;
@@ -354,8 +392,9 @@ private:
 public: // Insertion
     class placeholder {
         node* _node;
+        btree* _tree;
     public:
-        placeholder(node* node) : _node(node) {}
+        placeholder(btree* tree, node* node) : _node(node), _tree(tree) {}
         placeholder(placeholder&&) = default;
         placeholder(const placeholder&) = delete;
         ~placeholder() {
@@ -364,18 +403,20 @@ public: // Insertion
             }
         }
         template<typename... Args>
-        iterator emplace(Args... args) {
+        iterator emplace(Args&&... args) {
             _node->emplace(std::forward<Args>(args)...);
-            return iterator(std::exchange(_node, nullptr));
+            return iterator(_tree, std::exchange(_node, nullptr));
         }
     };
 
     // Inserts a placeholder into the tree where the key should be.
     // The placeholder must be either filled with emplace() or destroyed
     // before any other method is invoked on this instance.
+    //
+    // Does not invalidate iterators.
     template<typename Key>
     placeholder insert_placeholder(const Key& key, LessComparator less) {
-        reference<node>* ref = &root;
+        reference<node>* ref = &_root;
         bool is_root = true;
         bool is_right_child = false;
 
@@ -392,7 +433,7 @@ public: // Insertion
 
         // FIXME: rebalance
         *ref = make_node(is_root, is_right_child);
-        return placeholder(ref->get());
+        return placeholder(this, ref->get());
     }
 
     // Inserts a place holder for item where the key should be
@@ -400,13 +441,15 @@ public: // Insertion
     //
     // The placeholder must be either filled with emplace() or destroyed
     // before any other method is invoked on this instance.
+    //
+    // Does not invalidate iterators.
     template<typename Key>
     placeholder insert_placeholder(iterator successor_hint, const Key& key, LessComparator less) {
         if (!successor_hint._node) {
             auto&& ref = end_ref();
             if (less(ref->item(), key)) {
                 ref->left = make_node(false, true);
-                return placeholder(ref->left.get());
+                return placeholder(this, ref->left.get());
             }
         }
         return insert_placeholder(key, less);
@@ -416,15 +459,17 @@ public: // Insertion
     //
     // The placeholder must be either filled with emplace() or destroyed
     // before any other method is invoked on this instance.
+    //
+    // Does not invalidate iterators.
     placeholder insert_before(iterator it, LessComparator less = LessComparator()) {
         if (!it._node) {
-            return insert_back();
+            return insert_back(less);
         } else {
             // FIXME: rebalance
             auto old_left = std::move(it._node->left);
             it._node->left = make_node(false, false);
             it._node->left->left = std::move(old_left);
-            return placeholder(it._node->left.get());
+            return placeholder(this, it._node->left.get());
         }
     }
 
@@ -432,24 +477,26 @@ public: // Insertion
     //
     // The placeholder must be either filled with emplace() or destroyed
     // before any other method is invoked on this instance.
+    //
+    // Does not invalidate iterators.
     placeholder insert_back(LessComparator less = LessComparator()) {
         // FIXME: rebalance
         auto&& ref = end_ref();
         ref = make_node(false, true);
-        return placeholder(ref.get());
+        return placeholder(this, ref.get());
     }
 
     template<typename Cloner>
     void clone_from(const btree& other, const Cloner& cloner) {
         clear();
 
-        const node* other_node = other.root.get();
+        const node* other_node = other._root.get();
         if (!other_node) {
             return;
         }
 
-        root = make_node(*other_node, cloner);
-        node* this_node = root.get();
+        _root = make_node(*other_node, cloner);
+        node* this_node = _root.get();
         while (other_node->left) {
             other_node = other_node->left.get();
             this_node->left = make_node(*other_node, cloner);
@@ -483,38 +530,43 @@ public: // Insertion
     }
 public: // Erasing
     void clear() {
-        root = {}; // FIXME: avoid recursion
+        _root = {}; // FIXME: avoid recursion
     }
 
-    ~btree() {
-        clear();
+    iterator erase(const_iterator it) noexcept {
+        node* next = it.unconst()._node->erase_and_dispose();
+        return iterator(this, next);
     }
 
-    iterator erase(iterator it) noexcept {
-        node* next = it._node->erase_and_dispose();
-        return iterator(next);
+    iterator erase(const_iterator i1, const_iterator i2) noexcept {
+        while (i1 != i2) {
+            auto prev = i1++;
+            prev.unconst()._node->erase_and_dispose();
+        }
+        return i1.unconst();
     }
 public: // Querying
+    bool empty() const { return !_root; }
     template<typename Key>
     const_iterator lower_bound(const Key& key, LessComparator less = LessComparator()) const {
-        const node* n = root.get();
+        const node* n = _root.get();
         while (n) {
             if (less(key, n->item())) {
                 if (n->left) {
                     n = n->left.get();
                 } else {
-                    return const_iterator(n);
+                    return const_iterator(this, n);
                 }
             } else if (less(n->item(), key)) {
                 if (n->right) {
                     n = n->right.get();
                 } else {
-                    auto i = const_iterator(n);
+                    auto i = const_iterator(this, n);
                     ++i;
                     return i;
                 }
             } else {
-                return const_iterator(n);
+                return const_iterator(this, n);
             }
         }
         return end();
@@ -527,14 +579,14 @@ public: // Querying
 
     template<typename Key>
     const_iterator find(const Key& key, LessComparator less = LessComparator()) const {
-        const node* n = root.get();
+        const node* n = _root.get();
         while (n) {
             if (less(key, n->item())) {
                 n = n->left.get();
             } else if (less(n->item(), key)) {
                 n = n->right.get();
             } else {
-                return const_iterator(n);
+                return const_iterator(this, n);
             }
         }
         return end();
