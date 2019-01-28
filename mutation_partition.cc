@@ -550,10 +550,7 @@ mutation_partition::range(const schema& schema, const query::clustering_range& r
 template <typename Container>
 boost::iterator_range<typename Container::iterator>
 unconst(Container& c, boost::iterator_range<typename Container::const_iterator> r) {
-    return boost::make_iterator_range(
-        c.erase(r.begin(), r.begin()),
-        c.erase(r.end(), r.end())
-    );
+    return boost::make_iterator_range(unconst(c, r.begin()), unconst(c, r.end()));
 }
 
 template <typename Container>
