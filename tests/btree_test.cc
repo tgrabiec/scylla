@@ -132,13 +132,43 @@ BOOST_AUTO_TEST_CASE(test_reverse_iteration) {
 }
 
 BOOST_AUTO_TEST_CASE(test_end_iterator_is_valid) {
-    std::set<item, item_less_cmp> reference_set;
     btree<item, item_less_cmp> set;
 
     set.insert(item(0));
     set.insert(item(1));
 
     BOOST_REQUIRE(std::prev(set.end()) == set.find(1));
+}
+
+BOOST_AUTO_TEST_CASE(test_insertion_in_empty) {
+    std::set<item, item_less_cmp> reference_set;
+    btree<item, item_less_cmp> set;
+
+    set.insert_back().emplace(3);
+    reference_set.insert(reference_set.end(), item(3));
+
+    BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
+
+    set.clear();
+    reference_set.clear();
+
+    set.insert_placeholder(set.end(), 4).emplace(4);
+    reference_set.insert(reference_set.end(), item(4));
+
+    BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
+
+    set.clear();
+    reference_set.clear();
+
+    set.insert_before(set.end(), 4).emplace(4);
+    reference_set.insert(reference_set.end(), item(4));
+
+    BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
+
+    set.insert_before(set.end(), 5).emplace(5);
+    reference_set.insert(reference_set.end(), item(5));
+
+    BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
 }
 
 BOOST_AUTO_TEST_CASE(test_consistent_with_std_set) {
@@ -174,6 +204,17 @@ BOOST_AUTO_TEST_CASE(test_consistent_with_std_set) {
         {
             auto i1 = reference_set.lower_bound(item(value));
             auto i2 = set.lower_bound(item(value));
+
+            if (i1 == reference_set.end()) {
+                BOOST_REQUIRE(i2 == set.end());
+            } else {
+                BOOST_REQUIRE_EQUAL(i1->value, i2->value);
+            }
+        }
+
+        {
+            auto i1 = reference_set.upper_bound(item(value));
+            auto i2 = set.upper_bound(item(value));
 
             if (i1 == reference_set.end()) {
                 BOOST_REQUIRE(i2 == set.end());

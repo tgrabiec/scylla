@@ -378,7 +378,7 @@ public: // Iterators
 private:
     reference<node>& end_ref() {
         reference<node>* ref = &_root;
-        if (ref) {
+        if (*ref) {
             while ((*ref)->right) {
                 ref = &(*ref)->right;
             }
@@ -444,12 +444,11 @@ public: // Insertion
     //
     // Does not invalidate iterators.
     template<typename Key>
-    placeholder insert_placeholder(iterator successor_hint, const Key& key, LessComparator less) {
+    placeholder insert_placeholder(iterator successor_hint, const Key& key, LessComparator less = LessComparator()) {
         if (!successor_hint._node) {
             auto&& ref = end_ref();
-            if (less(ref->item(), key)) {
-                ref->left = make_node(false, true);
-                return placeholder(this, ref->left.get());
+            if (ref && less(ref->item(), key)) {
+                return insert_back();
             }
         }
         return insert_placeholder(key, less);
@@ -461,9 +460,9 @@ public: // Insertion
     // before any other method is invoked on this instance.
     //
     // Does not invalidate iterators.
-    placeholder insert_before(iterator it, LessComparator less = LessComparator()) {
+    placeholder insert_before(iterator it) {
         if (!it._node) {
-            return insert_back(less);
+            return insert_back();
         } else {
             // FIXME: rebalance
             auto old_left = std::move(it._node->left);
@@ -479,10 +478,10 @@ public: // Insertion
     // before any other method is invoked on this instance.
     //
     // Does not invalidate iterators.
-    placeholder insert_back(LessComparator less = LessComparator()) {
+    placeholder insert_back() {
         // FIXME: rebalance
         auto&& ref = end_ref();
-        ref = make_node(false, true);
+        ref = make_node(!_root, true);
         return placeholder(this, ref.get());
     }
 
@@ -547,6 +546,7 @@ public: // Erasing
     }
 public: // Querying
     bool empty() const { return !_root; }
+
     template<typename Key>
     const_iterator lower_bound(const Key& key, LessComparator less = LessComparator()) const {
         const node* n = _root.get();
@@ -567,6 +567,29 @@ public: // Querying
                 }
             } else {
                 return const_iterator(this, n);
+            }
+        }
+        return end();
+    }
+
+    template<typename Key>
+    const_iterator upper_bound(const Key& key, LessComparator less = LessComparator()) const {
+        const node* n = _root.get();
+        while (n) {
+            if (less(key, n->item())) {
+                if (n->left) {
+                    n = n->left.get();
+                } else {
+                    return const_iterator(this, n);
+                }
+            } else {
+                if (n->right) {
+                    n = n->right.get();
+                } else {
+                    auto i = const_iterator(this, n);
+                    ++i;
+                    return i;
+                }
             }
         }
         return end();
