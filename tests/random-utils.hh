@@ -25,6 +25,7 @@
 
 #include <boost/range/algorithm/generate.hpp>
 #include <iostream>
+#include "bytes.hh"
 
 namespace tests::random {
 
