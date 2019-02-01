@@ -1624,6 +1624,32 @@ class scylla_gms(gdb.Command):
             for app_state, value in std_map(state['_application_state']):
                 gdb.write('  %s: {version=%d, value=%s}\n' % (app_state, value['version'], value['value']))
 
+# For given virtual type name returns pointers to all live objects of that type allocated
+# on the seastar heap.
+# The object must be located at the beginning of the allocated area.
+# This is true, for instance, for all objects allocated using std::make_unique().
+def find_instances(name):
+    ptr_type = gdb.lookup_type(name).pointer()
+    vtable_name = 'vtable for %s' % name
+    for obj_addr, vtable_addr in find_vptrs():
+        name = resolve(vtable_addr)
+        if name and name.startswith(vtable_name):
+            yield gdb.Value(obj_addr).cast(ptr_type)
+
+class scylla_file_readers(gdb.Command):
+    def __init__(self):
+        gdb.Command.__init__(self, 'scylla file-readers', gdb.COMMAND_USER, gdb.COMPLETE_COMMAND)
+
+    def invoke(self, arg, from_tty):
+        total_buffers = 0
+
+        for fds in find_instances('seastar::file_data_source_impl'):
+            gdb.write("(seastar::file_data_source_impl*) 0x%x:\n" % fds.dereference().address)
+            for issued_read in circular_buffer(fds['_read_buffers']):
+                gdb.write("  buffer: .pos=%d .size=%d [B]:\n" % (issued_read['_pos'], issued_read['_size']))
+                total_buffers += issued_read['_size']
+
+        gdb.write("Total size of buffers: %d [B]\n" % total_buffers)
 
 scylla()
 scylla_databases()
@@ -1650,3 +1676,4 @@ scylla_task_histogram()
 scylla_active_sstables()
 scylla_netw()
 scylla_gms()
+scylla_file_readers()
