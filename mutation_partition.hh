@@ -737,7 +737,6 @@ class rows_entry {
     using lru_link_type = bi::list_member_hook<bi::link_mode<bi::auto_unlink>>;
     friend class cache_tracker;
     friend class size_calculator;
-    intrusive_set_external_comparator_member_hook _link;
     clustering_key _key;
     deletable_row _row;
     lru_link_type _lru_link;

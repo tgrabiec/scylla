@@ -157,10 +157,9 @@ mutation_partition::mutation_partition(const mutation_partition& x, const schema
         , _rows()
         , _row_tombstones(x._row_tombstones, range_tombstone_list::copy_comparator_only()) {
     {
-        auto less = rows_entry::compare(schema);
         for(auto&& r : ck_ranges) {
             for (const rows_entry& e : x.range(schema, r)) {
-                _rows.insert_back(less).emplace(schema, e);
+                _rows.insert_back().emplace(schema, e);
             }
             for (auto&& rt : x._row_tombstones.slice(schema, r)) {
                 _row_tombstones.apply(schema, rt);
@@ -215,7 +214,7 @@ mutation_partition::operator=(mutation_partition&& x) noexcept {
 
 void mutation_partition::ensure_last_dummy(const schema& s) {
     if (_rows.empty() || !_rows.rbegin()->is_last_dummy()) {
-        _rows.insert_before(_rows.end(), rows_entry::compare(s)).emplace(s, rows_entry::last_dummy_tag(), is_continuous::yes);
+        _rows.insert_before(_rows.end()).emplace(s, rows_entry::last_dummy_tag(), is_continuous::yes);
     }
 }
 
@@ -292,7 +291,7 @@ stop_iteration mutation_partition::apply_monotonically(const schema& s, mutation
             i = _rows.lower_bound(src_e, less);
         }
         if (i == _rows.end() || less(src_e, *i)) {
-            auto src_i = _rows.insert_before(i, less).emplace(std::move(src_e));
+            auto src_i = _rows.insert_before(i).emplace(std::move(src_e));
             p_i = p._rows.erase(p_i);
             // When falling into a continuous range, preserve continuity.
             if (i != _rows.end() && i->continuous()) {
@@ -1404,8 +1403,7 @@ mutation_partition::live_row_count(const schema& s, gc_clock::time_point query_t
 }
 
 rows_entry::rows_entry(rows_entry&& o) noexcept
-    : _link(std::move(o._link))
-    , _key(std::move(o._key))
+    : _key(std::move(o._key))
     , _row(std::move(o._row))
     , _lru_link()
     , _flags(std::move(o._flags))
@@ -2176,7 +2174,7 @@ mutation_partition::mutation_partition(mutation_partition::incomplete_tag, const
     , _rows()
     , _row_tombstones(s)
 {
-    _rows.insert_before(_rows.end(), rows_entry::compare(s))
+    _rows.insert_before(_rows.end())
         .emplace(s, rows_entry::last_dummy_tag(), is_continuous::no);
 }
 
@@ -2214,13 +2212,13 @@ void mutation_partition::set_continuity(const schema& s, const position_range& p
 
     auto end = _rows.lower_bound(pr.end(), less);
     if (end == _rows.end() || less(pr.end(), end->position())) {
-        end = _rows.insert_before(end, rows_entry::compare(s)).emplace(s, pr.end(), is_dummy::yes,
+        end = _rows.insert_before(end).emplace(s, pr.end(), is_dummy::yes,
             end == _rows.end() ? is_continuous::yes : end->continuous());
     }
 
     auto i = _rows.lower_bound(pr.start(), less);
     if (less(pr.start(), i->position())) {
-        i = _rows.insert_before(i, rows_entry::compare(s)).emplace(s, pr.start(), is_dummy::yes, i->continuous());
+        i = _rows.insert_before(i).emplace(s, pr.start(), is_dummy::yes, i->continuous());
     }
 
     assert(i != end);
