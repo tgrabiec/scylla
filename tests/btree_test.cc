@@ -249,6 +249,24 @@ BOOST_AUTO_TEST_CASE(test_consistent_with_std_set) {
         BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
     }
 
+    logalloc::region r;
+    with_allocator(r.allocator(), [&unique_ints, &r] {
+        btree_type set;
+        set_type reference_set;
+
+        {
+            logalloc::reclaim_lock rl(r);
+            for (auto&& value : unique_ints) {
+                set.insert(item(value));
+                reference_set.insert(item(value));
+            }
+        }
+
+        r.full_compaction();
+
+        BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
+    });
+
     set.clear();
     reference_set.clear();
 
@@ -353,8 +371,13 @@ BOOST_AUTO_TEST_CASE(test_consistent_with_std_set) {
         auto i = set.find(v);
         BOOST_REQUIRE(i != set.end());
         set.erase(i);
-
         reference_set.erase(reference_set.find(v));
+
+        BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
+
+        auto value = tests::random::get_int<int>();
+        set.insert(item(value));
+        reference_set.insert(item(value));
 
         BOOST_REQUIRE_EQUAL_COLLECTIONS(set.begin(), set.end(), reference_set.begin(), reference_set.end());
     }

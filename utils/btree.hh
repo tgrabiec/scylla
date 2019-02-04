@@ -175,7 +175,8 @@ struct btree_node : public referenceable<btree_node<T>> {
     }
 
     btree_node(btree_node&& other) noexcept
-        : left(std::move(other.left))
+        : referenceable<btree_node<T>>(std::move(other))
+        , left(std::move(other.left))
         , right(std::move(other.right))
         , flags(other.flags)
     {
@@ -499,12 +500,7 @@ public: // Insertion
     // Does not invalidate iterators.
     template<typename Key>
     placeholder insert_placeholder(iterator successor_hint, const Key& key, LessComparator less = LessComparator()) {
-        if (!successor_hint._node) {
-            auto&& ref = end_ref();
-            if (ref && less(ref->item(), key)) {
-                return insert_back();
-            }
-        }
+        // FIXME: use successor_hint
         return insert_placeholder(key, less);
     }
 
@@ -578,12 +574,15 @@ public: // Insertion
     }
 
     iterator insert(T item, LessComparator less = LessComparator()) {
-        placeholder ph = insert_placeholder(item, less);
-        return ph.emplace(std::move(item));
+        auto it_and_ph = insert_check(item, less);
+        if (it_and_ph.second) {
+            it_and_ph.second.emplace(std::move(item));
+        }
+        return it_and_ph.first;
     }
 public: // Erasing
     void clear() {
-        _root = {}; // FIXME: avoid recursion
+        erase(begin(), end());
     }
 
     iterator erase(const_iterator it) noexcept {
