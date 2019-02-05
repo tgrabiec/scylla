@@ -25,88 +25,101 @@
 #include <boost/intrusive/parent_from_member.hpp>
 #include "utils/logalloc.hh"
 
-
-template<typename T>
-class referenceable final {
-public:
-    referenceable** _backref = nullptr;
-
-    referenceable() = default;
-
-    referenceable(referenceable&& other) noexcept
-            : _backref(other._backref) {
-        if (_backref) {
-            *_backref = this;
-        }
-        other._backref = nullptr;
-    }
-
-    ~referenceable() {
-        if (_backref) {
-            *_backref = nullptr;
-        }
-    }
-
-    bool is_referenced() const {
-        return _backref;
-    }
-};
-
-template<typename T, referenceable<T> T::* Link>
+//  A pointer object pointing to an object of the same type, which in turn points back at this object.
+//  This pair of objects can be used for implementing bi-directional traversal in some data structure.
+//
+//  Moving this object automatically updates the other reference, so the references remain
+//  consistent when the containing objects are managed by LSA.
+//
+//                get()
+//          ------------------>
+//   -----------             -----------
+//  | reference |           | reference |
+//   -----------             -----------
+//          <------------------
+//                get()
+//
 class reference final {
 public:
-    referenceable<T>* _ref = nullptr;
+    reference* _ref = nullptr;
 
     reference() = default;
+    reference(const reference&) = delete;
 
-    reference(T& ref) {
-        referenceable<T>& link = ref.*Link;
-        _ref = &link;
-        link._backref = &_ref;
+    reference(reference& other) {
+        _ref = &other;
+        other._ref = this;
     }
 
     reference(reference&& other) noexcept
             : _ref(other._ref) {
         if (_ref) {
-            _ref->_backref = &_ref;
+            _ref->_ref = this;
         }
         other._ref = nullptr;
     }
 
     ~reference() {
         if (_ref) {
-            _ref->_backref = nullptr;
+            _ref->_ref = nullptr;
         }
     }
 
     reference& operator=(reference&& other) noexcept {
         if (_ref) {
-            _ref->_backref = nullptr;
+            _ref->_ref = nullptr;
         }
         _ref = other._ref;
         if (_ref) {
-            _ref->_backref = &_ref;
+            _ref->_ref = this;
         }
         other._ref = nullptr;
         return *this;
     }
 
-    T* get() { return _ref ? boost::intrusive::get_parent_from_member(_ref, Link) : nullptr; }
-    const T* get() const { return _ref ? boost::intrusive::get_parent_from_member(_ref, Link) : nullptr; }
-    T* operator->() { return get(); }
-    const T* operator->() const { return get(); }
-    T& operator*() { return *get(); }
-    const T& operator*() const { return *get(); }
+    reference* get() { return _ref; }
+    const reference* get() const { return _ref; }
+    reference* operator->() { return get(); }
+    const reference* operator->() const { return get(); }
+    reference& operator*() { return *get(); }
+    const reference& operator*() const { return *get(); }
     explicit operator bool() const { return _ref != nullptr; }
+};
 
-    // Returns a reference<> pointing to a given link.
-    // Must be called only when link.is_referenced().
-    static const reference& referer(const referenceable<T>& link) {
-        return *boost::intrusive::get_parent_from_member(link._backref, &reference::_ref);
+// FIXME
+//                get()
+//          ------------------>
+//   -----------             -----------
+//  | reference |           | reference |
+//   -----------             -----------
+//          <------------------
+//                get()
+//
+template<typename T, reference T::* Link>
+class reference_to_container final {
+    reference _ref;
+public:
+    reference_to_container() = default;
+    reference_to_container(T& obj) : _ref(obj.*Link) {}
+    reference_to_container(reference_to_container&& other) noexcept = default;
+    reference_to_container& operator=(reference_to_container&& other) noexcept = default;
+
+    T* get() { return _ref ? boost::intrusive::get_parent_from_member(_ref.get(), Link) : nullptr; }
+    const T* get() const { return _ref ? boost::intrusive::get_parent_from_member(_ref.get(), Link) : nullptr; }
+    T* operator->() { return boost::intrusive::get_parent_from_member(_ref.get(), Link); }
+    const T* operator->() const { return boost::intrusive::get_parent_from_member(_ref.get(), Link); }
+    T& operator*() { return *(operator->()); }
+    const T& operator*() const { return *(operator->()); }
+    explicit operator bool() const { return bool(_ref); }
+
+    // Returns a reference_to_container pointing to the object containing given back-reference.
+    // Must be called only when bool(link).
+    static const reference_to_container& referer(const reference& link) {
+        return *boost::intrusive::get_parent_from_member(link.get(), &reference_to_container::_ref);
     }
 
-    static reference& referer(referenceable<T>& link) {
-        return *boost::intrusive::get_parent_from_member(link._backref, &reference::_ref);
+    static reference_to_container& referer(reference& link) {
+        return *boost::intrusive::get_parent_from_member(link.get(), &reference_to_container::_ref);
     }
 };
 
@@ -125,13 +138,44 @@ struct btree_node {
     // Flags which describe node's position in the tree, not its contents.
     const uint8_t POSITION_FLAGS = IS_ROOT | IS_RIGHT_CHILD;
 
-    referenceable<btree_node> parent_link;
-    using parent_ref_type = reference<btree_node, &btree_node::parent_link>;
+    reference parent_link;
+    reference prev_link;
+    reference next_link;
+
+    using parent_ref_type = reference_to_container<btree_node, &btree_node::parent_link>;
     parent_ref_type left;
     parent_ref_type right;
 
     maybe_item _item; // FIXME: store many
     uint8_t flags;
+
+    static btree_node* predecessor(reference& prev_link) {
+        return boost::intrusive::get_parent_from_member(prev_link.get(), &btree_node::next_link);
+    }
+
+    static btree_node* successor(reference& next_link) {
+        return boost::intrusive::get_parent_from_member(next_link.get(), &btree_node::prev_link);
+    }
+
+    static const btree_node* successor(const reference& next_link) {
+        return boost::intrusive::get_parent_from_member(next_link.get(), &btree_node::prev_link);
+    }
+
+    void link_as_predecessor(reference& successors_prev_link) {
+        prev_link = std::exchange(successors_prev_link, reference(next_link));
+    }
+
+    void link_as_successor(reference& predecessors_next_link) {
+        next_link = std::exchange(predecessors_next_link, reference(prev_link));
+    }
+
+    void link_as_predecessor(btree_node& successor) {
+        link_as_predecessor(successor.prev_link);
+    }
+
+    void link_as_successor(btree_node& successor) {
+        link_as_successor(successor.prev_link);
+    }
 
     bool is_left_child() const { return !is_right_child(); }
     bool is_right_child() const { return flags & IS_RIGHT_CHILD; }
@@ -180,6 +224,8 @@ struct btree_node {
 
     btree_node(btree_node&& other) noexcept
         : parent_link(std::move(other.parent_link))
+        , prev_link(std::move(other.prev_link))
+        , next_link(std::move(other.next_link))
         , left(std::move(other.left))
         , right(std::move(other.right))
         , flags(other.flags)
@@ -208,6 +254,7 @@ struct btree_node {
             }
 
             // Find successor
+            // FIXME: Use next_link
             auto next = this;
             {
                 bool was_right;
@@ -218,6 +265,7 @@ struct btree_node {
             }
 
             parent_ref() = std::move(old_left);
+            *prev_link = std::move(next_link);
             current_allocator().destroy(this);
             return next;
         } else {
@@ -228,6 +276,7 @@ struct btree_node {
                 old_right->left = std::move(old_left);
                 old_right->set_position_flags(old_flags);
                 parent_ref() = std::move(old_right);
+                *prev_link = std::move(next_link);
                 current_allocator().destroy(this);
                 return node;
             } else {
@@ -242,6 +291,7 @@ struct btree_node {
                 node->right = std::move(old_right);
                 node->set_position_flags(old_flags);
                 parent_ref() = std::exchange(node->parent_ref(), std::move(node_right));
+                *prev_link = std::move(next_link);
                 current_allocator().destroy(this);
                 return node;
             }
@@ -256,10 +306,12 @@ class btree {
     //static constexpr size_t node_capacity = max_node_size / sizeof(T);
 private:
     using node = btree_node<T>;
-    using ref_type = reference<node, &node::parent_link>;
+    using ref_type = reference_to_container<node, &node::parent_link>;
     ref_type _root;
+    reference _first;
+    reference _last;
 public:
-    btree() = default;
+    btree() : _first(), _last(_first) {}
     ~btree() { clear(); }
     btree(btree&&) noexcept = default;
 public: // Iterators
@@ -284,6 +336,7 @@ public: // Iterators
         reference operator*() const { return _node->item(); }
         pointer operator->() const { return &_node->item(); }
 
+        // FIXME: Use next_link
         iterator_impl& operator++() {
             if (_node->right) {
                 _node = &*_node->right;
@@ -363,13 +416,11 @@ public: // Iterators
     iterator end() { return std::as_const(*this).end().unconst(); }
 
     const_iterator begin() const {
-        const node* node = _root.get();
-        if (node) {
-            while (node->left) {
-                node = node->left.get();
-            }
+        if (_root) {
+            return const_iterator(this, node::successor(_first));
+        } else {
+            return end();
         }
-        return const_iterator(this, node);
     }
 
     // Never invalidated by mutators.
@@ -400,15 +451,6 @@ public: // Iterators
         return *boost::intrusive::get_parent_from_member(&it._node->parent_ref(), &btree::_root);
     }
 private:
-    decltype(_root)& end_ref() {
-        ref_type* ref = &_root;
-        if (*ref) {
-            while (*ref) {
-                ref = &(*ref)->right;
-            }
-        }
-        return *ref;
-    }
     template<typename... Args>
     static ref_type make_node(Args&&... args) {
         return ref_type(*current_allocator().construct<node>(std::forward<Args>(args)...));
@@ -450,22 +492,31 @@ public: // Insertion
         ref_type* ref = &_root;
         bool is_root = true;
         bool is_right_child = false;
+        reference* sibling_link = &_last;
 
         while (*ref) {
             is_root = false;
             node& n = **ref;
             if (less(key, n.item())) {
                 ref = &n.left;
+                sibling_link = &n.prev_link;
                 is_right_child = false;
             } else {
                 ref = &n.right;
+                sibling_link = &n.next_link;
                 is_right_child = true;
             }
         }
 
         // FIXME: rebalance
         *ref = make_node(is_root, is_right_child);
-        return placeholder(this, ref->get());
+        node* new_node = &**ref;
+        if (is_right_child) {
+            new_node->link_as_successor(*sibling_link);
+        } else {
+            new_node->link_as_predecessor(*sibling_link);
+        }
+        return placeholder(this, new_node);
     }
 
     // Inserts a placeholder into the tree where the key should be, unless
@@ -479,15 +530,18 @@ public: // Insertion
         ref_type* ref = &_root;
         bool is_root = true;
         bool is_right_child = false;
+        reference* sibling_link = &_last;
 
         while (*ref) {
             is_root = false;
             node& n = **ref;
             if (less(key, n.item())) {
                 ref = &n.left;
+                sibling_link = &n.prev_link;
                 is_right_child = false;
             } else if (less(n.item(), key)) {
                 ref = &n.right;
+                sibling_link = &n.next_link;
                 is_right_child = true;
             } else {
                 return std::make_pair(iterator(this, &n), placeholder());
@@ -496,7 +550,13 @@ public: // Insertion
 
         // FIXME: rebalance
         *ref = make_node(is_root, is_right_child);
-        return std::make_pair(iterator(this, ref->get()), placeholder(this, ref->get()));
+        node* new_node = &**ref;
+        if (is_right_child) {
+            new_node->link_as_successor(*sibling_link);
+        } else {
+            new_node->link_as_predecessor(*sibling_link);
+        }
+        return std::make_pair(iterator(this, new_node), placeholder(this, new_node));
     }
 
     // Inserts a place holder for item where the key should be
@@ -525,6 +585,7 @@ public: // Insertion
             // FIXME: rebalance
             auto old_left = std::move(it._node->left);
             it._node->left = make_node(false, false);
+            it._node->left->link_as_predecessor(*it._node);
             it._node->left->left = std::move(old_left);
             return placeholder(this, it._node->left.get());
         }
@@ -538,9 +599,18 @@ public: // Insertion
     // Does not invalidate iterators.
     placeholder insert_back() {
         // FIXME: rebalance
-        auto&& ref = end_ref();
-        ref = make_node(!_root, true);
-        return placeholder(this, ref.get());
+        ref_type new_ref = make_node(!_root, true);
+        node* new_node = new_ref.get();
+        if (_root) {
+            node* last_node = node::predecessor(_last);
+            new_node->link_as_predecessor(_last);
+            last_node->right = std::move(new_ref);
+            return placeholder(this, new_node);
+        } else {
+            new_node->link_as_predecessor(_last);
+            _root = std::move(new_ref);
+            return placeholder(this, new_node);
+        }
     }
 
     template<typename Cloner>
@@ -552,24 +622,33 @@ public: // Insertion
             return;
         }
 
+        // Clone by iterating over other and creating nodes on descent into children.
+
         _root = make_node(*other_node, cloner);
         node* this_node = _root.get();
+        reference* link_after = &_first;
+
         while (other_node->left) {
             other_node = other_node->left.get();
             this_node->left = make_node(*other_node, cloner);
-            this_node = this_node->left.get();
+            this_node = &*this_node->left;
         }
+
+        this_node->link_as_successor(*link_after);
+        link_after = &this_node->next_link;
 
         while (other_node) {
             if (other_node->right) {
                 other_node = &*other_node->right;
                 this_node->right = make_node(*other_node, cloner);
-                this_node = this_node->right.get();
+                this_node = &*this_node->right;
                 while (other_node->left) {
                     other_node = &*other_node->left;
                     this_node->left = make_node(*other_node, cloner);
-                    this_node = this_node->left.get();
+                    this_node = &*this_node->left;
                 }
+                this_node->link_as_successor(*link_after);
+                link_after = &this_node->next_link;
             } else {
                 bool was_right;
                 do {
@@ -577,6 +656,11 @@ public: // Insertion
                     other_node = other_node->parent();
                     this_node = this_node->parent();
                 } while (other_node && was_right);
+
+                if (other_node) {
+                    this_node->link_as_successor(*link_after);
+                    link_after = &this_node->next_link;
+                }
             }
         }
     }
