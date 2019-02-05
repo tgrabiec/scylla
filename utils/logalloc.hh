@@ -748,5 +748,6 @@ future<> prime_segment_pool(size_t available_memory, size_t min_free_memory);
 
 uint64_t memory_allocated();
 uint64_t memory_compacted();
+uint64_t memory_evicted();
 
 }

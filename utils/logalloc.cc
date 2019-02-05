@@ -573,6 +573,7 @@ public:
         size_t segments_compacted;
         uint64_t memory_allocated;
         uint64_t memory_compacted;
+        uint64_t memory_evicted;
     };
 private:
     stats _stats{};
@@ -581,6 +582,7 @@ public:
     void on_segment_migration() { _stats.segments_migrated++; }
     void on_segment_compaction(size_t used_size);
     void on_memory_allocation(size_t size);
+    void on_evicted(size_t size);
     size_t unreserved_free_segments() const { return _free_segments - std::min(_free_segments, _emergency_reserve_max); }
     size_t free_segments() const { return _free_segments; }
 };
@@ -913,6 +915,7 @@ public:
         size_t segments_compacted;
         uint64_t memory_allocated;
         uint64_t memory_compacted;
+        uint64_t memory_evicted;
     };
 private:
     stats _stats{};
@@ -921,6 +924,7 @@ public:
     void on_segment_migration() { _stats.segments_migrated++; }
     void on_segment_compaction(size_t used_space);
     void on_memory_allocation(size_t size);
+    void on_evicted(size_t size);
     size_t free_segments() const { return 0; }
 public:
     class reservation_goal;
@@ -935,6 +939,10 @@ void segment_pool::on_segment_compaction(size_t used_size) {
 
 void segment_pool::on_memory_allocation(size_t size) {
     _stats.memory_allocated += size;
+}
+
+void segment_pool::on_evicted(size_t size) {
+    _stats.memory_evicted += size;
 }
 
 // RAII wrapper to maintain segment_pool::current_emergency_reserve_goal()
@@ -1826,17 +1834,23 @@ static void reclaim_from_evictable(region::impl& r, size_t target_mem_in_use) {
                 if (r.is_compactible()) { // Need to make forward progress in case there is nothing to evict.
                     break;
                 }
-                llogger.debug("Unable to evict more, evicted {} bytes", used - r.occupancy().used_space());
+                auto evicted = used - r.occupancy().used_space();
+                llogger.debug("Unable to evict more, evicted {} bytes", evicted);
+                shard_segment_pool.on_evicted(evicted);
                 return;
             }
             if (shard_segment_pool.total_memory_in_use() <= target_mem_in_use) {
-                llogger.debug("Target met after evicting {} bytes", used - r.occupancy().used_space());
+                auto evicted = used - r.occupancy().used_space();
+                llogger.debug("Target met after evicting {} bytes", evicted);
+                shard_segment_pool.on_evicted(evicted);
                 return;
             }
             if (r.empty()) {
+                shard_segment_pool.on_evicted(used - r.occupancy().used_space());
                 return;
             }
         }
+        shard_segment_pool.on_evicted(used - r.occupancy().used_space());
         llogger.debug("Compacting after evicting {} bytes", used - r.occupancy().used_space());
         r.compact();
     }
@@ -2118,6 +2132,9 @@ tracker::impl::impl() {
 
         sm::make_derive("memory_allocated", [this] { return shard_segment_pool.statistics().memory_allocated; },
                         sm::description("Counts number of bytes which were requested from LSA allocator.")),
+
+        sm::make_derive("memory_evicted", [this] { return shard_segment_pool.statistics().memory_evicted; },
+            sm::description("Counts the number of bytes which were evicted.")),
     });
 }
 
@@ -2328,6 +2345,10 @@ uint64_t memory_allocated() {
 
 uint64_t memory_compacted() {
     return shard_segment_pool.statistics().memory_compacted;
+}
+
+uint64_t memory_evicted() {
+    return shard_segment_pool.statistics().memory_evicted;
 }
 
 }
