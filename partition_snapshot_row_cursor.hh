@@ -327,7 +327,7 @@ public:
         position_in_version::less_compare heap_less(_schema);
         for (auto&& curr : _current_row) {
             if (curr.unique_owner) {
-                curr.it = curr.rows->erase_and_dispose(curr.it, current_deleter<rows_entry>());
+                curr.it = curr.rows->erase(curr.it);
             } else {
                 ++curr.it;
             }
@@ -413,11 +413,11 @@ public:
         } else {
             // Copy row from older version because rows in evictable versions must
             // hold values which are independently complete to be consistent on eviction.
-            auto e = current_allocator().construct<rows_entry>(_schema, *_current_row[0].it);
-            e->set_continuous(latest_i != rows.end() && latest_i->continuous());
-            _snp.tracker()->insert(*e);
-            rows.insert_before(latest_i, *e);
-            return {*e, true};
+            bool cont = latest_i != rows.end() && latest_i->continuous();
+            auto i = rows.insert_before(latest_i).emplace(_schema, *_current_row[0].it);
+            i->set_continuous(cont);
+            _snp.tracker()->insert(*i);
+            return {*i, true};
         }
     }
 
@@ -449,10 +449,10 @@ public:
         }
         auto&& rows = _snp.version()->partition().clustered_rows();
         auto latest_i = get_iterator_in_latest_version();
-        auto e = current_allocator().construct<rows_entry>(_schema, pos, is_dummy(!pos.is_clustering_row()),
+        rows_entry* e = &*rows.insert_before(latest_i)
+            .emplace(_schema, pos, is_dummy(!pos.is_clustering_row()),
             is_continuous(latest_i != rows.end() && latest_i->continuous()));
         _snp.tracker()->insert(*e);
-        rows.insert_before(latest_i, *e);
         return ensure_result{*e, true};
     }
 

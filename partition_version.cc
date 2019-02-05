@@ -429,15 +429,6 @@ public:
             }
         }
     }
-    void remove_current_row_when_possible() {
-        assert(!_current_row.empty());
-        auto deleter = current_deleter<rows_entry>();
-        for (version& v : _current_row) {
-            if (v.can_move) {
-                v.rows->erase_and_dispose(v.current_row, deleter);
-            }
-        }
-    }
     void move_to_next_row() {
         _current_row.clear();
         _current_row_dummy = true;

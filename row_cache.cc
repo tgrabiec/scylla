@@ -1194,9 +1194,8 @@ void rows_entry::on_evicted(cache_tracker& tracker) noexcept {
         // with no regular rows, and we need to track them.
         _lru_link.unlink();
     } else {
-        ++it;
+        it.erase();
         it->set_continuous(false);
-        current_deleter<rows_entry>()(this);
         tracker.on_row_eviction();
     }
 

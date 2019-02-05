@@ -371,16 +371,14 @@ flat_mutation_reader_from_mutations(std::vector<mutation> mutations, const dht::
     private:
         void prepare_next_clustering_row() {
             auto& crs = _cur->partition().clustered_rows();
-            while (true) {
-                auto re = crs.unlink_leftmost_without_rebalance();
-                if (!re) {
+            auto it = crs.begin();
+            while (!crs.empty()) {
+                if (!it->dummy()) {
+                    _cr = mutation_fragment(std::move(*it));
+                    it = crs.erase(it);
                     break;
                 }
-                auto re_deleter = defer([re] { current_deleter<rows_entry>()(re); });
-                if (!re->dummy()) {
-                    _cr = mutation_fragment(std::move(*re));
-                    break;
-                }
+                it = crs.erase(it);
             }
         }
         void prepare_next_range_tombstone() {
@@ -435,12 +433,7 @@ flat_mutation_reader_from_mutations(std::vector<mutation> mutations, const dht::
             prepare_next_range_tombstone();
         }
         void destroy_current_mutation() {
-            auto &crs = _cur->partition().clustered_rows();
-            auto re = crs.unlink_leftmost_without_rebalance();
-            while (re) {
-                current_deleter<rows_entry>()(re);
-                re = crs.unlink_leftmost_without_rebalance();
-            }
+            _cur->partition().clustered_rows().clear();
 
             auto &rts = _cur->partition().row_tombstones().tombstones();
             auto rt = rts.unlink_leftmost_without_rebalance();
