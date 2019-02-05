@@ -1258,16 +1258,19 @@ private:
     }
 
     void compact(segment* seg, segment_descriptor& desc) {
+        size_t total_live_size = 0;
         ++_invalidate_counter;
 
-        for_each_live(seg, [this] (const object_descriptor* desc, void* obj) {
+        for_each_live(seg, [&total_live_size, this] (const object_descriptor* desc, void* obj) {
             auto size = desc->live_size(obj);
+            total_live_size += size;
             auto dst = alloc_small(desc->migrator(), size, desc->alignment());
             _sanitizer.on_migrate(obj, size, dst);
             desc->migrator()->migrate(obj, dst, size);
         });
 
         free_segment(seg, desc);
+        shard_segment_pool.on_segment_compaction(total_live_size);
     }
 
     void close_and_open() {
@@ -1549,7 +1552,6 @@ public:
         auto seg_occupancy = desc.occupancy();
         llogger.debug("Compacting segment {} from region {}, {}", seg, id(), seg_occupancy);
         compact(seg, desc);
-        shard_segment_pool.on_segment_compaction(seg_occupancy.used_space());
     }
 
     // Compacts a single segment
