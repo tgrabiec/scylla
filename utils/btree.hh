@@ -25,20 +25,18 @@
 #include <boost/intrusive/parent_from_member.hpp>
 #include "utils/logalloc.hh"
 
-template<typename T>
-class reference;
 
 template<typename T>
-class referenceable {
+class referenceable final {
 public:
-    T** _backref = nullptr;
+    referenceable** _backref = nullptr;
 
     referenceable() = default;
 
     referenceable(referenceable&& other) noexcept
             : _backref(other._backref) {
         if (_backref) {
-            *_backref = static_cast<T*>(this);
+            *_backref = this;
         }
         other._backref = nullptr;
     }
@@ -52,23 +50,19 @@ public:
     bool is_referenced() const {
         return _backref;
     }
-
-    // Returns a reference to the reference<> pointing to this object.
-    // Must be called only when is_referenced().
-    reference<T>& referer();
-    const reference<T>& referer() const;
 };
 
-template<typename T>
-class reference {
+template<typename T, referenceable<T> T::* Link>
+class reference final {
 public:
-    T* _ref = nullptr;
+    referenceable<T>* _ref = nullptr;
 
     reference() = default;
 
-    reference(referenceable<T>& ref) {
-        _ref = static_cast<T*>(&ref);
-        ref._backref = &_ref;
+    reference(T& ref) {
+        referenceable<T>& link = ref.*Link;
+        _ref = &link;
+        link._backref = &_ref;
     }
 
     reference(reference&& other) noexcept
@@ -81,13 +75,13 @@ public:
 
     ~reference() {
         if (_ref) {
-            current_allocator().destroy(_ref);
+            _ref->_backref = nullptr;
         }
     }
 
     reference& operator=(reference&& other) noexcept {
         if (_ref) {
-            current_allocator().destroy(_ref);
+            _ref->_backref = nullptr;
         }
         _ref = other._ref;
         if (_ref) {
@@ -97,27 +91,27 @@ public:
         return *this;
     }
 
-    T* get() { return _ref; }
-    const T* get() const { return _ref; }
-    T* operator->() { return _ref; }
-    const T* operator->() const { return _ref; }
-    T& operator*() { return *_ref; }
-    const T& operator*() const { return *_ref; }
+    T* get() { return _ref ? boost::intrusive::get_parent_from_member(_ref, Link) : nullptr; }
+    const T* get() const { return _ref ? boost::intrusive::get_parent_from_member(_ref, Link) : nullptr; }
+    T* operator->() { return get(); }
+    const T* operator->() const { return get(); }
+    T& operator*() { return *get(); }
+    const T& operator*() const { return *get(); }
     explicit operator bool() const { return _ref != nullptr; }
+
+    // Returns a reference<> pointing to a given link.
+    // Must be called only when link.is_referenced().
+    static const reference& referer(const referenceable<T>& link) {
+        return *boost::intrusive::get_parent_from_member(link._backref, &reference::_ref);
+    }
+
+    static reference& referer(referenceable<T>& link) {
+        return *boost::intrusive::get_parent_from_member(link._backref, &reference::_ref);
+    }
 };
 
-template<typename T>
-reference<T>& referenceable<T>::referer() {
-    return *boost::intrusive::get_parent_from_member(_backref, &reference<T>::_ref);
-}
-
-template<typename T>
-const reference<T>& referenceable<T>::referer() const {
-    return *boost::intrusive::get_parent_from_member(_backref, &reference<T>::_ref);
-}
-
 template <typename T>
-struct btree_node : public referenceable<btree_node<T>> {
+struct btree_node {
     union maybe_item {
         maybe_item() noexcept {}
         ~maybe_item() {}
@@ -131,8 +125,10 @@ struct btree_node : public referenceable<btree_node<T>> {
     // Flags which describe node's position in the tree, not its contents.
     const uint8_t POSITION_FLAGS = IS_ROOT | IS_RIGHT_CHILD;
 
-    reference<btree_node> left;
-    reference<btree_node> right;
+    referenceable<btree_node> parent_link;
+    using parent_ref_type = reference<btree_node, &btree_node::parent_link>;
+    parent_ref_type left;
+    parent_ref_type right;
 
     maybe_item _item; // FIXME: store many
     uint8_t flags;
@@ -145,11 +141,19 @@ struct btree_node : public referenceable<btree_node<T>> {
     void set_is_right_child(bool is_right) const { flags = (flags & ~IS_RIGHT_CHILD) | (IS_RIGHT_CHILD * is_right_child); }
     void set_position_flags(uint8_t new_flags) { flags = (flags & ~POSITION_FLAGS) | (new_flags & POSITION_FLAGS); }
 
+    const parent_ref_type& parent_ref() const {
+        return parent_ref_type::referer(parent_link);
+    }
+
+    parent_ref_type& parent_ref() {
+        return parent_ref_type::referer(parent_link);
+    }
+
     const btree_node* parent() const {
         if (is_root()) {
             return nullptr;
         }
-        return boost::intrusive::get_parent_from_member(&this->referer(),
+        return boost::intrusive::get_parent_from_member(&parent_ref(),
             is_right_child() ? &btree_node::right : &btree_node::left);
     }
 
@@ -175,7 +179,7 @@ struct btree_node : public referenceable<btree_node<T>> {
     }
 
     btree_node(btree_node&& other) noexcept
-        : referenceable<btree_node<T>>(std::move(other))
+        : parent_link(std::move(other.parent_link))
         , left(std::move(other.left))
         , right(std::move(other.right))
         , flags(other.flags)
@@ -213,7 +217,8 @@ struct btree_node : public referenceable<btree_node<T>> {
                 } while (next && was_right);
             }
 
-            this->referer() = std::move(old_left);
+            parent_ref() = std::move(old_left);
+            current_allocator().destroy(this);
             return next;
         } else {
             auto old_left = std::move(left);
@@ -222,7 +227,8 @@ struct btree_node : public referenceable<btree_node<T>> {
             if (!node->left) {
                 old_right->left = std::move(old_left);
                 old_right->set_position_flags(old_flags);
-                this->referer() = std::move(old_right);
+                parent_ref() = std::move(old_right);
+                current_allocator().destroy(this);
                 return node;
             } else {
                 while (node->left) {
@@ -235,7 +241,8 @@ struct btree_node : public referenceable<btree_node<T>> {
                 node->left = std::move(old_left);
                 node->right = std::move(old_right);
                 node->set_position_flags(old_flags);
-                this->referer() = std::exchange(node->referer(), std::move(node_right));
+                parent_ref() = std::exchange(node->parent_ref(), std::move(node_right));
+                current_allocator().destroy(this);
                 return node;
             }
         }
@@ -249,7 +256,8 @@ class btree {
     //static constexpr size_t node_capacity = max_node_size / sizeof(T);
 private:
     using node = btree_node<T>;
-    reference<node> _root;
+    using ref_type = reference<node, &node::parent_link>;
+    ref_type _root;
 public:
     btree() = default;
     ~btree() { clear(); }
@@ -389,11 +397,11 @@ public: // Iterators
     static btree& container_of_only_member(T& item) {
         iterator it = iterator_to(item);
         assert(it._node->is_root());
-        return *boost::intrusive::get_parent_from_member(&it._node->referer(), &btree::_root);
+        return *boost::intrusive::get_parent_from_member(&it._node->parent_ref(), &btree::_root);
     }
 private:
-    reference<node>& end_ref() {
-        reference<node>* ref = &_root;
+    decltype(_root)& end_ref() {
+        ref_type* ref = &_root;
         if (*ref) {
             while (*ref) {
                 ref = &(*ref)->right;
@@ -402,8 +410,8 @@ private:
         return *ref;
     }
     template<typename... Args>
-    static reference<node> make_node(Args&&... args) {
-        return reference<node>(*current_allocator().construct<node>(std::forward<Args>(args)...));
+    static ref_type make_node(Args&&... args) {
+        return ref_type(*current_allocator().construct<node>(std::forward<Args>(args)...));
     }
 public: // Insertion
     class placeholder {
@@ -439,7 +447,7 @@ public: // Insertion
     // Does not invalidate iterators.
     template<typename Key>
     placeholder insert_placeholder(const Key& key, LessComparator less = LessComparator()) {
-        reference<node>* ref = &_root;
+        ref_type* ref = &_root;
         bool is_root = true;
         bool is_right_child = false;
 
@@ -468,7 +476,7 @@ public: // Insertion
     // Does not invalidate iterators.
     template<typename Key>
     std::pair<iterator, placeholder> insert_check(const Key& key, LessComparator less = LessComparator()) {
-        reference<node>* ref = &_root;
+        ref_type* ref = &_root;
         bool is_root = true;
         bool is_right_child = false;
 
