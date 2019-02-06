@@ -86,14 +86,16 @@ public:
     explicit operator bool() const { return _ref != nullptr; }
 };
 
-// FIXME
-//                get()
-//          ------------------>
-//   -----------             -----------
-//  | reference |           | reference |
-//   -----------             -----------
-//          <------------------
-//                get()
+//  Non-owning reference to an object of type T.
+//  Moving T or reference_to_container<> does not invalidate the link.
+//
+//  +---------------------------+     +----------------+
+//  | reference_to_container<T> |     |  T             |
+//  |                           |     |                |
+//  |             +--- _ref --+ |     |  +-- Link ---+ |
+//  |             | reference +--------> | reference | |
+//  |             +-----------+ |     |  +-----------+ |
+//  +---------------------------+     +----------------+
 //
 template<typename T, reference T::* Link>
 class reference_to_container final {
@@ -150,6 +152,10 @@ struct btree_node {
     uint8_t flags;
 
     static btree_node* predecessor(reference& prev_link) {
+        return boost::intrusive::get_parent_from_member(prev_link.get(), &btree_node::next_link);
+    }
+
+    static const btree_node* predecessor(const reference& prev_link) {
         return boost::intrusive::get_parent_from_member(prev_link.get(), &btree_node::next_link);
     }
 
@@ -695,6 +701,17 @@ public: // Querying
     template<typename Key>
     const_iterator lower_bound(const Key& key, LessComparator less = LessComparator()) const {
         const node* n = _root.get();
+        if (!n) {
+            return end();
+        }
+        const node* first_node = node::successor(_first);
+        if (less(key, first_node->item())) {
+            return const_iterator(this, first_node);
+        }
+        const node* last_node = node::predecessor(_last);
+        if (less(last_node->item(), key)) {
+            return end();
+        }
         while (n) {
             if (less(key, n->item())) {
                 if (n->left) {
