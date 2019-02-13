@@ -569,7 +569,7 @@ private:
     struct {
         // Unfortunately we cannot output the promoted index directly to the
         // index file because it needs to be prepended by its size.
-        seastar::circular_buffer<pi_block> promoted_index;
+        seastar::chunked_fifo<pi_block> promoted_index;
         tombstone tomb;
         uint64_t block_start_offset;
         uint64_t block_next_start_offset;
@@ -1248,7 +1248,9 @@ void writer::write_promoted_index(bytes_ostream& writer) {
     std::vector<uint32_t> offsets;
     offsets.reserve(_pi_write_m.promoted_index.size());
     uint64_t start = writer.size();
-    for (const pi_block& block: _pi_write_m.promoted_index) {
+    auto&& index = _pi_write_m.promoted_index;
+    while (!index.empty()) {
+        const pi_block& block = index.front();
         offsets.push_back(writer.size() - start);
         write_clustering_prefix(writer, block.first.kind, _schema, block.first.clustering);
         write_clustering_prefix(writer, block.last.kind, _schema, block.last.clustering);
@@ -1258,6 +1260,7 @@ void writer::write_promoted_index(bytes_ostream& writer) {
         if (block.open_marker) {
             write(sstable_version_types::mc, writer, to_deletion_time(*block.open_marker));
         }
+        index.pop_front();
     }
 
     for (uint32_t offset: offsets) {
