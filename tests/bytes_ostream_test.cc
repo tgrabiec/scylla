@@ -282,6 +282,56 @@ BOOST_AUTO_TEST_CASE(test_append_big_and_small_chunks) {
     buf.append(small);
 }
 
+BOOST_AUTO_TEST_CASE(test_rvalue_ref_append) {
+    bytes_ostream buf;
+    bytes_ostream buf2;
+    bytes_ostream buf3;
+
+    auto w1 = tests::random::get_bytes(512);
+    auto w2 = tests::random::get_bytes(512*1024);
+    auto w3 = tests::random::get_bytes(128);
+
+    auto w4 = tests::random::get_bytes(512);
+    auto w5 = tests::random::get_bytes(512*1024);
+    auto w6 = tests::random::get_bytes(128);
+
+    buf.write(w1);
+    buf.write(w2);
+    buf.write(w3);
+    buf2.write(w4);
+    buf2.write(w5);
+    buf2.write(w6);
+
+    buf3.write(w1);
+    buf3.write(w2);
+    buf3.write(w3);
+    buf3.write(w4);
+    buf3.write(w5);
+    buf3.write(w6);
+
+    buf.append(std::move(buf2));
+
+    BOOST_REQUIRE(buf2.empty());
+    BOOST_REQUIRE(buf2.size() == 0);
+    BOOST_REQUIRE(buf.linearize() == buf3.linearize());
+
+    buf2.append(std::move(buf));
+
+    BOOST_REQUIRE(buf.empty());
+    BOOST_REQUIRE(buf2.linearize() == buf3.linearize());
+
+    buf.write(w2);
+    buf3.write(w2);
+
+    buf2.append(std::move(buf));
+
+    buf.write(w2);
+    buf3.write(w2);
+    buf2.append(std::move(buf));
+
+    BOOST_REQUIRE(buf2.linearize() == buf3.linearize());
+}
+
 BOOST_AUTO_TEST_CASE(test_remove_suffix) {
     auto test = [] (size_t length, size_t suffix) {
         BOOST_TEST_MESSAGE("Testing buffer size " << length << " and suffix size " << suffix);

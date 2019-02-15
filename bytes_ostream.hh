@@ -303,6 +303,19 @@ public:
         }
     }
 
+    // Appends contents of other to this instance by stealing its chunks.
+    // other is left empty.
+    // All placeholders and positions inside other are invalidated.
+    void append(bytes_ostream&& other) {
+        if (!_current) {
+            *this = std::move(other);
+        } else {
+            _current->next = std::move(other._begin);
+            _current = std::exchange(other._current, nullptr);
+            _size += std::exchange(other._size, 0);
+        }
+    }
+
     // Removes n bytes from the end of the bytes_ostream.
     // Beware of O(n) algorithm.
     void remove_suffix(size_t n) {
