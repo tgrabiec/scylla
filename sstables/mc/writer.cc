@@ -373,7 +373,7 @@ struct sstable_schema {
 };
 
 static
-sstable_schema make_sstable_schema(const schema& s, const encoding_stats& enc_stats) {
+sstable_schema make_sstable_schema(const schema& s, const encoding_stats& enc_stats, const sstable_writer_config& cfg) {
     sstable_schema sst_sch;
     serialization_header& header = sst_sch.header;
     // mc serialization header minimum values are delta-encoded based on the default timestamp epoch times
@@ -404,8 +404,14 @@ sstable_schema make_sstable_schema(const schema& s, const encoding_stats& enc_st
         }
     };
 
-    for (const auto& column : s.all_columns()) {
-        add_column(column);
+    if (cfg.correctly_serialize_static_compact_in_mc) {
+        for (const auto& column : s.v3().all_columns()) {
+            add_column(column);
+        }
+    } else {
+        for (const auto& column : s.all_columns()) {
+            add_column(column);
+        }
     }
 
     // For static and regular columns, we write all simple columns first followed by collections
@@ -728,7 +734,7 @@ public:
         , _shard(shard)
         , _range_tombstones(_schema)
         , _tmp_bufs(_sst.sstable_buffer_size)
-        , _sst_schema(make_sstable_schema(s, _enc_stats))
+        , _sst_schema(make_sstable_schema(s, _enc_stats, _cfg))
         , _run_identifier(cfg.run_identifier)
     {
         _sst.generate_toc(_schema.get_compressor_params().get_compressor(), _schema.bloom_filter_fp_chance());
@@ -1237,6 +1243,12 @@ void writer::write_clustered(const clustering_row& clustered_row, uint64_t prev_
 }
 
 stop_iteration writer::consume(clustering_row&& cr) {
+    if (_cfg.correctly_serialize_static_compact_in_mc && _schema.is_static_compact_table()) {
+        ensure_tombstone_is_written();
+        write_static_row(cr.cells(), column_kind::regular_column);
+        _static_row_written = true;
+        return stop_iteration::no;
+    }
     drain_tombstones(position_in_partition_view::after_key(cr.key()));
     write_clustered(cr);
     return stop_iteration::no;
@@ -1373,6 +1385,9 @@ void writer::consume_end_of_stream() {
     auto features = sstable_enabled_features::all();
     if (!_cfg.correctly_serialize_non_compound_range_tombstones) {
         features.disable(sstable_feature::NonCompoundRangeTombstones);
+    }
+    if (!_cfg.correctly_serialize_static_compact_in_mc) {
+        features.disable(sstable_feature::CorrectStaticCompact);
     }
     run_identifier identifier{_run_identifier};
     _sst.write_scylla_metadata(_pc, _shard, std::move(features), std::move(identifier));

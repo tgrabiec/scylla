@@ -54,6 +54,7 @@ class mp_row_consumer_reader : public flat_mutation_reader::impl {
 public:
     mp_row_consumer_reader(schema_ptr s) : impl(std::move(s)) {}
     virtual void on_end_of_stream() = 0;
+    virtual sstable& get_sstable() = 0;
 };
 
 struct new_mutation {
@@ -809,6 +810,7 @@ class mp_row_consumer_m : public consumer_m {
     std::optional<new_mutation> _mutation;
     bool _is_mutation_end = true;
     streamed_mutation::forwarding _fwd;
+    const bool _has_correct_static_compact; // See #4139
 
     std::optional<clustering_row> _in_progress_row;
     std::optional<range_tombstone> _stored_tombstone;
@@ -952,6 +954,10 @@ public:
         , _schema(schema)
         , _slice(slice)
         , _fwd(fwd)
+        , _has_correct_static_compact([this] {
+            sstable& sst = _reader->get_sstable();
+            return !sst.has_scylla_component() || sst.features().is_enabled(sstable_feature::CorrectStaticCompact);
+        }())
     {
         _cells.reserve(std::max(_schema->static_columns_count(), _schema->regular_columns_count()));
     }
@@ -1126,6 +1132,9 @@ public:
 
     virtual consumer_m::row_processing_result consume_static_row_start() override {
         sstlog.trace("mp_row_consumer_m {}: consume_static_row_start()", this);
+        if (_has_correct_static_compact && _schema->is_static_compact_table()) {
+            return consume_row_start({});
+        }
         _inside_static_row = true;
         _in_progress_static_row = static_row();
         return consumer_m::row_processing_result::do_proceed;

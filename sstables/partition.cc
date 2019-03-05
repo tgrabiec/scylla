@@ -421,6 +421,9 @@ public:
             _partition_finished = true;
         }
     }
+    sstable& get_sstable() override {
+        return *_sst;
+    }
     virtual future<> fast_forward_to(const dht::partition_range& pr, db::timeout_clock::time_point timeout) override {
         return ensure_initialized().then([this, &pr] {
             if (!is_initialized()) {
