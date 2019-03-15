@@ -1751,6 +1751,209 @@ class scylla_find(gdb.Command):
             gdb.execute("scylla ptr 0x%x" % (obj + off))
 
 
+class scylla_find_usages(gdb.Command):
+    """
+
+    """
+
+    def __init__(self):
+        gdb.Command.__init__(self, 'scylla find-usages', gdb.COMMAND_USER, gdb.COMPLETE_NONE, True)
+
+    def invoke(self, arg, for_tty):
+        parser = argparse.ArgumentParser(description="scylla find-usages")
+        parser.add_argument("-d", "--debug", action="store_true", help="Print extra debugging messages")
+        parser.add_argument("--no-bad", action="store_true", help="Do not print traces which end up classified as incorrect")
+        parser.add_argument("address", type=str, help="Address of the object whose usages should be searched for")
+        try:
+            args = parser.parse_args(arg.split())
+        except SystemExit:
+            return
+
+        addr = int(args.address, 0)
+        debug = args.debug
+        hide_bad_trace = args.no_bad
+
+        vptr_type = gdb.lookup_type('uintptr_t').pointer()
+        mem_start, mem_size = get_seastar_memory_start_and_size()
+        visited = set()
+        def search(addr, path=[]):
+            visited.add(addr)
+
+            if debug:
+                gdb.write('search 0x%x\n' % addr)
+
+            for obj, off in find_in_live(mem_start, mem_size, addr, 'g'):
+                if obj in visited:
+                    continue
+                sym = resolve(int(gdb.Value(obj).cast(vptr_type).dereference()))
+                if sym and sym.startswith('vtable '):
+                    yield obj, sym, [(obj, off)] + path
+                else:
+                    for n in search(obj, [(obj, off)] + path):
+                        yield n
+
+        lines = []
+
+        def log(line):
+            global lines
+            if hide_bad_trace:
+                lines.append(line)
+            else:
+                gdb.write(line)
+
+        def flush_log():
+            global lines
+            for line in lines:
+                gdb.write(line)
+            lines = []
+
+        def clear_log():
+            global lines
+            lines = []
+
+        for obj, sym, path in search(addr):
+            clear_log()
+            log('=============================================\n')
+            log("0x%x: %s, %s -> 0x%x\n" % (obj, sym, ' -> '.join('0x%x+%d' % (obj, off) for (obj, off) in path), addr))
+
+            m = re.match("vtable for ([^+]*)", sym)
+            if not m:
+                log('ERROR: Failed to parse vtable pointer name\n')
+                continue
+            type_name = m.group(1)
+            try:
+                type = gdb.lookup_type(type_name)
+            except:
+                log('ERROR: lookup_type failed for %s!\n' % type_name)
+                continue
+
+            done = False
+            full = False
+            alloc_ptr, off = path[0]
+            ptr = alloc_ptr
+            path = path[1:]
+            jump_type = None
+            hashtable_value_type = None
+            list_value_type = None
+
+            while not done:
+                type = type.strip_typedefs()
+
+                # When accessing beyond _Hash_node_base, reinterpret as _Hash_node_value_base.
+                # Otherwise don't, because if we're accessing a _Hash_node_base field then
+                # starting from _Hash_node_value_base means we will need an extra hop to switch
+                # back to _Hash_node_base as we descent and we'll enter an infinite loop.
+                if str(type) == 'std::__detail::_Hash_node_base' and off >= type.sizeof:
+                    type = gdb.lookup_type('std::__detail::_Hash_node_value_base<%s>' % str(hashtable_value_type))
+
+                if debug:
+                    log(" >>>> %s code=%s off=%d\n" % (str(type), str(type.code), off))
+
+                # If we got here by a pointer, allow interpreting the area as an array
+                # Except for types we know are never used for arrays.
+                if off >= type.sizeof and jump_type and jump_type.code == gdb.TYPE_CODE_PTR \
+                        and str(type) != "bytes_ostream::chunk":
+                    log(" 0x%x+%d: ((%s*) 0x%x)[%d] +%d\n" % (alloc_ptr, ptr - alloc_ptr + off, str(type),
+                                                                    ptr, off // type.sizeof, off % type.sizeof))
+                    offset_in_element = int(off % type.sizeof)
+                    ptr += off - offset_in_element
+                    off = offset_in_element
+                elif type.code == gdb.TYPE_CODE_ARRAY:
+                    jump_type = None
+                    log(" 0x%x+%d: ((%s) 0x%x)[%d] +%d\n" % (alloc_ptr, ptr - alloc_ptr + off, str(type),
+                                                                    ptr, off // type.sizeof, off % type.sizeof))
+                    type = type.target()
+                    offset_in_element = int(off % type.sizeof)
+                    ptr += off - offset_in_element
+                    off = offset_in_element
+                elif off == 0 and (type.code == gdb.TYPE_CODE_PTR
+                                   or type.code == gdb.TYPE_CODE_REF
+                                   or type.code == gdb.TYPE_CODE_RVALUE_REF):
+                    jump_type = type
+                    type = type.target()
+                    jump_addr = int(gdb.Value(int(ptr + off)).cast(type.pointer().pointer()).dereference())
+                    if not path:
+                        log("  (%s*) 0x%x\n" % (str(type), addr))
+                        done = True
+                        full = True
+                    else:
+                        alloc_ptr, off = path[0]
+                        ptr = alloc_ptr
+                        path = path[1:]
+                        if ptr != jump_addr:
+                            done = True
+                            log('=============================================\n')
+                            log('ERROR: Jump address mismatch, expected 0x%x got 0x%x\n' % (ptr, jump_addr))
+                        if debug:
+                            log(" JUMP 0x%x+%d: jump_type=%s type=%s\n" % (alloc_ptr, off, str(jump_type), str(type)))
+                elif type.code == gdb.TYPE_CODE_STRUCT or type.code == gdb.TYPE_CODE_UNION:
+                    jump_type = None
+                    done = True
+                    if str(type).startswith("std::_Hashtable<"):
+                        hashtable_value_type = type.template_argument(1)
+                    elif str(type).startswith("std::__cxx11::list<"):
+                        list_value_type = type.template_argument(0)
+
+                    for field in type.fields():
+                        if field.name == '_M_end_of_storage':
+                            continue
+                        try:
+                            if field.bitpos % 8 != 0:
+                                continue
+                            field_off = field.bitpos // 8
+                        except AttributeError: # Not all fields have bitpos
+                            continue
+                        field_size = field.type.sizeof
+                        if field_size < 8:
+                            continue
+                        if debug:
+                            log(" ##### %s.%s [+%d size=%d] +%d\n" % (str(type), field.name, field_off, field_size, off))
+                        if off >= field_off and off < field_off + field_size:
+                            container_type = type
+                            container_ptr = ptr
+                            done = False
+                            ptr += int(field_off)
+                            off -= field_off
+                            log(" 0x%x+%d: ((%s*) 0x%x)->%s +%d\n" % (alloc_ptr, ptr - alloc_ptr,
+                                                                            str(type), ptr, field.name, off))
+                            type = field.type.strip_typedefs()
+
+                            # Propagate type information for type-erased pointers and containers
+                            if field.name == '_M_storage' and str(container_type).startswith('std::_List_node<'):
+                                type = container_type.template_argument(0)
+                            elif field.name == '_M_storage' and str(container_type).startswith('std::__detail::_Hash_node_value_base<'):
+                                type = container_type.template_argument(0)
+                            elif field.name == 'storage_' and str(container_type).startswith('boost::variant<'):
+                                which = gdb.Value(int(container_ptr)).cast(container_type.pointer())['which_']
+                                type = container_type.template_argument(which)
+                            elif off == 0 and (type.code == gdb.TYPE_CODE_PTR
+                                               or type.code == gdb.TYPE_CODE_REF
+                                               or type.code == gdb.TYPE_CODE_RVALUE_REF):
+                                if str(type) == 'seastar::lw_shared_ptr_counter_base *':
+                                    elem_type = container_type.template_argument(0)
+                                    if has_enable_lw_shared_from_this(elem_type):
+                                        type = elem_type.pointer()
+                                    else:
+                                        type = gdb.lookup_type('seastar::shared_ptr_no_esft<%s>' % str(elem_type.unqualified())).pointer()
+                                elif str(type) == 'std::__detail::_List_node_base *':
+                                    if str(container_type).startswith('std::_List_iterator<'):
+                                        elem_type = container_type.template_argument(0)
+                                    else:
+                                        elem_type = list_value_type
+                                    type = gdb.lookup_type('std::_List_node<%s>' % str(elem_type)).pointer()
+                            break
+                    if done:
+                        log('=============================================\n')
+                        log('ERROR: BAD TRACE! 0x%x +%d not a field of %s\n' % (ptr, off, str(type)))
+                else:
+                    log('=============================================\n')
+                    log('ERROR: Unsupported type: %s code=%s\n' % (str(type), str(type.code)))
+                    done = True
+            if full:
+                flush_log()
+                break
+
+
 class std_unique_ptr:
     def __init__(self, obj):
         self.obj = obj
@@ -1948,4 +2151,7 @@ scylla_active_sstables()
 scylla_netw()
 scylla_gms()
 scylla_cache()
+scylla_file_readers()
+scylla_file_writers()
+scylla_find_usages()
 scylla_sstables()
