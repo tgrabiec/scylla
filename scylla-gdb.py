@@ -8,6 +8,7 @@ import argparse
 import re
 from operator import attrgetter
 from collections import defaultdict
+from collections import deque
 import sys
 import struct
 import random
@@ -492,6 +493,34 @@ class scylla_column_families(gdb.Command):
                 gdb.write('{:5} {} v={} {:45} (column_family*){}\n'.format(shard, key, schema_version, name, value.address))
 
 
+def free_spans(cpu_mem, pages):
+    d = collections.OrderedDict
+    for index in range(int(cpu_mem['nr_span_lists'])):
+        span_list = cpu_mem['free_spans'][index]
+        span_page_idx = span_list['_front']
+        while span_page_idx:
+            span_page = pages[span_page_idx]
+            d[span_page_idx] = span_page['span_size']
+            span_page_idx = span_page['link']['_next']
+    return d
+
+
+def is_page_free(page_index, cpu_mem=None, pages=None):
+    if not cpu_mem:
+        cpu_mem = gdb.parse_and_eval('\'seastar::memory::cpu_mem\'')
+    if not pages:
+        pages = cpu_mem['pages']
+    for index in range(int(cpu_mem['nr_span_lists'])):
+        span_list = cpu_mem['free_spans'][index]
+        span_page_idx = span_list['_front']
+        while span_page_idx:
+            span_page = pages[span_page_idx]
+            if span_page_idx <= page_index < span_page_idx + span_page['span_size']:
+                return True
+            span_page_idx = span_page['link']['_next']
+    return False
+
+
 class scylla_task_histogram(gdb.Command):
     def __init__(self):
         gdb.Command.__init__(self, 'scylla task_histogram', gdb.COMMAND_USER, gdb.COMPLETE_COMMAND)
@@ -530,7 +559,7 @@ class scylla_task_histogram(gdb.Command):
         limit = 20000
         for idx in random.sample(range(0, nr_pages), nr_pages):
             pool = pages[idx]['pool']
-            if not pool or pages[idx]['offset_in_span'] != 0:
+            if not pool or pages[idx]['offset_in_span'] != 0 or is_page_free(idx, cpu_mem=cpu_mem, pages=pages):
                 continue
             if int(pool.dereference()['_object_size']) != size and size != 0:
                 continue
@@ -540,6 +569,8 @@ class scylla_task_histogram(gdb.Command):
             for idx2 in range(0, int(span_size / objsize)):
                 addr = (mem_start + idx * page_size + idx2 * objsize).reinterpret_cast(vptr_type).dereference()
                 if addr >= text_start and addr <= text_end:
+                    # if int(addr) == 0x46e4458:
+                    #     gdb.write('0x%x\n' % (mem_start + idx * page_size + idx2 * objsize))
                     vptr_count[int(addr)] += 1
             if scanned_pages >= limit or len(vptr_count) >= limit:
                 break
@@ -596,8 +627,13 @@ def find_single_sstable_readers():
         ptr_type = gdb.lookup_type('sstable_range_wrapping_reader').pointer()
         vtable_name = 'vtable for sstable_range_wrapping_reader'
     except Exception:
-        ptr_type = gdb.lookup_type('sstables::sstable_mutation_reader').pointer()
-        vtable_name = 'vtable for sstables::sstable_mutation_reader'
+        try:
+            # For Scylla < 3.0
+            ptr_type = gdb.lookup_type('sstables::sstable_mutation_reader').pointer()
+            vtable_name = 'vtable for sstables::sstable_mutation_reader'
+        except:
+            ptr_type = gdb.lookup_type('sstables::sstable_mutation_reader<sstables::data_consume_rows_context_m, sstables::mp_row_consumer_m>').pointer()
+            vtable_name = 'vtable for sstables::sstable_mutation_reader'
 
     for obj_addr, vtable_addr in find_vptrs():
         name = resolve(vtable_addr)
@@ -834,12 +870,20 @@ class scylla_memory(gdb.Command):
         large_allocs = defaultdict(int) # key: span size [B], value: span count
         nr_pages = int(cpu_mem['nr_pages'])
         pages = cpu_mem['pages']
+        mem_start = cpu_mem['memory']
+        descs = gdb.parse_and_eval('\'logalloc::shard_segment_pool\'._segments._M_impl._M_start')
         while idx < nr_pages:
             page = pages[idx]
             span_size = int(page['span_size'])
             if span_size == 0:
                 span_size = 1
             if not page['pool'] and not page['free']:
+                addr = mem_start + idx * page_size
+                index = gdb.parse_and_eval('(%d - \'logalloc::shard_segment_pool\'._segments_base) / \'logalloc::segment\'::size' % (addr))
+                if not descs[index]['_region']:
+                    if span_size * page_size == 128*1024:
+                        gdb.write('0x%x\n' % addr)
+                        # gdb.execute('scylla find-virtual 0x%x\n' % addr)
                 large_allocs[span_size * page_size] += 1
             idx += span_size
 
@@ -1109,17 +1153,6 @@ class scylla_ptr(gdb.Command):
         pages = cpu_mem['pages']
         page = pages[ptr_page_idx]
 
-        def is_page_free(page_index):
-            for index in range(int(cpu_mem['nr_span_lists'])):
-                span_list = cpu_mem['free_spans'][index]
-                span_page_idx = span_list['_front']
-                while span_page_idx:
-                    span_page = pages[span_page_idx]
-                    if span_page_idx <= page_index < span_page_idx + span_page['span_size']:
-                        return True
-                    span_page_idx = span_page['link']['_next']
-            return False
-
         if is_page_free(ptr_page_idx):
             msg += ', page is free'
             gdb.write(msg + '\n')
@@ -1145,11 +1178,14 @@ class scylla_ptr(gdb.Command):
             if not free:
                 # span's free list
                 next_free = first_page_in_span['freelist']
+                gdb.write('p %x\n' % int(first_page_in_span.address))
+                gdb.write('f %x\n' % next_free)
                 while next_free:
                     if ptr >= next_free and ptr < next_free.reinterpret_cast(char_ptr) + object_size:
                         free = True
                         break
                     next_free = next_free.reinterpret_cast(free_object_ptr).dereference()
+                    gdb.write('f %x\n' % next_free)
             if free:
                 msg += ', free'
             else:
@@ -2033,6 +2069,30 @@ class scylla_gms(gdb.Command):
             gdb.write('%s: (gms::endpoint_state*) %s (%s)\n' % (ip, state.address, state['_heart_beat_state']))
             for app_state, value in std_map(state['_application_state']):
                 gdb.write('  %s: {version=%d, value=%s}\n' % (app_state, value['version'], value['value']))
+
+
+class scylla_file_readers(gdb.Command):
+    def __init__(self):
+        gdb.Command.__init__(self, 'scylla file-readers', gdb.COMMAND_USER, gdb.COMPLETE_COMMAND)
+
+    def invoke(self, arg, from_tty):
+        total_buffers = 0
+
+        for fds in find_instances('seastar::file_data_source_impl'):
+            gdb.write("(seastar::file_data_source_impl*) 0x%x:\n" % fds.dereference().address)
+            for issued_read in circular_buffer(fds['_read_buffers']):
+                gdb.write("  .pos=%d .size=%d:\n" % (issued_read['_pos'], issued_read['_size']))
+                total_buffers += issued_read['_size']
+
+        gdb.write("Total size of buffers: %d\n" % total_buffers)
+
+class scylla_file_writers(gdb.Command):
+    def __init__(self):
+        gdb.Command.__init__(self, 'scylla file-writers', gdb.COMMAND_USER, gdb.COMPLETE_COMMAND)
+
+    def invoke(self, arg, from_tty):
+        for fds in find_instances('seastar::file_data_sink_impl'):
+            gdb.write("(seastar::file_data_sink_impl*) 0x%x: %d\n" % (fds.dereference().address, fds['_write_behind_sem']['_count']))
 
 
 class scylla_cache(gdb.Command):
