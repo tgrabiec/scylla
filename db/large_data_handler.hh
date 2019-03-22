@@ -108,19 +108,19 @@ public:
         assert(!stopped());
         future<> large_partitions = make_ready_future<>();
         if (__builtin_expect(data_size > _partition_threshold_bytes, false)) {
-            large_partitions = with_sem([&s, &filename, this] {
+            large_partitions = with_sem([&s, filename, this] {
                 return delete_large_data_entries(s, filename, db::system_keyspace::LARGE_PARTITIONS);
             });
         }
         future<> large_rows = make_ready_future<>();
         if (__builtin_expect(data_size > _row_threshold_bytes, false)) {
-            large_rows = with_sem([&s, &filename, this] {
+            large_rows = with_sem([&s, filename, this] {
                 return delete_large_data_entries(s, filename, db::system_keyspace::LARGE_ROWS);
             });
         }
         future<> large_cells = make_ready_future<>();
         if (__builtin_expect(data_size > _cell_threshold_bytes, false)) {
-            large_cells = with_sem([&s, &filename, this] {
+            large_cells = with_sem([&s, filename, this] {
                 return delete_large_data_entries(s, filename, db::system_keyspace::LARGE_CELLS);
             });
         }
