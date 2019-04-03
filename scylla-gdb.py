@@ -947,9 +947,16 @@ class scylla_memory(gdb.Command):
         gdb.write('Small allocations: %d [B]\n' % total_small_bytes)
 
         large_allocs = defaultdict(int) # key: span size [B], value: span count
+        descs = gdb.parse_and_eval('\'logalloc::shard_segment_pool\'._segments._M_impl._M_start')
         for s in sc.spans():
             span_size = s.size()
             if s.is_large():
+                addr = s.start
+                index = gdb.parse_and_eval('(%d - \'logalloc::shard_segment_pool\'._segments_base) / \'logalloc::segment\'::size' % (addr))
+                if not descs[index]['_region']:
+                    if span_size * page_size == 128*1024:
+                        gdb.write('0x%x\n' % addr)
+                        # gdb.execute('scylla find-virtual 0x%x\n' % addr)
                 large_allocs[span_size * page_size] += 1
 
         gdb.write('Page spans:\n')
