@@ -2466,6 +2466,21 @@ class scylla_gms(gdb.Command):
                 gdb.write('  %s: {version=%d, value=%s}\n' % (app_state, value['version'], value['value']))
 
 
+class scylla_file_readers(gdb.Command):
+    def __init__(self):
+        gdb.Command.__init__(self, 'scylla file-readers', gdb.COMMAND_USER, gdb.COMPLETE_COMMAND)
+
+    def invoke(self, arg, from_tty):
+        total_buffers = 0
+
+        for fds in find_instances('seastar::file_data_source_impl'):
+            gdb.write("(seastar::file_data_source_impl*) 0x%x:\n" % fds.dereference().address)
+            for issued_read in circular_buffer(fds['_read_buffers']):
+                gdb.write("  .pos=%d .size=%d:\n" % (issued_read['_pos'], issued_read['_size']))
+                total_buffers += issued_read['_size']
+
+        gdb.write("Total size of buffers: %d\n" % total_buffers)
+
 class scylla_cache(gdb.Command):
     """Prints contents of the cache on current shard"""
 
