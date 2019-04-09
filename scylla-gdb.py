@@ -543,6 +543,9 @@ class scylla_task_histogram(gdb.Command):
             span_size = span.used_span_size() * page_size
             for idx2 in range(0, int(span_size / objsize)):
                 obj_addr = span.start + idx2 * objsize
+                if True:
+                    gdb.write('0x%x\n' % obj_addr)
+                    gdb.execute('scylla find-usages --time-limit 3 0x%x\n' % obj_addr)
                 addr = gdb.Value(obj_addr).reinterpret_cast(vptr_type).dereference()
                 if addr >= text_start and addr <= text_end:
                     vptr_count[int(addr)] += 1
@@ -898,23 +901,26 @@ class scylla_memory(gdb.Command):
                           str_virt_dirty=dirty_mem_mgr(db['_streaming_dirty_memory_manager']).virt_dirty()))
 
         sp = sharded(gdb.parse_and_eval('service::_the_storage_proxy')).local()
-        hm = std_optional(sp['_hints_manager']).get()
-        view_hm = sp['_hints_for_views_manager']
-
-        gdb.write('Coordinator:\n'
-          '  fg writes:  {fg_wr:>13}\n'
-          '  bg writes:  {bg_wr:>13}, {bg_wr_bytes:>} B\n'
-          '  fg reads:   {fg_rd:>13}\n'
-          '  bg reads:   {bg_rd:>13}\n'
-          '  hints:      {regular:>13} B\n'
-          '  view hints: {views:>13} B\n\n'
-          .format(fg_wr=int(sp['_stats']['writes']) - int(sp['_stats']['background_writes']),
-                  bg_wr=int(sp['_stats']['background_writes']),
-                  bg_wr_bytes=int(sp['_stats']['background_write_bytes']),
-                  fg_rd=int(sp['_stats']['foreground_reads']),
-                  bg_rd=int(sp['_stats']['reads']) - int(sp['_stats']['foreground_reads']),
-                  regular=int(hm['_stats']['size_of_hints_in_progress']),
-                  views=int(view_hm['_stats']['size_of_hints_in_progress'])))
+        # hm = std_optional(sp['_hints_manager']).get()
+        # view_hm = sp['_hints_for_views_manager']
+        #
+        # gdb.write('Coordinator:\n'
+        #   '  fg writes:  {fg_wr:>13}\n'
+        #   '  bg writes:  {bg_wr:>13}, {bg_wr_bytes:>} B\n'
+        #   '  fg reads:   {fg_rd:>13}\n'
+        #   '  bg reads:   {bg_rd:>13}\n'
+        #   '  hints:      {regular:>13} B\n'
+        #   '  view hints: {views:>13} B\n\n'
+        #   .format(fg_wr=int(sp['_stats']['writes']) - int(sp['_stats']['background_writes']),
+        #           bg_wr=int(sp['_stats']['background_writes']),
+        #           bg_wr_bytes=int(sp['_stats']['background_write_bytes']),
+        #           fg_rd=int(sp['_stats']['foreground_reads']),
+        #           bg_rd=int(sp['_stats']['reads']) - int(sp['_stats']['foreground_reads']),
+        #           regular=0,
+        #           views=0,
+        #           # regular=int(hm['_stats']['size_of_hints_in_progress']),
+        #           # views=int(view_hm['_stats']['size_of_hints_in_progress'])
+        #           ))
 
         gdb.write('Small pools:\n')
         small_pools = cpu_mem['small_pools']
@@ -954,8 +960,10 @@ class scylla_memory(gdb.Command):
                 addr = s.start
                 index = gdb.parse_and_eval('(%d - \'logalloc::shard_segment_pool\'._segments_base) / \'logalloc::segment\'::size' % (addr))
                 if not descs[index]['_region']:
-                    if span_size * page_size == 128*1024:
+                    # if span_size * page_size == 4194304:
+                    if False and span_size * page_size == 128*1024:
                         gdb.write('0x%x\n' % addr)
+                        gdb.execute('scylla find-usages --time-limit 3 0x%x' % addr)
                         # gdb.execute('scylla find-virtual 0x%x\n' % addr)
                 large_allocs[span_size * page_size] += 1
 
@@ -2366,7 +2374,7 @@ class scylla_netw(gdb.Command):
         ]
         for srv in servers:
             if srv:
-                gdb.write('Server: resources=%s\n' % srv['_resources_available'])
+                gdb.write('Server: resources=%s, limits=%s\n' % (srv['_resources_available'], srv['_limits']))
                 gdb.write('Incoming connections:\n')
                 for clnt in list_unordered_set(srv['_conns']):
                     conn = clnt['_p'].cast(clnt.type.template_argument(0).pointer())
@@ -2522,6 +2530,5 @@ scylla_netw()
 scylla_gms()
 scylla_cache()
 scylla_file_readers()
-scylla_file_writers()
 scylla_find_usages()
 scylla_sstables()
