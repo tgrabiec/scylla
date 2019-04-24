@@ -1849,9 +1849,9 @@ future<> database::clear_snapshot(sstring tag, std::vector<sstring> keyspace_nam
     });
 }
 
-future<utils::UUID> update_schema_version(distributed<service::storage_proxy>& proxy)
+future<utils::UUID> update_schema_version(service::storage_service& ss, distributed<service::storage_proxy>& proxy)
 {
-    return db::schema_tables::calculate_schema_digest(proxy).then([&proxy] (utils::UUID uuid) {
+    return db::schema_tables::calculate_schema_digest(ss, proxy).then([&proxy] (utils::UUID uuid) {
         return proxy.local().get_db().invoke_on_all([uuid] (database& db) {
             db.update_version(uuid);
         }).then([uuid] {
@@ -1867,9 +1867,9 @@ future<> announce_schema_version(utils::UUID schema_version) {
     return service::get_local_migration_manager().passive_announce(schema_version);
 }
 
-future<> update_schema_version_and_announce(distributed<service::storage_proxy>& proxy)
+future<> update_schema_version_and_announce(service::storage_service& ss, distributed<service::storage_proxy>& proxy)
 {
-    return update_schema_version(proxy).then([] (utils::UUID uuid) {
+    return update_schema_version(ss, proxy).then([] (utils::UUID uuid) {
         return announce_schema_version(uuid);
     });
 }

@@ -100,6 +100,7 @@ class reconcilable_result;
 
 namespace service {
 class storage_proxy;
+class storage_service;
 }
 
 namespace netw {
@@ -1520,9 +1521,9 @@ future<> stop_database(sharded<database>& db);
 flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db, dht::i_partitioner& partitioner, schema_ptr schema,
         std::function<std::optional<dht::partition_range>()> range_generator);
 
-future<utils::UUID> update_schema_version(distributed<service::storage_proxy>& proxy);
+future<utils::UUID> update_schema_version(service::storage_service&, distributed<service::storage_proxy>& proxy);
 future<> announce_schema_version(utils::UUID schema_version);
-future<> update_schema_version_and_announce(distributed<service::storage_proxy>& proxy);
+future<> update_schema_version_and_announce(service::storage_service&, distributed<service::storage_proxy>& proxy);
 
 bool is_internal_keyspace(const sstring& name);
 

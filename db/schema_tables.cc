@@ -41,6 +41,7 @@
 #include "db/schema_tables.hh"
 
 #include "service/migration_manager.hh"
+#include "service/storage_service.hh"
 #include "partition_slice_builder.hh"
 #include "dht/i_partitioner.hh"
 #include "system_keyspace.hh"
@@ -569,7 +570,7 @@ schema_ptr aggregates() {
  * Read schema from system keyspace and calculate MD5 digest of every row, resulting digest
  * will be converted into UUID which would act as content-based version of the schema.
  */
-future<utils::UUID> calculate_schema_digest(distributed<service::storage_proxy>& proxy)
+future<utils::UUID> calculate_schema_digest(service::storage_service& ss, distributed<service::storage_proxy>& proxy)
 {
     auto map = [&proxy] (sstring table) {
         return db::system_keyspace::query_mutations(proxy, NAME, table).then([&proxy, table] (auto rs) {
@@ -591,8 +592,8 @@ future<utils::UUID> calculate_schema_digest(distributed<service::storage_proxy>&
             feed_hash_for_schema_digest(hash, m);
         }
     };
-    return do_with(md5_hasher(), [map, reduce] (auto& hash) {
-        return do_for_each(all_table_names(), [&hash, map, reduce] (auto& table) {
+    return do_with(md5_hasher(), [&ss, map, reduce] (auto& hash) {
+        return do_for_each(all_table_names(&ss), [&hash, map, reduce] (auto& table) {
             return map(table).then([&hash, reduce] (auto&& mutations) {
                 reduce(hash, mutations);
             });
@@ -712,11 +713,11 @@ future<> merge_unlock() {
  * @throws ConfigurationException If one of metadata attributes has invalid value
  * @throws IOException If data was corrupted during transportation or failed to apply fs operations
  */
-future<> merge_schema(distributed<service::storage_proxy>& proxy, std::vector<mutation> mutations)
+future<> merge_schema(service::storage_service& ss, distributed<service::storage_proxy>& proxy, std::vector<mutation> mutations)
 {
-    return merge_lock().then([&proxy, mutations = std::move(mutations)] () mutable {
-        return do_merge_schema(proxy, std::move(mutations), true).then([&proxy] {
-            return update_schema_version_and_announce(proxy);
+    return merge_lock().then([&ss, &proxy, mutations = std::move(mutations)] () mutable {
+        return do_merge_schema(proxy, std::move(mutations), true).then([&ss, &proxy] {
+            return update_schema_version_and_announce(ss, proxy);
         });
     }).finally([] {
         return merge_unlock();
@@ -2703,7 +2704,7 @@ data_type parse_type(sstring str)
     return db::marshal::type_parser::parse(str);
 }
 
-std::vector<schema_ptr> all_tables() {
+std::vector<schema_ptr> all_tables(service::storage_service* ss) {
     // Don't forget to update this list when new schema tables are added.
     // The listed schema tables are the ones synchronized between nodes,
     // and forgetting one of them in this list can cause bugs like #4339.
@@ -2713,9 +2714,9 @@ std::vector<schema_ptr> all_tables() {
     };
 }
 
-const std::vector<sstring>& all_table_names() {
+const std::vector<sstring>& all_table_names(service::storage_service* ss) {
     static thread_local std::vector<sstring> all =
-            boost::copy_range<std::vector<sstring>>(all_tables() |
+            boost::copy_range<std::vector<sstring>>(all_tables(ss) |
             boost::adaptors::transformed([] (auto schema) { return schema->cf_name(); }));
     return all;
 }

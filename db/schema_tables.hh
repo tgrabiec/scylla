@@ -55,6 +55,13 @@ namespace query {
 class result_set;
 }
 
+namespace service {
+
+class storage_service;
+
+}
+
+
 namespace db {
 
 class extensions;
@@ -129,8 +136,12 @@ using namespace v3;
 // Replication of schema between nodes with different version is inhibited.
 extern const sstring version;
 
-std::vector<schema_ptr> all_tables();
-const std::vector<sstring>& all_table_names();
+// Returns schema_ptr for all schema tables.
+// When ss is provided, only tables which are supported by the whole cluster are returned.
+std::vector<schema_ptr> all_tables(service::storage_service* ss = nullptr);
+
+// Like all_tables(), but returns schema::cf_name() of each table.
+const std::vector<sstring>& all_table_names(service::storage_service* ss = nullptr);
 
 // saves/creates "ks" + all tables etc, while first deleting all old schema entries (will be rewritten)
 future<> save_system_schema(const sstring & ks);
@@ -138,7 +149,7 @@ future<> save_system_schema(const sstring & ks);
 // saves/creates "system_schema" keyspace
 future<> save_system_keyspace_schema();
 
-future<utils::UUID> calculate_schema_digest(distributed<service::storage_proxy>& proxy);
+future<utils::UUID> calculate_schema_digest(service::storage_service&, distributed<service::storage_proxy>& proxy);
 
 future<std::vector<frozen_mutation>> convert_schema_to_mutations(distributed<service::storage_proxy>& proxy);
 
@@ -146,7 +157,7 @@ future<schema_result_value_type>
 read_schema_partition_for_keyspace(distributed<service::storage_proxy>& proxy, const sstring& schema_table_name, const sstring& keyspace_name);
 future<mutation> read_keyspace_mutation(distributed<service::storage_proxy>&, const sstring& keyspace_name);
 
-future<> merge_schema(distributed<service::storage_proxy>& proxy, std::vector<mutation> mutations);
+future<> merge_schema(service::storage_service&, distributed<service::storage_proxy>& proxy, std::vector<mutation> mutations);
 
 future<> merge_schema(distributed<service::storage_proxy>& proxy, std::vector<mutation> mutations, bool do_flush);
 
