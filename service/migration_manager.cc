@@ -66,6 +66,13 @@ const std::chrono::milliseconds migration_manager::migration_delay = 60000ms;
 migration_manager::migration_manager()
     : _listeners{}
 {
+    auto& ss = service::get_local_storage_service();
+    _feature_listeners.push_back(ss.cluster_supports_view_virtual_columns().when_enabled([this, &ss] {
+        with_gate(_background_tasks, [this, &ss] {
+            mlogger.debug("view_virtual_columns feature enabled, recalculating schema version");
+            return update_schema_version(get_storage_proxy(), ss.cluster_schema_features());
+        });
+    }));
 }
 
 future<> migration_manager::stop()
@@ -74,6 +81,8 @@ future<> migration_manager::stop()
     return parallel_for_each(_schema_pulls.begin(), _schema_pulls.end(), [] (auto&& e) {
         serialized_action& sp = e.second;
         return sp.join();
+    }).finally([this] {
+        return _background_tasks.close();
     });
 }
 
