@@ -2708,10 +2708,14 @@ std::vector<schema_ptr> all_tables(service::storage_service* ss) {
     // Don't forget to update this list when new schema tables are added.
     // The listed schema tables are the ones synchronized between nodes,
     // and forgetting one of them in this list can cause bugs like #4339.
-    return {
+    std::vector<schema_ptr> result = {
         keyspaces(), tables(), scylla_tables(), columns(), dropped_columns(), triggers(),
-        views(), indexes(), types(), functions(), aggregates(), view_virtual_columns()
+        views(), indexes(), types(), functions(), aggregates()
     };
+    if (!ss || ss->cluster_supports_view_virtual_columns()) {
+        result.emplace_back(view_virtual_columns());
+    }
+    return result;
 }
 
 const std::vector<sstring>& all_table_names(service::storage_service* ss) {
