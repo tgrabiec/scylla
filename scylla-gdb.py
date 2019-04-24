@@ -604,8 +604,13 @@ def find_single_sstable_readers():
         ptr_type = gdb.lookup_type('sstable_range_wrapping_reader').pointer()
         vtable_name = 'vtable for sstable_range_wrapping_reader'
     except Exception:
-        ptr_type = gdb.lookup_type('sstables::sstable_mutation_reader').pointer()
-        vtable_name = 'vtable for sstables::sstable_mutation_reader'
+        try:
+            # For Scylla < 3.0
+            ptr_type = gdb.lookup_type('sstables::sstable_mutation_reader').pointer()
+            vtable_name = 'vtable for sstables::sstable_mutation_reader'
+        except:
+            ptr_type = gdb.lookup_type('sstables::sstable_mutation_reader<sstables::data_consume_rows_context_m, sstables::mp_row_consumer_m>').pointer()
+            vtable_name = 'vtable for sstables::sstable_mutation_reader'
 
     for obj_addr, vtable_addr in find_vptrs():
         name = resolve(vtable_addr)
@@ -901,26 +906,26 @@ class scylla_memory(gdb.Command):
                           str_virt_dirty=dirty_mem_mgr(db['_streaming_dirty_memory_manager']).virt_dirty()))
 
         sp = sharded(gdb.parse_and_eval('service::_the_storage_proxy')).local()
-        # hm = std_optional(sp['_hints_manager']).get()
-        # view_hm = sp['_hints_for_views_manager']
-        #
-        # gdb.write('Coordinator:\n'
-        #   '  fg writes:  {fg_wr:>13}\n'
-        #   '  bg writes:  {bg_wr:>13}, {bg_wr_bytes:>} B\n'
-        #   '  fg reads:   {fg_rd:>13}\n'
-        #   '  bg reads:   {bg_rd:>13}\n'
-        #   '  hints:      {regular:>13} B\n'
-        #   '  view hints: {views:>13} B\n\n'
-        #   .format(fg_wr=int(sp['_stats']['writes']) - int(sp['_stats']['background_writes']),
-        #           bg_wr=int(sp['_stats']['background_writes']),
-        #           bg_wr_bytes=int(sp['_stats']['background_write_bytes']),
-        #           fg_rd=int(sp['_stats']['foreground_reads']),
-        #           bg_rd=int(sp['_stats']['reads']) - int(sp['_stats']['foreground_reads']),
-        #           regular=0,
-        #           views=0,
-        #           # regular=int(hm['_stats']['size_of_hints_in_progress']),
-        #           # views=int(view_hm['_stats']['size_of_hints_in_progress'])
-        #           ))
+        hm = std_optional(sp['_hints_manager']).get()
+        view_hm = sp['_hints_for_views_manager']
+
+        gdb.write('Coordinator:\n'
+          '  fg writes:  {fg_wr:>13}\n'
+          '  bg writes:  {bg_wr:>13}, {bg_wr_bytes:>} B\n'
+          '  fg reads:   {fg_rd:>13}\n'
+          '  bg reads:   {bg_rd:>13}\n'
+          '  hints:      {regular:>13} B\n'
+          '  view hints: {views:>13} B\n\n'
+          .format(fg_wr=int(sp['_stats']['writes']) - int(sp['_stats']['background_writes']),
+                  bg_wr=int(sp['_stats']['background_writes']),
+                  bg_wr_bytes=int(sp['_stats']['background_write_bytes']),
+                  fg_rd=int(sp['_stats']['foreground_reads']),
+                  bg_rd=int(sp['_stats']['reads']) - int(sp['_stats']['foreground_reads']),
+                  regular=0,
+                  views=0,
+                  # regular=int(hm['_stats']['size_of_hints_in_progress']),
+                  # views=int(view_hm['_stats']['size_of_hints_in_progress'])
+                  ))
 
         gdb.write('Small pools:\n')
         small_pools = cpu_mem['small_pools']
@@ -958,12 +963,13 @@ class scylla_memory(gdb.Command):
             span_size = s.size()
             if s.is_large():
                 addr = s.start
-                index = gdb.parse_and_eval('(%d - \'logalloc::shard_segment_pool\'._segments_base) / \'logalloc::segment\'::size' % (addr))
-                if not descs[index]['_region']:
-                    # if span_size * page_size == 4194304:
-                    if False and span_size * page_size == 128*1024:
-                        gdb.write('0x%x\n' % addr)
-                        gdb.execute('scylla find-usages --time-limit 3 0x%x' % addr)
+                # index = gdb.parse_and_eval('(%d - \'logalloc::shard_segment_pool\'._segments_base) / \'logalloc::segment\'::size' % (addr))
+                # if not descs[index]['_region']:
+                if span_size * page_size == 524288:
+                    gdb.write('0x%x\n' % addr)
+                    # if False and span_size * page_size == 128*1024:
+                    #     gdb.write('0x%x\n' % addr)
+                    #     gdb.execute('scylla find-usages --time-limit 3 0x%x' % addr)
                         # gdb.execute('scylla find-virtual 0x%x\n' % addr)
                 large_allocs[span_size * page_size] += 1
 
@@ -1180,6 +1186,48 @@ class scylla_heapprof(gdb.Command):
                        order_by=lambda n: -n.size,
                        node_filter=node_filter,
                        printer=gdb.write)
+
+
+class scylla_heapprof_objs(gdb.Command):
+    """
+    Finds potential objects in the heap whose allocation site contains given address in its backtrace.
+    """
+
+    def __init__(self):
+        gdb.Command.__init__(self, 'scylla heapprof-objs', gdb.COMMAND_USER, gdb.COMPLETE_COMMAND)
+
+    def invoke(self, arg, from_tty):
+        parser = argparse.ArgumentParser(description="scylla heapprof")
+        parser.add_argument("addr", type=str, help="Address to look for in a backtrace")
+        try:
+            args = parser.parse_args(arg.split())
+        except SystemExit:
+            return
+
+        addr = int(args.addr, 0)
+
+        cpu_mem = gdb.parse_and_eval('\'seastar::memory::cpu_mem\'')
+        page_struct_size = gdb.parse_and_eval('sizeof(\'seastar::memory::page\')')
+        page_size = int(gdb.parse_and_eval('\'seastar::memory::page_size\''))
+        nr_pages = int(cpu_mem['nr_pages'])
+        site = cpu_mem['alloc_site_list_head']
+        mem_start, mem_size = get_seastar_memory_start_and_size()
+
+        while site:
+            if int(site['size']):
+                bt = site['backtrace']
+                addresses = list(int(f['addr']) for f in static_vector(bt['_frames']))
+                if addr in addresses:
+                    gdb.write('(seastar::allocation_site*) 0x%x:\n' % int(site))
+                    for line in gdb.execute("find/g 0x%x, +0x%x, 0x%x" % (mem_start, mem_size, int(site)), to_string=True).split('\n'):
+                        if line.startswith('0x'):
+                            usage_addr = int(line, 0)
+                            if usage_addr >= int(cpu_mem['pages']) and usage_addr < int(cpu_mem['pages'] + nr_pages):
+                                page_idx = (usage_addr - int(cpu_mem['pages'])) / page_struct_size
+                                gdb.write('0x%x\n' % (mem_start + page_idx * page_size))
+                            else:
+                                gdb.write('0x%x\n' % (usage_addr))
+            site = site['next']
 
 
 def get_seastar_memory_start_and_size():
@@ -1778,6 +1826,18 @@ class circular_buffer(object):
         end = impl['end']
         while i < end:
             yield st[i % cap]
+            i += 1
+
+    def all(self):
+        impl = self.ref['_impl']
+        st = impl['storage']
+        cap = impl['capacity']
+        i = 0
+        if not cap:
+            return
+        end = impl['end'] % cap
+        while i < end:
+            yield st[i]
             i += 1
 
     def size(self):
@@ -2511,6 +2571,7 @@ scylla_ptr()
 scylla_mem_ranges()
 scylla_mem_range()
 scylla_heapprof()
+scylla_heapprof_objs()
 scylla_lsa()
 scylla_lsa_segment()
 scylla_segment_descs()
