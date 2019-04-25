@@ -110,6 +110,7 @@ schema_ctxt::schema_ctxt(distributed<service::storage_proxy>& proxy)
 namespace schema_tables {
 
 logging::logger slogger("schema_tables");
+logging::logger diff_logger("schema_diff");
 
 const sstring version = "3";
 
@@ -153,7 +154,7 @@ struct user_types_to_drop final {
     schema_result before,
     schema_result after);
 
-static future<> do_merge_schema(distributed<service::storage_proxy>&, std::vector<mutation>, bool do_flush);
+static future<> do_merge_schema(distributed<service::storage_proxy>&, std::vector<mutation>, bool do_flush, bool full);
 
 static std::vector<column_definition> create_columns_from_column_rows(
                 const query::result_set& rows, const sstring& keyspace,
@@ -713,10 +714,10 @@ future<> merge_unlock() {
  * @throws ConfigurationException If one of metadata attributes has invalid value
  * @throws IOException If data was corrupted during transportation or failed to apply fs operations
  */
-future<> merge_schema(service::storage_service& ss, distributed<service::storage_proxy>& proxy, std::vector<mutation> mutations)
+future<> merge_schema(service::storage_service& ss, distributed<service::storage_proxy>& proxy, std::vector<mutation> mutations, bool full)
 {
-    return merge_lock().then([&ss, &proxy, mutations = std::move(mutations)] () mutable {
-        return do_merge_schema(proxy, std::move(mutations), true).then([&ss, &proxy] {
+    return merge_lock().then([&ss, &proxy, mutations = std::move(mutations), full] () mutable {
+        return do_merge_schema(proxy, std::move(mutations), true, full).then([&ss, &proxy] {
             return update_schema_version_and_announce(proxy, ss.cluster_schema_features());
         });
     }).finally([] {
@@ -724,10 +725,10 @@ future<> merge_schema(service::storage_service& ss, distributed<service::storage
     });
 }
 
-future<> merge_schema(distributed<service::storage_proxy>& proxy, std::vector<mutation> mutations, bool do_flush)
+future<> merge_schema(distributed<service::storage_proxy>& proxy, std::vector<mutation> mutations, bool do_flush, bool full)
 {
-    return merge_lock().then([&proxy, mutations = std::move(mutations), do_flush] () mutable {
-        return do_merge_schema(proxy, std::move(mutations), do_flush);
+    return merge_lock().then([&proxy, mutations = std::move(mutations), do_flush, full] () mutable {
+        return do_merge_schema(proxy, std::move(mutations), do_flush, full);
     }).finally([] {
         return merge_unlock();
     });
@@ -795,9 +796,63 @@ static void delete_schema_version(mutation& m) {
     }
 }
 
-static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, std::vector<mutation> mutations, bool do_flush)
+static future<std::vector<mutation>> read_local_schema_mutations(schema_features features) {
+    return convert_schema_to_mutations(service::get_storage_proxy(), features).then([] (std::vector<frozen_mutation> frozen) {
+        return boost::copy_range<std::vector<mutation>>(frozen | boost::adaptors::transformed([] (const frozen_mutation& fm) {
+            auto s = local_schema_registry().get_or_null(fm.schema_version());
+            if (!s) {
+                throw std::runtime_error(fmt::format("Unknown schema version: {}", fm.schema_version()));
+            }
+            return fm.unfreeze(s);
+        }));
+    }).then_wrapped([] (auto&& f) {
+        try {
+            return f.get0();
+        } catch (...) {
+            std::throw_with_nested(std::runtime_error("Failed to load local schema mutations"));
+        }
+    });
+}
+
+// Logs schema mutations this node has but are not contained in "mutations".
+// Must run in a seastar::thread.
+static void log_schema_diff(const std::vector<mutation>& mutations) {
+    if (!diff_logger.is_enabled(logging::log_level::trace)) {
+        return;
+    }
+    try {
+        auto make_map = [] (std::vector<mutation> muts) {
+            std::unordered_map<utils::UUID, mutation> map;
+            for (auto&& mut : muts) {
+                auto key = mut.column_family_id();
+                map.emplace(key, std::move(mut));
+            }
+            return map;
+        };
+        auto theirs = make_map(mutations);
+        auto ours = make_map(read_local_schema_mutations(schema_features::full()).get0());
+        map_difference<utils::UUID> diff = difference(theirs, ours);
+        for (auto&& id : diff.entries_only_on_right) {
+            diff_logger.trace("full: {}", ours.at(id));
+        }
+        for (auto&& id : diff.entries_differing) {
+            const mutation& ours_m = ours.at(id);
+            auto s = ours_m.schema();
+            auto p_diff = ours_m.partition().difference(s, theirs.at(id).partition());
+            diff_logger.trace("partial: {{{}.{} {} {}}}", s->ks_name(), s->cf_name(), ours_m.decorated_key(),
+                mutation_partition::printer(*s, p_diff));
+        }
+    } catch (...) {
+        diff_logger.error("failed to calculate schema difference", std::current_exception());
+    }
+}
+
+static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, std::vector<mutation> mutations, bool do_flush, bool full)
 {
-   return seastar::async([&proxy, mutations = std::move(mutations), do_flush] () mutable {
+   return seastar::async([&proxy, mutations = std::move(mutations), do_flush, full] () mutable {
+       if (full) {
+           log_schema_diff(mutations);
+       }
        slogger.trace("do_merge_schema: {}", mutations);
        schema_ptr s = keyspaces();
        // compare before/after schemas of the affected keyspaces only
