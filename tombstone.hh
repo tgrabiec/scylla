@@ -100,7 +100,12 @@ struct appending_hash<tombstone> {
     template<typename Hasher>
     void operator()(Hasher& h, const tombstone& t) const {
         feed_hash(h, t.timestamp);
-        feed_hash(h, t.deletion_time);
+        using old_duration = std::chrono::duration<int32_t, std::ratio<1, 1>>;
+        if (t.deletion_time.time_since_epoch().count() <= std::numeric_limits<int32_t>::max()) {
+            feed_hash(h, std::chrono::duration_cast<old_duration>(t.deletion_time.time_since_epoch()));
+        } else {
+            feed_hash(h, t.deletion_time);
+        }
     }
 };
 
