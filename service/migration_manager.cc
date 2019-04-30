@@ -243,7 +243,7 @@ future<> migration_manager::do_merge_schema_from(netw::messaging_service::msg_ad
     mlogger.info("Pulling schema from {}", id);
     return ms.send_migration_request(std::move(id)).then([this, id] (std::vector<frozen_mutation> mutations) {
         return do_with(std::move(mutations), [this, id] (auto&& mutations) {
-            return this->merge_schema_from(id, mutations);
+            return this->merge_schema_from(id, mutations, true);
         });
     }).then([id] {
         mlogger.info("Schema merge with {} completed", id);
@@ -265,7 +265,7 @@ future<> migration_manager::merge_schema_from(netw::messaging_service::msg_addr 
     return i->second.trigger();
 }
 
-future<> migration_manager::merge_schema_from(netw::messaging_service::msg_addr src, const std::vector<frozen_mutation>& mutations)
+future<> migration_manager::merge_schema_from(netw::messaging_service::msg_addr src, const std::vector<frozen_mutation>& mutations, bool full)
 {
     mlogger.debug("Applying schema mutations from {}", src);
     return map_reduce(mutations, [src](const frozen_mutation& fm) {
@@ -277,8 +277,8 @@ future<> migration_manager::merge_schema_from(netw::messaging_service::msg_addr 
     }, std::vector<mutation>(), [](std::vector<mutation>&& all, mutation&& m) {
         all.emplace_back(std::move(m));
         return std::move(all);
-    }).then([](std::vector<mutation> schema) {
-        return db::schema_tables::merge_schema(service::get_local_storage_service(), get_storage_proxy(), std::move(schema));
+    }).then([full](std::vector<mutation> schema) {
+        return db::schema_tables::merge_schema(service::get_local_storage_service(), get_storage_proxy(), std::move(schema), full);
     });
 }
 

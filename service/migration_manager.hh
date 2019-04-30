@@ -83,7 +83,7 @@ public:
 
     // Merge mutations received from src.
     // Keep mutations alive around whole async operation.
-    future<> merge_schema_from(netw::msg_addr src, const std::vector<frozen_mutation>& mutations);
+    future<> merge_schema_from(netw::msg_addr src, const std::vector<frozen_mutation>& mutations, bool full = false);
 
     future<> notify_create_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm);
     future<> notify_create_column_family(const schema_ptr& cfm);
