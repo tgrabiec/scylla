@@ -377,7 +377,8 @@ private:
     mutation_source_opt _prev_snapshot;
 
     // Positions >= than this are using _prev_snapshot, the rest is using _underlying.
-    std::optional<dht::ring_position> _prev_snapshot_pos;
+    std::optional<dht::ring_position> _prev_snapshot_pos_holder;
+    std::optional<dht::ring_position_view> _prev_snapshot_pos;
 
     snapshot_source _snapshot_source;
 

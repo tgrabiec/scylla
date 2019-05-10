@@ -982,7 +982,8 @@ future<> row_cache::do_update(external_updater eu, memtable& m, Updater updater)
                                 _prev_snapshot_pos = {};
                             } else {
                                 _update_section(_tracker.region(), [&] {
-                                    _prev_snapshot_pos = dht::ring_position(m.partitions.begin()->key());
+                                    _prev_snapshot_pos_holder = dht::ring_position(m.partitions.begin()->key());
+                                    _prev_snapshot_pos = *_prev_snapshot_pos_holder;
                                 });
                             }
                         });
@@ -1261,10 +1262,9 @@ future<> row_cache::do_update(row_cache::external_updater eu, row_cache::interna
     return futurize_apply([this] {
         return get_units(_update_sem, 1);
     }).then([this, eu = std::move(eu), iu = std::move(iu)] (auto permit) mutable {
-        auto pos = dht::ring_position::min();
         eu();
         [&] () noexcept {
-            _prev_snapshot_pos = std::move(pos);
+            _prev_snapshot_pos = dht::ring_position_view::min();
             _prev_snapshot = std::exchange(_underlying, _snapshot_source());
             ++_underlying_phase;
         }();
@@ -1272,6 +1272,7 @@ future<> row_cache::do_update(row_cache::external_updater eu, row_cache::interna
             return iu();
         }).then_wrapped([this, permit = std::move(permit)] (auto f) {
             _prev_snapshot_pos = {};
+            _prev_snapshot_pos_holder = {};
             _prev_snapshot = {};
             if (f.failed()) {
                 clogger.warn("Failure during cache update: {}", f.get_exception());
