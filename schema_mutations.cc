@@ -69,19 +69,22 @@ table_schema_version schema_mutations::digest() const {
     }
 
     md5_hasher h;
-    db::schema_tables::feed_hash_for_schema_digest(h, _columnfamilies);
-    db::schema_tables::feed_hash_for_schema_digest(h, _columns);
+    db::schema_features sf = db::schema_features::full();
+    sf.remove<db::schema_feature::DIGEST_INSENSITIVE_TO_EXPIRY>();
+
+    db::schema_tables::feed_hash_for_schema_digest(h, _columnfamilies, sf);
+    db::schema_tables::feed_hash_for_schema_digest(h, _columns, sf);
     if (_view_virtual_columns && !_view_virtual_columns->partition().empty()) {
-        db::schema_tables::feed_hash_for_schema_digest(h, *_view_virtual_columns);
+        db::schema_tables::feed_hash_for_schema_digest(h, *_view_virtual_columns, sf);
     }
     if (_indices && !_indices->partition().empty()) {
-        db::schema_tables::feed_hash_for_schema_digest(h, *_indices);
+        db::schema_tables::feed_hash_for_schema_digest(h, *_indices, sf);
     }
     if (_dropped_columns && !_dropped_columns->partition().empty()) {
-        db::schema_tables::feed_hash_for_schema_digest(h, *_dropped_columns);
+        db::schema_tables::feed_hash_for_schema_digest(h, *_dropped_columns, sf);
     }
     if (_scylla_tables) {
-        db::schema_tables::feed_hash_for_schema_digest(h, *_scylla_tables);
+        db::schema_tables::feed_hash_for_schema_digest(h, *_scylla_tables, sf);
     }
     return utils::UUID_gen::get_name_UUID(h.finalize());
 }
