@@ -12,6 +12,7 @@ import sys
 import struct
 import random
 import bisect
+import time
 
 
 def template_arguments(gdb_type):
@@ -677,6 +678,13 @@ class seastar_shared_ptr():
 def has_enable_lw_shared_from_this(type):
     for f in type.fields():
         if f.is_base_class and 'enable_lw_shared_from_this' in f.name:
+            return True
+    return False
+
+
+def has_enable_shared_from_this(type):
+    for f in type.fields():
+        if f.is_base_class and 'seastar::enable_shared_from_this' in f.name:
             return True
     return False
 
@@ -2066,6 +2074,310 @@ class scylla_find(gdb.Command):
             gdb.execute("scylla ptr 0x%x" % (obj + off))
 
 
+class scylla_find_usages(gdb.Command):
+    """
+    Given a memory address tries to find live chain(s) of references to an object at that address starting
+    from some virtual object and which can be reached by following the structure of types.
+    Such trace can greatly help in identifying what kind of object is that.
+
+    The command first tries to find all live paths from given object to some virtual object using breadth first search.
+    Then each path is matched against type informaton by tracing back, starting from the virtual object whose type is known.
+
+    Paths which don't match type information are dropped by default. A path may not match type information when, for example,
+    there is indirection to another object through an scalar member. A pointer member would be expected.
+
+    In some cases type information is erased and need to be extracted from context. Those cases are special cased in this tool.
+    For example, boost::variant<> contains an opaque storage_ member through which we can have indirections to other objects.
+    To match such paths, we deduce the type of the member from which_ and variant's template parameters.
+
+    In the example below, object at address 0x60100c3c0000 was identified to be a char array held by temporary_buffer<char>::_bufffer
+    reachable from (seastar::file_data_source_impl*) 0x601000dbfb40:
+
+    (gdb) scylla find-usages 0x60100c3c0000
+    =============================================
+    0x601000dbfb40: vtable for seastar::file_data_source_impl + 16 , 0x601000dbfb40+72 -> 0x6010051981c0+88 -> 0x60100c3c0000
+     0x601000dbfb40+72: ((seastar::file_data_source_impl*) 0x601000dbfb88)->_read_buffers +0
+     0x601000dbfb40+72: ((seastar::circular_buffer<seastar::file_data_source_impl::issued_read, std::allocator<seastar::file_data_source_impl::issued_read> >*) 0x601000dbfb88)->_impl +0
+     0x601000dbfb40+72: ((seastar::circular_buffer<seastar::file_data_source_impl::issued_read, std::allocator<seastar::file_data_source_impl::issued_read> >::impl*) 0x601000dbfb88)->storage +0
+     0x6010051981c0+88: ((seastar::file_data_source_impl::issued_read*) 0x6010051981c0)[1] +32
+     0x6010051981c0+72: ((seastar::file_data_source_impl::issued_read*) 0x601005198208)->_ready +16
+     0x6010051981c0+80: ((seastar::future<seastar::temporary_buffer<char> >*) 0x601005198210)->_local_state +8
+     0x6010051981c0+88: ((seastar::future_state<seastar::temporary_buffer<char> >*) 0x601005198218)->_u +0
+     0x6010051981c0+88: ((seastar::future_state<seastar::temporary_buffer<char> >::any*) 0x601005198218)->value +0
+     0x6010051981c0+88: ((std::tuple<seastar::temporary_buffer<char> >*) 0x601005198218)->std::_Tuple_impl<0, seastar::temporary_buffer<char> > +0
+     0x6010051981c0+88: ((std::_Tuple_impl<0, seastar::temporary_buffer<char> >*) 0x601005198218)->std::_Head_base<0, seastar::temporary_buffer<char>, false> +0
+     0x6010051981c0+88: ((std::_Head_base<0, seastar::temporary_buffer<char>, false>*) 0x601005198218)->_M_head_impl +0
+     0x6010051981c0+88: ((seastar::temporary_buffer<char>*) 0x601005198218)->_buffer +0
+      (char*) 0x60100c3c0000
+
+    One can dig further to find usages of the file_data_source_impl:
+
+    (gdb) scylla find-usages 0x601000dbfb40
+    =============================================
+    0x601002156400: vtable for sstables::sstable_mutation_reader<sstables::data_consume_rows_context_m, sstables::mp_row_consumer_m> + 16 , 0x601002156400+904 -> 0x601002ce5200+0 -> 0x601000dbfb40
+     0x601002156400+896: ((sstables::sstable_mutation_reader<sstables::data_consume_rows_context_m, sstables::mp_row_consumer_m>*) 0x601002156780)->_context +8
+     0x601002156400+896: ((seastar::optimized_optional<sstables::data_consume_context<sstables::data_consume_rows_context_m> >*) 0x601002156780)->_object +8
+     0x601002156400+904: ((sstables::data_consume_context<sstables::data_consume_rows_context_m>*) 0x601002156788)->_ctx +0
+     0x601002156400+904: ((std::unique_ptr<sstables::data_consume_rows_context_m, std::default_delete<sstables::data_consume_rows_context_m> >*) 0x601002156788)->_M_t +0
+     0x601002156400+904: ((std::__uniq_ptr_impl<sstables::data_consume_rows_context_m, std::default_delete<sstables::data_consume_rows_context_m> >*) 0x601002156788)->_M_t +0
+     0x601002156400+904: ((std::tuple<sstables::data_consume_rows_context_m*, std::default_delete<sstables::data_consume_rows_context_m> >*) 0x601002156788)->std::_Tuple_impl<0, sstables::data_consume_rows_context_m*, std::default_delete<sstables::data_consume_rows_context_m> > +0
+     0x601002156400+904: ((std::_Tuple_impl<0, sstables::data_consume_rows_context_m*, std::default_delete<sstables::data_consume_rows_context_m> >*) 0x601002156788)->std::_Head_base<0, sstables::data_consume_rows_context_m*, false> +0
+     0x601002156400+904: ((std::_Head_base<0, sstables::data_consume_rows_context_m*, false>*) 0x601002156788)->_M_head_impl +0
+     0x601002ce5200+0: ((sstables::data_consume_rows_context_m*) 0x601002ce5200)->data_consumer::continuous_data_consumer<sstables::data_consume_rows_context_m> +0
+     0x601002ce5200+0: ((data_consumer::continuous_data_consumer<sstables::data_consume_rows_context_m>*) 0x601002ce5200)->_input +0
+     0x601002ce5200+0: ((seastar::input_stream<char>*) 0x601002ce5200)->_fd +0
+     0x601002ce5200+0: ((seastar::data_source*) 0x601002ce5200)->_dsi +0
+     0x601002ce5200+0: ((std::unique_ptr<seastar::data_source_impl, std::default_delete<seastar::data_source_impl> >*) 0x601002ce5200)->_M_t +0
+     0x601002ce5200+0: ((std::__uniq_ptr_impl<seastar::data_source_impl, std::default_delete<seastar::data_source_impl> >*) 0x601002ce5200)->_M_t +0
+     0x601002ce5200+0: ((std::tuple<seastar::data_source_impl*, std::default_delete<seastar::data_source_impl> >*) 0x601002ce5200)->std::_Tuple_impl<0, seastar::data_source_impl*, std::default_delete<seastar::data_source_impl> > +0
+     0x601002ce5200+0: ((std::_Tuple_impl<0, seastar::data_source_impl*, std::default_delete<seastar::data_source_impl> >*) 0x601002ce5200)->std::_Head_base<0, seastar::data_source_impl*, false> +0
+     0x601002ce5200+0: ((std::_Head_base<0, seastar::data_source_impl*, false>*) 0x601002ce5200)->_M_head_impl +0
+      (seastar::data_source_impl*) 0x601000dbfb40
+
+    (gdb) scylla find-usages 0x601002156400
+    =============================================
+    0x601002ce6d00: vtable for combined_mutation_reader + 16 , 0x601002ce6d00+384 -> 0x601000071600+112 -> 0x601002fe0a98+16 -> 0x601002156400
+     0x601002ce6d00+80: ((combined_mutation_reader*) 0x601002ce6d50)->_producer +304
+     0x601002ce6d00+88: ((mutation_fragment_merger<mutation_reader_merger>*) 0x601002ce6d58)->_producer +296
+     0x601002ce6d00+384: ((mutation_reader_merger*) 0x601002ce6e80)->_next +0
+     0x601002ce6d00+384: ((utils::small_vector<mutation_reader_merger::reader_and_last_fragment_kind, 4>*) 0x601002ce6e80)->_begin +0
+     0x601000071600+112: ((mutation_reader_merger::reader_and_last_fragment_kind*) 0x601000071600)[7] +0
+     0x601000071600+112: ((mutation_reader_merger::reader_and_last_fragment_kind*) 0x601000071670)->reader +0
+     0x601000071600+112: ((std::_List_iterator<flat_mutation_reader>*) 0x601000071670)->_M_node +0
+     0x601002fe0a98+16: ((std::_List_node<flat_mutation_reader>*) 0x601002fe0aa8)->_M_storage +0
+     0x601002fe0a98+16: ((flat_mutation_reader*) 0x601002fe0aa8)->_impl +0
+     0x601002fe0a98+16: ((std::unique_ptr<flat_mutation_reader::impl, std::default_delete<flat_mutation_reader::impl> >*) 0x601002fe0aa8)->_M_t +0
+     0x601002fe0a98+16: ((std::__uniq_ptr_impl<flat_mutation_reader::impl, std::default_delete<flat_mutation_reader::impl> >*) 0x601002fe0aa8)->_M_t +0
+     0x601002fe0a98+16: ((std::tuple<flat_mutation_reader::impl*, std::default_delete<flat_mutation_reader::impl> >*) 0x601002fe0aa8)->std::_Tuple_impl<0, flat_mutation_reader::impl*, std::default_delete<flat_mutation_reader::impl> > +0
+     0x601002fe0a98+16: ((std::_Tuple_impl<0, flat_mutation_reader::impl*, std::default_delete<flat_mutation_reader::impl> >*) 0x601002fe0aa8)->std::_Head_base<0, flat_mutation_reader::impl*, false> +0
+     0x601002fe0a98+16: ((std::_Head_base<0, flat_mutation_reader::impl*, false>*) 0x601002fe0aa8)->_M_head_impl +0
+      (flat_mutation_reader::impl*) 0x601002156400
+
+    """
+
+    def search(self, addr, path=[]):
+        self.visited.add(addr)
+
+        if self.debug:
+            gdb.write('search 0x%x\n' % addr)
+
+        for obj, off in find_in_live(self.mem_start, self.mem_size, addr, 'g'):
+            self.has_usages = True
+            if self.timedout:
+                return
+            if time.time() > self.deadline:
+                gdb.write('Timed out.\n')
+                self.timedout = True
+                return
+            if obj in self.visited:
+                continue
+            sym = resolve(int(gdb.Value(obj).cast(self.vptr_type).dereference()))
+            if sym and sym.startswith('vtable '):
+                self.has_vptr_usages = True
+                yield obj, sym, [(obj, off)] + path
+            else:
+                for n in self.search(obj, [(obj, off)] + path):
+                    yield n
+
+    def log(self, line):
+        if self.hide_bad_trace:
+            self.lines.append(line)
+        else:
+            gdb.write(line)
+
+    def flush_log(self):
+        for line in self.lines:
+            gdb.write(line)
+        self.lines = []
+
+    def clear_log(self):
+        self.lines = []
+
+    def __init__(self):
+        gdb.Command.__init__(self, 'scylla find-usages', gdb.COMMAND_USER, gdb.COMPLETE_NONE, True)
+        self.vptr_type = gdb.lookup_type('uintptr_t').pointer()
+
+    def invoke(self, arg, for_tty):
+        parser = argparse.ArgumentParser(description="scylla find-usages")
+        parser.add_argument("-d", "--debug", action="store_true", help="Print extra debugging messages")
+        parser.add_argument("--show-bad", action="store_true", help="Print traces which end up classified as incorrect")
+        parser.add_argument("--time-limit", type=float, help="Maximum run time in seconds")
+        parser.add_argument("address", type=str, help="Address of the object whose usages should be searched for")
+        try:
+            args = parser.parse_args(arg.split())
+        except SystemExit:
+            return
+
+        addr = int(gdb.parse_and_eval(args.address))
+        self.debug = args.debug
+        self.hide_bad_trace = not args.show_bad
+        self.lines = []
+        self.visited = set()
+        self.has_usages = False
+        self.has_vptr_usages = False
+        self.timedout = False
+        self.mem_start, self.mem_size = get_seastar_memory_start_and_size()
+        found_valid = False
+
+        if args.time_limit:
+            self.deadline = time.time() + args.time_limit
+        else:
+            self.deadline = time.time() + 3600*24*360
+
+        for obj, sym, path in self.search(addr):
+            self.clear_log()
+            self.log('=============================================\n')
+            self.log("0x%x: %s, %s -> 0x%x\n" % (obj, sym, ' -> '.join('0x%x+%d' % (obj, off) for (obj, off) in path), addr))
+
+            m = re.match("vtable for ([^+]*)", sym)
+            if not m:
+                self.log('ERROR: Failed to parse vtable pointer name\n')
+                continue
+            type_name = m.group(1)
+            try:
+                type = gdb.lookup_type(type_name)
+            except:
+                self.log('ERROR: lookup_type failed for %s!\n' % type_name)
+                continue
+
+            done = False
+            full = False
+            alloc_ptr, off = path[0]
+            path = path[1:]
+            ptr = alloc_ptr
+            jump_type = None
+            hashtable_value_type = None
+            list_value_type = None
+
+            while not done:
+                type = type.strip_typedefs()
+
+                # When accessing beyond _Hash_node_base, reinterpret as _Hash_node_value_base.
+                # Otherwise don't, because if we're accessing a _Hash_node_base field then
+                # starting from _Hash_node_value_base means we will need an extra hop to switch
+                # back to _Hash_node_base as we descent and we'll enter an infinite loop.
+                if str(type) == 'std::__detail::_Hash_node_base' and off >= type.sizeof:
+                    type = gdb.lookup_type('std::__detail::_Hash_node_value_base<%s>' % str(hashtable_value_type))
+
+                if self.debug:
+                    self.log(" >>>> %s code=%s off=%d\n" % (str(type), str(type.code), off))
+
+                # If we got here by a pointer, allow interpreting the area as an array
+                # Except for types we know are never used for arrays.
+                if off >= type.sizeof and jump_type and jump_type.code == gdb.TYPE_CODE_PTR \
+                        and str(type) != "bytes_ostream::chunk":
+                    self.log(" 0x%x+%d: ((%s*) 0x%x)[%d] +%d\n" % (alloc_ptr, ptr - alloc_ptr + off, str(type),
+                                                                    ptr, off // type.sizeof, off % type.sizeof))
+                    offset_in_element = int(off % type.sizeof)
+                    ptr += off - offset_in_element
+                    off = offset_in_element
+                elif type.code == gdb.TYPE_CODE_ARRAY:
+                    jump_type = None
+                    self.log(" 0x%x+%d: ((%s) 0x%x)[%d] +%d\n" % (alloc_ptr, ptr - alloc_ptr + off, str(type),
+                                                                    ptr, off // type.sizeof, off % type.sizeof))
+                    type = type.target()
+                    offset_in_element = int(off % type.sizeof)
+                    ptr += off - offset_in_element
+                    off = offset_in_element
+                elif off == 0 and (type.code == gdb.TYPE_CODE_PTR
+                                   or type.code == gdb.TYPE_CODE_REF
+                                   or type.code == gdb.TYPE_CODE_RVALUE_REF):
+                    jump_type = type
+                    type = type.target()
+                    jump_addr = int(gdb.Value(int(ptr + off)).cast(type.pointer().pointer()).dereference())
+                    if not path:
+                        self.log("  (%s*) 0x%x\n" % (str(type), addr))
+                        done = True
+                        full = True
+                    else:
+                        alloc_ptr, off = path[0]
+                        ptr = alloc_ptr
+                        path = path[1:]
+                        if ptr != jump_addr:
+                            done = True
+                            self.log('=============================================\n')
+                            self.log('ERROR: Jump address mismatch, expected 0x%x got 0x%x\n' % (ptr, jump_addr))
+                        if self.debug:
+                            self.log(" JUMP 0x%x+%d: jump_type=%s type=%s\n" % (alloc_ptr, off, str(jump_type), str(type)))
+                elif type.code == gdb.TYPE_CODE_STRUCT or type.code == gdb.TYPE_CODE_UNION:
+                    jump_type = None
+                    done = True
+                    if str(type).startswith("std::_Hashtable<"):
+                        hashtable_value_type = type.template_argument(1)
+                    elif str(type).startswith("std::__cxx11::list<"):
+                        list_value_type = type.template_argument(0)
+
+                    for field in type.fields():
+                        if field.name == '_M_end_of_storage':
+                            continue
+                        try:
+                            if field.bitpos % 8 != 0:
+                                continue
+                            field_off = field.bitpos // 8
+                        except AttributeError: # Not all fields have bitpos
+                            continue
+                        field_size = field.type.sizeof
+                        if field_size < 8:
+                            continue
+                        if self.debug:
+                            self.log(" ##### %s.%s [+%d size=%d] +%d\n" % (str(type), field.name, field_off, field_size, off))
+                        if off >= field_off and off < field_off + field_size:
+                            container_type = type
+                            container_ptr = ptr
+                            done = False
+                            ptr += int(field_off)
+                            off -= field_off
+                            self.log(" 0x%x+%d: ((%s*) 0x%x)->%s +%d\n" % (alloc_ptr, ptr - alloc_ptr,
+                                                                            str(type), container_ptr, field.name, off))
+                            type = field.type.strip_typedefs()
+
+                            # Propagate type information for type-erased pointers and containers
+                            if field.name == '_M_storage' and str(container_type).startswith('std::_List_node<'):
+                                type = container_type.template_argument(0)
+                            elif field.name == '_M_storage' and str(container_type).startswith('std::__detail::_Hash_node_value_base<'):
+                                type = container_type.template_argument(0)
+                            elif field.name == 'storage_' and str(container_type).startswith('boost::variant<'):
+                                which = gdb.Value(int(container_ptr)).cast(container_type.pointer())['which_']
+                                type = container_type.template_argument(which)
+                            elif off == 0 and (type.code == gdb.TYPE_CODE_PTR
+                                               or type.code == gdb.TYPE_CODE_REF
+                                               or type.code == gdb.TYPE_CODE_RVALUE_REF):
+                                if str(type) == 'seastar::lw_shared_ptr_counter_base *':
+                                    elem_type = container_type.template_argument(0)
+                                    if has_enable_lw_shared_from_this(elem_type):
+                                        type = elem_type.pointer()
+                                    else:
+                                        type = gdb.lookup_type('seastar::shared_ptr_no_esft<%s>' % str(elem_type.unqualified())).pointer()
+                                elif str(type) == 'seastar::shared_ptr_count_base *':
+                                    elem_type = container_type.template_argument(0)
+                                    if has_enable_shared_from_this(elem_type):
+                                        type = elem_type.pointer()
+                                elif str(type) == 'std::__detail::_List_node_base *':
+                                    if str(container_type).startswith('std::_List_iterator<'):
+                                        elem_type = container_type.template_argument(0)
+                                    else:
+                                        elem_type = list_value_type
+                                    type = gdb.lookup_type('std::_List_node<%s>' % str(elem_type)).pointer()
+                            break
+                    if done:
+                        self.log('=============================================\n')
+                        self.log('ERROR: BAD TRACE! 0x%x +%d not a field of %s\n' % (ptr, off, str(type)))
+                else:
+                    self.log('=============================================\n')
+                    self.log('ERROR: Unsupported type: %s code=%s\n' % (str(type), str(type.code)))
+                    done = True
+            if full:
+                found_valid = True
+                self.flush_log()
+                break
+        if not found_valid and not self.timedout:
+            if not self.has_usages:
+                gdb.write('No usages.\n')
+            elif not self.has_vptr_usages:
+                gdb.write('No usages from virtual.\n')
+            else:
+                gdb.write('No valid usages.\n')
+
 class std_unique_ptr:
     def __init__(self, obj):
         self.obj = obj
@@ -2264,4 +2576,5 @@ scylla_active_sstables()
 scylla_netw()
 scylla_gms()
 scylla_cache()
+scylla_find_usages()
 scylla_sstables()
