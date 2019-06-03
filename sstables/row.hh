@@ -255,6 +255,34 @@ private:
         STOP_THEN_ATOM_START,
     } _state = state::ROW_START;
 
+    friend std::ostream& operator<<(std::ostream& out, const state& s) {
+        switch (s) {
+            case state::ROW_START: return out << "ROW_START";
+            case state::DELETION_TIME: return out << "DELETION_TIME";
+            case state::DELETION_TIME_2: return out << "DELETION_TIME_2";
+            case state::DELETION_TIME_3: return out << "DELETION_TIME_3";
+            case state::ATOM_START: return out << "ATOM_START";
+            case state::ATOM_START_2: return out << "ATOM_START_2";
+            case state::ATOM_MASK: return out << "ATOM_MASK";
+            case state::ATOM_MASK_2: return out << "ATOM_MASK_2";
+            case state::COUNTER_CELL: return out << "COUNTER_CELL";
+            case state::COUNTER_CELL_2: return out << "COUNTER_CELL_2";
+            case state::EXPIRING_CELL: return out << "EXPIRING_CELL";
+            case state::EXPIRING_CELL_2: return out << "EXPIRING_CELL_2";
+            case state::EXPIRING_CELL_3: return out << "EXPIRING_CELL_3";
+            case state::CELL: return out << "CELL";
+            case state::CELL_2: return out << "CELL_2";
+            case state::CELL_VALUE_BYTES: return out << "CELL_VALUE_BYTES";
+            case state::CELL_VALUE_BYTES_2: return out << "CELL_VALUE_BYTES_2";
+            case state::RANGE_TOMBSTONE: return out << "RANGE_TOMBSTONE";
+            case state::RANGE_TOMBSTONE_2: return out << "RANGE_TOMBSTONE_2";
+            case state::RANGE_TOMBSTONE_3: return out << "RANGE_TOMBSTONE_3";
+            case state::RANGE_TOMBSTONE_4: return out << "RANGE_TOMBSTONE_4";
+            case state::STOP_THEN_ATOM_START: return out << "STOP_THEN_ATOM_START";
+        }
+        abort();
+    }
+
     row_consumer& _consumer;
     shared_sstable _sst;
 
@@ -606,6 +634,70 @@ private:
         RANGE_TOMBSTONE_BODY_LOCAL_DELTIME,
         RANGE_TOMBSTONE_BODY_LOCAL_DELTIME2,
     } _state = state::PARTITION_START;
+
+    friend std::ostream& operator<<(std::ostream& out, const state& s) {
+        switch (s) {
+            case state::PARTITION_START: return out << "PARTITION_START";
+            case state::DELETION_TIME: return out << "DELETION_TIME";
+            case state::DELETION_TIME_2: return out << "DELETION_TIME_2";
+            case state::DELETION_TIME_3: return out << "DELETION_TIME_3";
+            case state::FLAGS: return out << "FLAGS";
+            case state::FLAGS_2: return out << "FLAGS_2";
+            case state::EXTENDED_FLAGS: return out << "EXTENDED_FLAGS";
+            case state::CLUSTERING_ROW: return out << "CLUSTERING_ROW";
+            case state::CK_BLOCK: return out << "CK_BLOCK";
+            case state::CK_BLOCK_HEADER: return out << "CK_BLOCK_HEADER";
+            case state::CK_BLOCK2: return out << "CK_BLOCK2";
+            case state::CK_BLOCK_END: return out << "CK_BLOCK_END";
+            case state::ROW_BODY: return out << "ROW_BODY";
+            case state::ROW_BODY_SIZE: return out << "ROW_BODY_SIZE";
+            case state::ROW_BODY_PREV_SIZE: return out << "ROW_BODY_PREV_SIZE";
+            case state::ROW_BODY_TIMESTAMP: return out << "ROW_BODY_TIMESTAMP";
+            case state::ROW_BODY_TIMESTAMP_TTL: return out << "ROW_BODY_TIMESTAMP_TTL";
+            case state::ROW_BODY_TIMESTAMP_DELTIME: return out << "ROW_BODY_TIMESTAMP_DELTIME";
+            case state::ROW_BODY_DELETION: return out << "ROW_BODY_DELETION";
+            case state::ROW_BODY_DELETION_2: return out << "ROW_BODY_DELETION_2";
+            case state::ROW_BODY_DELETION_3: return out << "ROW_BODY_DELETION_3";
+            case state::ROW_BODY_SHADOWABLE_DELETION: return out << "ROW_BODY_SHADOWABLE_DELETION";
+            case state::ROW_BODY_SHADOWABLE_DELETION_2: return out << "ROW_BODY_SHADOWABLE_DELETION_2";
+            case state::ROW_BODY_SHADOWABLE_DELETION_3: return out << "ROW_BODY_SHADOWABLE_DELETION_3";
+            case state::ROW_BODY_MARKER: return out << "ROW_BODY_MARKER";
+            case state::ROW_BODY_MISSING_COLUMNS: return out << "ROW_BODY_MISSING_COLUMNS";
+            case state::ROW_BODY_MISSING_COLUMNS_2: return out << "ROW_BODY_MISSING_COLUMNS_2";
+            case state::ROW_BODY_MISSING_COLUMNS_READ_COLUMNS: return out << "ROW_BODY_MISSING_COLUMNS_READ_COLUMNS";
+            case state::ROW_BODY_MISSING_COLUMNS_READ_COLUMNS_2: return out << "ROW_BODY_MISSING_COLUMNS_READ_COLUMNS_2";
+            case state::COLUMN: return out << "COLUMN";
+            case state::SIMPLE_COLUMN: return out << "SIMPLE_COLUMN";
+            case state::COMPLEX_COLUMN: return out << "COMPLEX_COLUMN";
+            case state::COMPLEX_COLUMN_MARKED_FOR_DELETE: return out << "COMPLEX_COLUMN_MARKED_FOR_DELETE";
+            case state::COMPLEX_COLUMN_LOCAL_DELETION_TIME: return out << "COMPLEX_COLUMN_LOCAL_DELETION_TIME";
+            case state::COMPLEX_COLUMN_2: return out << "COMPLEX_COLUMN_2";
+            case state::COMPLEX_COLUMN_SIZE: return out << "COMPLEX_COLUMN_SIZE";
+            case state::COMPLEX_COLUMN_SIZE_2: return out << "COMPLEX_COLUMN_SIZE_2";
+            case state::NEXT_COLUMN: return out << "NEXT_COLUMN";
+            case state::COLUMN_FLAGS: return out << "COLUMN_FLAGS";
+            case state::COLUMN_TIMESTAMP: return out << "COLUMN_TIMESTAMP";
+            case state::COLUMN_DELETION_TIME: return out << "COLUMN_DELETION_TIME";
+            case state::COLUMN_DELETION_TIME_2: return out << "COLUMN_DELETION_TIME_2";
+            case state::COLUMN_TTL: return out << "COLUMN_TTL";
+            case state::COLUMN_TTL_2: return out << "COLUMN_TTL_2";
+            case state::COLUMN_CELL_PATH: return out << "COLUMN_CELL_PATH";
+            case state::COLUMN_VALUE: return out << "COLUMN_VALUE";
+            case state::COLUMN_END: return out << "COLUMN_END";
+            case state::RANGE_TOMBSTONE_MARKER: return out << "RANGE_TOMBSTONE_MARKER";
+            case state::RANGE_TOMBSTONE_KIND: return out << "RANGE_TOMBSTONE_KIND";
+            case state::RANGE_TOMBSTONE_SIZE: return out << "RANGE_TOMBSTONE_SIZE";
+            case state::RANGE_TOMBSTONE_CONSUME_CK: return out << "RANGE_TOMBSTONE_CONSUME_CK";
+            case state::RANGE_TOMBSTONE_BODY: return out << "RANGE_TOMBSTONE_BODY";
+            case state::RANGE_TOMBSTONE_BODY_SIZE: return out << "RANGE_TOMBSTONE_BODY_SIZE";
+            case state::RANGE_TOMBSTONE_BODY_PREV_SIZE: return out << "RANGE_TOMBSTONE_BODY_PREV_SIZE";
+            case state::RANGE_TOMBSTONE_BODY_TIMESTAMP: return out << "RANGE_TOMBSTONE_BODY_TIMESTAMP";
+            case state::RANGE_TOMBSTONE_BODY_TIMESTAMP2: return out << "RANGE_TOMBSTONE_BODY_TIMESTAMP2";
+            case state::RANGE_TOMBSTONE_BODY_LOCAL_DELTIME: return out << "RANGE_TOMBSTONE_BODY_LOCAL_DELTIME";
+            case state::RANGE_TOMBSTONE_BODY_LOCAL_DELTIME2: return out << "RANGE_TOMBSTONE_BODY_LOCAL_DELTIME2";
+        }
+        abort();
+    }
 
     consumer_m& _consumer;
     shared_sstable _sst;
