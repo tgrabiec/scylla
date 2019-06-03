@@ -856,9 +856,12 @@ public:
     }
 private:
     data_consumer::processing_result do_process_state(temporary_buffer<char>& data) {
+        auto off = [&] { return position() - data.size(); };
+        sstlog.trace("parser {}: do_process_state(), off={}, state={}", this, off(), _state);
         switch (_state) {
         case state::PARTITION_START:
         partition_start_label:
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::PARTITION_START);
             _is_first_unfiltered = true;
             if (read_short_length_bytes(data, _pk) != read_status::ready) {
                 _state = state::DELETION_TIME;
@@ -889,6 +892,7 @@ private:
         }
         case state::FLAGS:
         flags_label:
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::FLAGS);
             _liveness = {};
             _row_tombstone = {};
             _row_shadowable_tombstone = {};
@@ -898,6 +902,7 @@ private:
             }
         case state::FLAGS_2:
             _flags = unfiltered_flags_m(_u8);
+            sstlog.trace("parser {}: off={}, state={}, _flags={}", this, off(), state::FLAGS_2, int(_u8));
             if (_flags.is_end_of_partition()) {
                 _state = state::PARTITION_START;
                 if (_consumer.consume_partition_end() == consumer_m::proceed::no) {
@@ -920,6 +925,7 @@ private:
             }
         case state::EXTENDED_FLAGS:
             _extended_flags = unfiltered_extended_flags_m(_u8);
+            sstlog.trace("parser {}: off={}, state={}, _flags={}", this, off(), state::EXTENDED_FLAGS, int(_u8));
             if (_extended_flags.has_cassandra_shadowable_deletion()) {
                 throw std::runtime_error("SSTables with Cassandra-style shadowable deletion cannot be read by Scylla");
             }
@@ -936,11 +942,13 @@ private:
             _ck_size = _column_translation.clustering_column_value_fix_legths().size();
         case state::CLUSTERING_ROW:
         clustering_row_label:
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::CLUSTERING_ROW);
             _is_first_unfiltered = false;
             _null_component_occured = false;
             setup_ck(_column_translation.clustering_column_value_fix_legths());
         case state::CK_BLOCK:
         ck_block_label:
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::CK_BLOCK);
             if (no_more_ck_blocks()) {
                 if (_reading_range_tombstone_ck) {
                     goto range_tombstone_consume_ck_label;
@@ -960,6 +968,7 @@ private:
             _ck_blocks_header = _u64;
         case state::CK_BLOCK2:
         ck_block2_label: {
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::CK_BLOCK2);
             if (is_block_null()) {
                 _null_component_occured = true;
                 move_to_next_ck_block();
@@ -991,6 +1000,7 @@ private:
             goto ck_block_label;
         case state::ROW_BODY:
         row_body_label:
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::ROW_BODY);
             if (read_unsigned_vint(data) != read_status::ready) {
                 _state = state::ROW_BODY_SIZE;
                 break;
@@ -1053,6 +1063,7 @@ private:
             _liveness.set_local_deletion_time(parse_expiry(_header, _u64));
         case state::ROW_BODY_DELETION:
         row_body_deletion_label:
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::ROW_BODY_DELETION);
             if (!_flags.has_deletion()) {
                 _state = state::ROW_BODY_SHADOWABLE_DELETION;
                 goto row_body_shadowable_deletion_label;
@@ -1071,6 +1082,7 @@ private:
             _row_tombstone.deletion_time = parse_expiry(_header, _u64);
         case state::ROW_BODY_SHADOWABLE_DELETION:
         row_body_shadowable_deletion_label:
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::ROW_BODY_SHADOWABLE_DELETION);
             if (_extended_flags.has_scylla_shadowable_deletion()) {
                 if (!_has_shadowable_tombstones) {
                     throw malformed_sstable_exception("Scylla shadowable tombstone flag is set but not supported on this SSTables");
@@ -1093,6 +1105,7 @@ private:
             _row_shadowable_tombstone.deletion_time = parse_expiry(_header, _u64);
         case state::ROW_BODY_MARKER:
         row_body_marker_label:
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::ROW_BODY_MARKER);
             if (_consumer.consume_row_marker_and_tombstone(
                     _liveness, std::move(_row_tombstone), std::move(_row_shadowable_tombstone)) == consumer_m::proceed::no) {
                 _state = state::ROW_BODY_MISSING_COLUMNS;
@@ -1100,6 +1113,7 @@ private:
             }
         case state::ROW_BODY_MISSING_COLUMNS:
         row_body_missing_columns_label:
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::ROW_BODY_MISSING_COLUMNS);
             if (!_flags.has_all_columns()) {
                 if (read_unsigned_vint(data) != read_status::ready) {
                     _state = state::ROW_BODY_MISSING_COLUMNS_2;
@@ -1111,6 +1125,7 @@ private:
             }
         case state::COLUMN:
         column_label:
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::COLUMN);
             if (_subcolumns_to_read == 0) {
                 if (no_more_columns()) {
                     _state = state::FLAGS;
@@ -1146,6 +1161,7 @@ private:
             _column_timestamp = parse_timestamp(_header, _u64);
         case state::COLUMN_DELETION_TIME:
         column_deletion_time_label:
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::COLUMN_DELETION_TIME);
             if (_column_flags.use_row_ttl()) {
                 _column_local_deletion_time = _liveness.local_deletion_time();
                 _state = state::COLUMN_TTL;
@@ -1163,6 +1179,7 @@ private:
             _column_local_deletion_time = parse_expiry(_header, _u64);
         case state::COLUMN_TTL:
         column_ttl_label:
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::COLUMN_TTL);
             if (_column_flags.use_row_ttl()) {
                 _column_ttl = _liveness.ttl();
                 _state = state::COLUMN_VALUE;
@@ -1180,6 +1197,7 @@ private:
             _column_ttl = parse_ttl(_header, _u64);
         case state::COLUMN_CELL_PATH:
         column_cell_path_label:
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::COLUMN_CELL_PATH);
             if (!is_column_simple()) {
                 if (read_unsigned_vint_length_bytes(data, _cell_path) != read_status::ready) {
                     _state = state::COLUMN_VALUE;
@@ -1208,6 +1226,7 @@ private:
         }
         case state::COLUMN_END:
         column_end_label:
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::COLUMN_END);
             _state = state::NEXT_COLUMN;
             if (is_column_counter() && !_column_flags.is_deleted()) {
                 if (_consumer.consume_counter_column(get_column_info(),
@@ -1243,6 +1262,7 @@ private:
             goto column_label;
         case state::ROW_BODY_MISSING_COLUMNS_2:
         row_body_missing_columns_2_label: {
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::ROW_BODY_MISSING_COLUMNS_2);
             uint64_t missing_column_bitmap_or_count = _u64;
             if (_row->_columns.size() < 64) {
                 _row->_columns_selector.clear();
@@ -1264,6 +1284,7 @@ private:
         }
         case state::ROW_BODY_MISSING_COLUMNS_READ_COLUMNS:
         row_body_missing_columns_read_columns_label:
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::ROW_BODY_MISSING_COLUMNS_READ_COLUMNS);
             if (_missing_columns_to_read == 0) {
                 skip_absent_columns();
                 goto column_label;
@@ -1278,6 +1299,7 @@ private:
             goto row_body_missing_columns_read_columns_label;
         case state::COMPLEX_COLUMN:
         complex_column_label:
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::COMPLEX_COLUMN);
             if (!_flags.has_complex_deletion()) {
                 _complex_column_tombstone = {};
                 goto complex_column_2_label;
@@ -1296,6 +1318,7 @@ private:
             _complex_column_tombstone = {_complex_column_marked_for_delete, parse_expiry(_header, _u64)};
         case state::COMPLEX_COLUMN_2:
         complex_column_2_label:
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::COMPLEX_COLUMN_2);
             if (_consumer.consume_complex_column_start(get_column_info(), _complex_column_tombstone) == consumer_m::proceed::no) {
                 _state = state::COMPLEX_COLUMN_SIZE;
                 return consumer_m::proceed::no;
@@ -1318,6 +1341,7 @@ private:
             goto column_label;
         case state::RANGE_TOMBSTONE_MARKER:
         range_tombstone_marker_label:
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::RANGE_TOMBSTONE_MARKER);
             _is_first_unfiltered = false;
             if (read_8(data) != read_status::ready) {
                 _state = state::RANGE_TOMBSTONE_KIND;
@@ -1343,9 +1367,11 @@ private:
             assert(0);
         case state::RANGE_TOMBSTONE_CONSUME_CK:
         range_tombstone_consume_ck_label:
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::RANGE_TOMBSTONE_CONSUME_CK);
             _reading_range_tombstone_ck = false;
         case state::RANGE_TOMBSTONE_BODY:
         range_tombstone_body_label:
+            sstlog.trace("parser {}: off={}, state={}", this, off(), state::RANGE_TOMBSTONE_BODY);
             if (read_unsigned_vint(data) != read_status::ready) {
                 _state = state::RANGE_TOMBSTONE_BODY_SIZE;
                 break;
