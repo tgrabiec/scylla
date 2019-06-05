@@ -121,7 +121,9 @@ flat_mutation_reader flat_mutation_reader::impl::reverse_partitions(flat_mutatio
             : flat_mutation_reader::impl(mr._schema)
             , _source(&mr)
             , _range_tombstones(*mr._schema)
-        { }
+        {
+            _check_monotonicity = false;
+        }
 
         virtual future<> fill_buffer(db::timeout_clock::time_point timeout) override {
             return repeat([&, timeout] {
