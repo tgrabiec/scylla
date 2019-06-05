@@ -63,6 +63,8 @@ GCC6_CONCEPT(
     };
 )
 
+#define FLAT_MUTATION_READER_ASSERT_MONOTONICITY
+
 /*
  * Allows iteration on mutations using mutation_fragments.
  * It iterates over mutations one by one and for each mutation
@@ -96,12 +98,28 @@ public:
         bool _end_of_stream = false;
         schema_ptr _schema;
         friend class flat_mutation_reader;
+#ifdef FLAT_MUTATION_READER_ASSERT_MONOTONICITY
+        position_in_partition _prev_pos = position_in_partition(position_in_partition::partition_start_tag_t{});
+        bool _check_monotonicity = true;
+#endif
     protected:
         template<typename... Args>
         void push_mutation_fragment(Args&&... args) {
             seastar::memory::on_alloc_point(); // for exception safety tests
             _buffer.emplace_back(std::forward<Args>(args)...);
             _buffer_size += _buffer.back().memory_usage(*_schema);
+#ifdef FLAT_MUTATION_READER_ASSERT_MONOTONICITY
+            auto pos = position_in_partition(_buffer.back().position());
+            if (!pos.is_partition_start() && _check_monotonicity) {
+                auto less = position_in_partition::less_compare(*_schema);
+                if (_buffer.back().is_range_tombstone()) {
+                    assert(!less(pos, _prev_pos));
+                } else {
+                    assert(less(_prev_pos, pos));
+                }
+            }
+            _prev_pos = std::move(pos);
+#endif
         }
         void clear_buffer() {
             _buffer.erase(_buffer.begin(), _buffer.end());
