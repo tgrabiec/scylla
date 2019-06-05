@@ -103,7 +103,7 @@ struct send_info {
         , cf(db.find_column_family(cf_id))
         , ranges(std::move(ranges_))
         , prs(to_partition_ranges(ranges))
-        , reader(cf.make_streaming_reader(cf.schema(), prs)) {
+        , reader(cf.make_streaming_reader(cf.schema(), prs, cf.schema()->full_slice())) {
     }
     future<size_t> estimate_partitions() {
         return do_with(cf.get_sstables(), size_t(0), [this] (auto& sstables, size_t& partition_count) {

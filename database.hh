@@ -675,10 +675,12 @@ public:
     //  - Does not populate the cache
     // Requires ranges to be sorted and disjoint.
     flat_mutation_reader make_streaming_reader(schema_ptr schema,
-            const dht::partition_range_vector& ranges) const;
+            const dht::partition_range_vector& ranges,
+            const query::partition_slice& slice) const;
 
     // Single range overload.
     flat_mutation_reader make_streaming_reader(schema_ptr schema, const dht::partition_range& range,
+            const query::partition_slice& slice,
             mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::no) const;
 
     sstables::shared_sstable make_streaming_sstable_for_write(std::optional<sstring> subdir = {});

@@ -324,7 +324,7 @@ private:
             dht::i_partitioner& local_partitioner,
             is_local_reader local_reader) {
         if (local_reader) {
-            return cf.make_streaming_reader(_schema, _range);
+            return cf.make_streaming_reader(_schema, _range, _schema->full_slice());
         }
         return make_multishard_streaming_reader(db, local_partitioner, _schema, [this] {
             auto shard_range = _sharder.next();
