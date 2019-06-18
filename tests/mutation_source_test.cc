@@ -649,6 +649,75 @@ static void test_fast_forwarding_across_partitions_to_empty_range(populate_fn po
         .produces_end_of_stream();
 }
 
+static void test_fast_forwarding_from_singular_range_to_nonsingular(populate_fn populate) {
+    BOOST_TEST_MESSAGE(__PRETTY_FUNCTION__);
+
+    simple_schema table;
+    schema_ptr s = table.schema();
+    std::vector<mutation> partitions;
+
+    auto keys = table.make_pkeys(10);
+
+    for (auto&& key : keys) {
+        mutation m(s, key);
+        sstring val = make_random_string(1024);
+        table.add_row(m, table.make_ckey(0), val);
+        partitions.push_back(m);
+    }
+
+    mutation_source ms = populate(s, partitions);
+
+    auto pr = dht::partition_range::make_singular(keys[0]);
+    auto rd = assert_that(ms.make_reader(s, pr,
+        s->full_slice(),
+        default_priority_class(),
+        nullptr,
+        streamed_mutation::forwarding::no,
+        mutation_reader::forwarding::yes));
+
+    rd.produces_partition_start(keys[0]);
+
+    pr = dht::partition_range::make({keys[2]}, {keys[4]});
+    rd.fast_forward_to(pr)
+        .produces_partition_start(keys[2])
+        .next_partition()
+        .produces_partition_start(keys[3])
+        .next_partition()
+        .produces_partition_start(keys[4]);
+}
+
+static void test_fast_forwarding_after_calling_next_partition(populate_fn populate) {
+    BOOST_TEST_MESSAGE(__PRETTY_FUNCTION__);
+
+    simple_schema table;
+    schema_ptr s = table.schema();
+    std::vector<mutation> partitions;
+
+    auto keys = table.make_pkeys(10);
+
+    for (auto&& key : keys) {
+        mutation m(s, key);
+        sstring val = make_random_string(1024);
+        for (int i = 0; i< 3000; ++i) {
+            table.add_row(m, table.make_ckey(i), val);
+        }
+        partitions.push_back(m);
+    }
+
+    mutation_source ms = populate(s, partitions);
+
+    auto pr = dht::partition_range::make_singular(keys[0]);
+    auto rd = assert_that(ms.make_reader(s, pr, s->full_slice(),
+        default_priority_class(),
+        nullptr,
+        streamed_mutation::forwarding::no,
+        mutation_reader::forwarding::no));
+
+    rd.produces_partition_start(keys[0])
+        .next_partition()
+        .produces_end_of_stream();
+}
+
 static void test_streamed_mutation_slicing_returns_only_relevant_tombstones(populate_fn populate) {
     BOOST_TEST_MESSAGE(__PRETTY_FUNCTION__);
 
@@ -1373,9 +1442,12 @@ void test_slicing_with_overlapping_range_tombstones(populate_fn populate) {
 }
 
 void run_mutation_reader_tests(populate_fn populate) {
+    test_fast_forwarding_after_calling_next_partition(populate);
+    if (0) {
     test_slicing_and_fast_forwarding(populate);
     test_date_tiered_clustering_slicing(populate);
     test_fast_forwarding_across_partitions_to_empty_range(populate);
+    test_fast_forwarding_from_singular_range_to_nonsingular(populate);
     test_clustering_slices(populate);
     test_mutation_reader_fragments_have_monotonic_positions(populate);
     test_streamed_mutation_forwarding_across_range_tombstones(populate);
@@ -1386,6 +1458,7 @@ void run_mutation_reader_tests(populate_fn populate) {
     test_range_queries(populate);
     test_query_only_static_row(populate);
     test_query_no_clustering_ranges_no_static_columns(populate);
+    }
 }
 
 void test_next_partition(populate_fn populate) {

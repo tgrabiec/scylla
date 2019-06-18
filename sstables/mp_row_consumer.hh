@@ -51,14 +51,31 @@ static inline bytes_view pop_back(std::vector<bytes_view>& vec) {
 class mp_row_consumer_reader : public flat_mutation_reader::impl {
     friend class mp_row_consumer_k_l;
     friend class mp_row_consumer_m;
+protected:
+    shared_sstable _sst;
+    bool _index_in_current_partition = false; // Whether index lower bound is in current partition
+
+    bool _partition_finished = true;          // When true and !is_mutation_end(), fill_buffer() will skip to the next partition.
+                                              // Also, it holds "true" after emitting partition_end and before emitting partition_start
+                                              // for the next partition.
+
+    bool _before_partition = true;     // when set, the consumer is positioned right before a partition.
+                                       // _index_in_current_partition applies to the partition which is about to be read.
+
+    std::optional<dht::decorated_key> _current_partition_key;
 public:
-    mp_row_consumer_reader(schema_ptr s) : impl(std::move(s)) {}
+    mp_row_consumer_reader(schema_ptr s, shared_sstable sst)
+        : impl(std::move(s))
+        , _sst(std::move(sst))
+    { }
 
     // Called when all fragments relevant to the query range or fast forwarding window
     // within the current partition have been pushed.
     // If no skipping is required, this method may not be called before transitioning
     // to the next partition.
     virtual void on_out_of_clustering_range() = 0;
+
+    void on_next_partition(dht::decorated_key key, tombstone tomb);
 };
 
 struct new_mutation {
@@ -113,7 +130,6 @@ private:
     mutation_fragment_opt _in_progress;
     mutation_fragment_opt _ready;
 
-    std::optional<new_mutation> _mutation;
     bool _is_mutation_end = true;
     position_in_partition _fwd_end = position_in_partition::after_all_clustered_rows(); // Restricts the stream on top of _ck_ranges_walker.
     streamed_mutation::forwarding _fwd;
@@ -260,6 +276,7 @@ private:
         while (!_reader->is_buffer_full()) {
             auto mfo = _range_tombstones.get_next(_fwd_end);
             if (!mfo) {
+                sstlog.trace("mp_row_consumer_m {}: oooc {}", this, __LINE__);
                 if (!_reader->_partition_finished) {
                     _reader->on_out_of_clustering_range();
                 }
@@ -383,11 +400,15 @@ public:
 
     virtual proceed consume_row_start(sstables::key_view key, sstables::deletion_time deltime) override {
         if (!_is_mutation_end) {
+            sstlog.trace("mp_row_consumer_k_l {}: ignore consume_row_start()", this);
             return proceed::yes;
         }
-        _mutation = new_mutation{partition_key::from_exploded(key.explode(*_schema)), tombstone(deltime)};
-        setup_for_partition(_mutation->key);
-        return proceed::no;
+        sstlog.trace("mp_row_consumer_k_l {}: consume_row_start()", this);
+        auto pk = partition_key::from_exploded(key.explode(*_schema));
+        setup_for_partition(pk);
+        auto dk = dht::global_partitioner().decorate_key(*_schema, pk);
+        _reader->on_next_partition(std::move(dk), tombstone(deltime));
+        return proceed::yes;
     }
 
     void setup_for_partition(const partition_key& pk) {
@@ -590,6 +611,7 @@ public:
         return ret;
     }
     virtual proceed consume_row_end() override {
+        sstlog.trace("mp_row_consumer_k_l {}: consume_row_end()", this);
         if (_in_progress) {
             flush();
         }
@@ -691,18 +713,14 @@ public:
     }
 
     // Returns true if the consumer is positioned at partition boundary,
-    // meaning that after next read either get_mutation() will
-    // return engaged mutation or end of stream was reached.
+    // meaning that after next read partition_start will be emitted
+    // or end of stream was reached.
     bool is_mutation_end() const {
         return _is_mutation_end;
     }
 
     bool is_out_of_range() const {
         return _out_of_range;
-    }
-
-    std::optional<new_mutation> get_mutation() {
-        return std::exchange(_mutation, { });
     }
 
     // See the RowConsumer concept
@@ -798,7 +816,7 @@ public:
             return { };
         }
         _last_lower_bound_counter = _ck_ranges_walker->lower_bound_change_counter();
-        sstlog.trace("mp_row_consumer_k_l {}: advance_context({})", this, _ck_ranges_walker->lower_bound());
+        sstlog.trace("mp_row_consumer_k_l {}: skip_to({})", this, _ck_ranges_walker->lower_bound());
         return _ck_ranges_walker->lower_bound();
     }
 };
@@ -811,7 +829,6 @@ class mp_row_consumer_m : public consumer_m {
     // push_ready_fragments() will signal end-of-stream until this is engaged again.
     std::optional<mutation_fragment_filter> _mf_filter;
 
-    std::optional<new_mutation> _mutation;
     bool _is_mutation_end = true;
     streamed_mutation::forwarding _fwd;
     // For static-compact tables C* stores the only row in the static row but in our representation they're regular rows.
@@ -894,6 +911,7 @@ class mp_row_consumer_m : public consumer_m {
             break;
         case mutation_fragment_filter::result::ignore:
             if (_mf_filter->out_of_range()) {
+                sstlog.trace("mp_row_consumer_m {}: oooc {}", this, __LINE__);
                 _reader->on_out_of_clustering_range();
                 return proceed::no;
             }
@@ -903,6 +921,7 @@ class mp_row_consumer_m : public consumer_m {
             break;
         case mutation_fragment_filter::result::store_and_finish:
             _stored_tombstone = std::move(rt);
+            sstlog.trace("mp_row_consumer_m {}: oooc {}", this, __LINE__);
             _reader->on_out_of_clustering_range();
             return proceed::no;
         }
@@ -993,6 +1012,7 @@ public:
                     mfopt.reset();
                     break;
                 case mutation_fragment_filter::result::store_and_finish:
+                    sstlog.trace("mp_row_consumer_m {}: oooc {}", this, __LINE__);
                     _reader->on_out_of_clustering_range();
                     break;
                 }
@@ -1019,12 +1039,9 @@ public:
         _mf_filter.emplace(*_schema, _slice, pk, _fwd);
     }
 
-    std::optional<new_mutation> get_mutation() {
-        return std::exchange(_mutation, { });
-    }
-
     std::optional<position_in_partition_view> fast_forward_to(position_range r, db::timeout_clock::time_point) {
         if (!_mf_filter) {
+            _reader->on_out_of_clustering_range();
             return {};
         }
         auto skip = _mf_filter->fast_forward_to(std::move(r));
@@ -1039,6 +1056,7 @@ public:
             }
         }
         if (_mf_filter->out_of_range()) {
+            sstlog.trace("mp_row_consumer_m {}: oooc {}", this, __LINE__);
             _reader->on_out_of_clustering_range();
         }
         return skip;
@@ -1066,9 +1084,11 @@ public:
         if (!_is_mutation_end) {
             return proceed::yes;
         }
-        _mutation = new_mutation{partition_key::from_exploded(key.explode(*_schema)), tombstone(deltime)};
-        setup_for_partition(_mutation->key);
-        return proceed::no;
+        auto pk = partition_key::from_exploded(key.explode(*_schema));
+        setup_for_partition(pk);
+        auto dk = dht::global_partitioner().decorate_key(*_schema, pk);
+        _reader->on_next_partition(std::move(dk), tombstone(deltime));
+        return proceed::yes;
     }
 
     virtual consumer_m::row_processing_result consume_row_start(const std::vector<temporary_buffer<char>>& ecp) override {
@@ -1108,6 +1128,7 @@ public:
         case mutation_fragment_filter::result::ignore:
             sstlog.trace("mp_row_consumer_m {}: ignore", this);
             if (_mf_filter->out_of_range()) {
+                sstlog.trace("mp_row_consumer_m {}: oooc {}", this, __LINE__);
                 _reader->on_out_of_clustering_range();
                 // We actually want skip_later, which doesn't exist, but retry_later
                 // is ok because signalling out-of-range on the reader will cause it
@@ -1335,13 +1356,26 @@ public:
                 _reader->push_mutation_fragment(std::move(rt));
             }
         }
-        consume_partition_end();
+        if (!_reader->_partition_finished) {
+            consume_partition_end();
+        }
+        _reader->_end_of_stream = true;
     }
 
     virtual proceed consume_partition_end() override {
         sstlog.trace("mp_row_consumer_m {}: consume_partition_end()", this);
         reset_for_new_partition();
-        return proceed::no;
+
+        if (_fwd == streamed_mutation::forwarding::yes) {
+            _reader->_end_of_stream = true;
+            return proceed::no;
+        }
+
+        sstlog.trace("mp_row_consumer_m {}: emit partition_end", this);
+        _reader->_index_in_current_partition = false;
+        _reader->_partition_finished = true;
+        _reader->push_mutation_fragment(mutation_fragment(partition_end()));
+        return proceed::yes;
     }
 
     virtual void reset(sstables::indexable_element el) override {

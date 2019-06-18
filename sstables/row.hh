@@ -1460,12 +1460,27 @@ public:
         // If reading a partial row (i.e., when we have a clustering row
         // filter and using a promoted index), we may be in FLAGS or FLAGS_2
         // state instead of PARTITION_START.
-        if (_state == state::FLAGS || _state == state::FLAGS_2
-            || (_state == state::PARTITION_START && _prestate == prestate::NONE)) {
+        //
+        // We may end up in state::DELETION_TIME after consuming last's partition end marker
+        // and proceeding to attempt to parse the next partition, since state::DELETION_TIME
+        // is the first state corresponding to contents of a new partition.
+        //
+        // Always call on_end_of_stream() so that fast forwarding
+        if (_state == state::FLAGS || _state == state::FLAGS_2) {
             _consumer.on_end_of_stream();
-        } else {
+            return;
+        }
+
+        if (_state != state::DELETION_TIME
+                && (_state != state::PARTITION_START || _prestate != prestate::NONE)) {
             throw malformed_sstable_exception("end of input, but not end of partition");
         }
+        //if (_state == state::FLAGS || _state == state::FLAGS_2 || _state == state::DELETION_TIME
+        //    || (_state == state::PARTITION_START && _prestate == prestate::NONE)) {
+        //    _consumer.on_end_of_stream();
+        //} else {
+        //    throw malformed_sstable_exception("end of input, but not end of partition");
+        //}
     }
 
     void reset(indexable_element el) {

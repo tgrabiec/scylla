@@ -232,7 +232,9 @@ future<mutation_opt> read_mutation_from_flat_mutation_reader(flat_mutation_reade
         adapter(schema_ptr s) : _s(std::move(s)) { }
 
         void consume_new_partition(const dht::decorated_key& dk) {
-            assert(!_builder);
+            if (_builder) {
+                throw std::runtime_error(fmt::format("!builder {}", dk));
+            }
             _builder = mutation_rebuilder(dk, std::move(_s));
         }
 
