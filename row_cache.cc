@@ -48,7 +48,8 @@ using namespace cache;
 flat_mutation_reader
 row_cache::create_underlying_reader(read_context& ctx, mutation_source& src, const dht::partition_range& pr) {
     ctx.on_underlying_created();
-    return src.make_reader(_schema, pr, ctx.slice(), ctx.pc(), ctx.trace_state(), streamed_mutation::forwarding::yes);
+    return src.make_reader(_schema, pr, ctx.slice(), ctx.pc(), ctx.trace_state(), streamed_mutation::forwarding::yes,
+        mutation_reader::forwarding(ctx.is_range_query() || ctx.fwd_mr()));
 }
 
 cache_tracker::cache_tracker()
@@ -330,13 +331,7 @@ public:
 };
 
 future<> read_context::create_underlying(bool skip_first_fragment, db::timeout_clock::time_point timeout) {
-    if (_range_query) {
-        // FIXME: Singular-range mutation readers don't support fast_forward_to(), so need to use a wide range
-        // here in case the same reader will need to be fast forwarded later.
-        _sm_range = dht::partition_range({dht::ring_position(*_key)}, {dht::ring_position(*_key)});
-    } else {
-        _sm_range = dht::partition_range::make_singular({dht::ring_position(*_key)});
-    }
+    _sm_range = dht::partition_range::make_singular({dht::ring_position(*_key)});
     return _underlying.fast_forward_to(std::move(_sm_range), *_underlying_snapshot, _phase, timeout).then([this, skip_first_fragment, timeout] {
         _underlying_snapshot = {};
         if (skip_first_fragment) {
