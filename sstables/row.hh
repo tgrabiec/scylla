@@ -1460,11 +1460,10 @@ public:
         // If reading a partial row (i.e., when we have a clustering row
         // filter and using a promoted index), we may be in FLAGS or FLAGS_2
         // state instead of PARTITION_START.
-        if (_state == state::FLAGS || _state == state::FLAGS_2) {
+        if (_state == state::FLAGS || _state == state::FLAGS_2
+            || (_state == state::PARTITION_START && _prestate == prestate::NONE)) {
             _consumer.on_end_of_stream();
-            return;
-        }
-        if (_state != state::PARTITION_START || _prestate != prestate::NONE) {
+        } else {
             throw malformed_sstable_exception("end of input, but not end of partition");
         }
     }
