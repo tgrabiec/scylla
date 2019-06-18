@@ -812,6 +812,8 @@ class mp_row_consumer_m : public consumer_m {
     mp_row_consumer_reader* _reader;
     schema_ptr _schema;
     const query::partition_slice& _slice;
+    // Disengaged means that partition end was consumed.
+    // push_ready_fragments() will signal end-of-stream until this is engaged again.
     std::optional<mutation_fragment_filter> _mf_filter;
 
     std::optional<new_mutation> _mutation;
@@ -980,7 +982,12 @@ public:
     virtual ~mp_row_consumer_m() {}
 
     proceed push_ready_fragments() {
-        if (!_mf_filter || _mf_filter->out_of_range()) {
+        if (!_mf_filter) {
+            _reader->_end_of_stream = true;
+            return proceed::no;
+        }
+
+        if (_mf_filter->out_of_range()) {
             _reader->on_out_of_clustering_range();
             return proceed::no;
         }
