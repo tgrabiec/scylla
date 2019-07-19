@@ -744,6 +744,7 @@ public:
     val(view_building, bool, true, Used, "Enable view building; should only be set to false when the node is experience issues due to view building") \
     val(enable_sstables_mc_format, bool, false, Used, "Enable SSTables 'mc' format to be used as the default file format") \
     val(fake_mc, bool, false, Used, "Allow a node that does not use MC to join MC cluster") \
+    val(abort_on_internal_error, bool, false, Used, "Abort the node instead of throwing an exception when internal invariants are violated") \
     /* done! */
 
 #define _make_value_member(name, type, deflt, status, desc, ...)    \

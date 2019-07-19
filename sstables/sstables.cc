@@ -2077,11 +2077,21 @@ stop_iteration components_writer::consume_end_of_partition() {
         _first_key = *_partition_key;
     }
     _last_key = std::move(*_partition_key);
-
+    _partition_key = std::experimental::nullopt;
     return get_offset() < _max_sstable_size ? stop_iteration::no : stop_iteration::yes;
 }
 
 void components_writer::consume_end_of_stream() {
+    if (_partition_key) {
+        auto& config = service::get_local_storage_service().db().local().get_config();
+        sstlog.error("Mutation stream ends but partition not closed, aborting sstable write: {}", _sst.get_filename());
+        if (config.abort_on_internal_error()) {
+            sstlog.error("Mutation stream ends but partition not closed, aborting sstable write: {}", _sst.get_filename());
+            abort();
+        } else {
+            throw std::runtime_error(fmt::format("Mutation stream ends but partition not closed, aborting sstable write: {}", _sst.get_filename()));
+        }
+    }
     // what if there is only one partition? what if it is empty?
     seal_summary(_sst._components->summary, std::move(_first_key), std::move(_last_key), _index_sampling_state);
 
