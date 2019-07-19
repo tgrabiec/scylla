@@ -91,7 +91,8 @@ logging::logger dblog("database");
 namespace {
 
 sstables::sstable::version_types get_highest_supported_format() {
-    if (service::get_local_storage_service().cluster_supports_mc_sstable()) {
+    auto& config = service::get_local_storage_service().db().local().get_config();
+    if (service::get_local_storage_service().cluster_supports_mc_sstable() && !config.fake_mc()) {
         return sstables::sstable::version_types::mc;
     } else if (service::get_local_storage_service().cluster_supports_la_sstable()) {
         return sstables::sstable::version_types::la;

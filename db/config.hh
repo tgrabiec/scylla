@@ -743,6 +743,7 @@ public:
     val(cpu_scheduler, bool, true, Used, "Enable cpu scheduling") \
     val(view_building, bool, true, Used, "Enable view building; should only be set to false when the node is experience issues due to view building") \
     val(enable_sstables_mc_format, bool, false, Used, "Enable SSTables 'mc' format to be used as the default file format") \
+    val(fake_mc, bool, false, Used, "Allow a node that does not use MC to join MC cluster") \
     /* done! */
 
 #define _make_value_member(name, type, deflt, status, desc, ...)    \

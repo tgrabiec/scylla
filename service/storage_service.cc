@@ -252,7 +252,7 @@ sstring storage_service::get_config_supported_features() {
         CORRECT_STATIC_COMPACT_IN_MC,
     };
     auto& config = service::get_local_storage_service()._db.local().get_config();
-    if (config.enable_sstables_mc_format()) {
+    if (config.enable_sstables_mc_format() || config.fake_mc()) {
         features.push_back(MC_SSTABLE_FEATURE);
     }
     if (config.experimental()) {
