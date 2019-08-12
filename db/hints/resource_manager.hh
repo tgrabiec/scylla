@@ -53,6 +53,12 @@ private:
     using ep_key_type = gms::inet_address;
     static const std::chrono::seconds _watchdog_period;
 
+    enum class state {
+        stopping,               // stop() was called
+    };
+
+    using state_set = enum_set<super_enum<state, state::stopping>>;
+
     struct manager_hash {
         size_t operator()(const manager& manager) const {
             return reinterpret_cast<uintptr_t>(&manager);
@@ -63,6 +69,14 @@ private:
             return std::addressof(m1.get()) == std::addressof(m2.get());
         }
     };
+
+    void set_stopping() noexcept {
+        _state.set(state::stopping);
+    }
+
+    bool stopping() const noexcept {
+        return _state.contains(state::stopping);
+    }
 
 public:
 
@@ -82,6 +96,7 @@ private:
     future<> _started = make_ready_future<>();
     seastar::abort_source _as;
     int _files_count = 0;
+    state_set _state;
 
 public:
     space_watchdog(shard_managers_set& managers, per_device_limits_map& per_device_limits_map);

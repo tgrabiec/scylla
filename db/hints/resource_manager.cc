@@ -81,10 +81,17 @@ void space_watchdog::start() {
             }
             seastar::sleep_abortable(_watchdog_period, _as).get();
         }
-    }).handle_exception_type([] (const seastar::sleep_aborted& ignored) { });
+    }).handle_exception_type([] (const seastar::sleep_aborted& ignored) { }).finally([] {
+        resource_manager_logger.info("space_watchdog stopped");
+    });
 }
 
 future<> space_watchdog::stop() noexcept {
+    resource_manager_logger.info("Stopping a space_watchdog");
+    set_stopping();
+    for (manager& shard_manager : _shard_managers) {
+        shard_manager.forbid_hints();
+    }
     _as.request_abort();
     return std::move(_started);
 }
@@ -155,8 +162,13 @@ void space_watchdog::on_timer() {
         }
 
         resource_manager_logger.trace("space_watchdog: consuming {}/{} bytes", _total_size, adjusted_quota);
-        for (manager& shard_manager : per_device_limits.managers) {
-            shard_manager.update_backlog(_total_size, adjusted_quota);
+        // manager::update_backlog(...) may re-enable hints.
+        // Allow re-enabling hints only if we are not stopping().
+        // If we are stopping() hints (storing) should have been disabled for all destinations.
+        if (!stopping()) {
+            for (manager& shard_manager : per_device_limits.managers) {
+                shard_manager.update_backlog(_total_size, adjusted_quota);
+            }
         }
     }
 }
@@ -176,10 +188,10 @@ void resource_manager::allow_replaying() noexcept {
 }
 
 future<> resource_manager::stop() noexcept {
-    return parallel_for_each(_shard_managers, [](manager& m) {
-        return m.stop();
-    }).finally([this]() {
-        return _space_watchdog.stop();
+    return _space_watchdog.stop().finally([this] {
+        return parallel_for_each(_shard_managers, [] (manager& m) {
+            return m.stop();
+        });
     });
 }
 
