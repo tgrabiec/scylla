@@ -120,7 +120,7 @@ future<> manager::stop() {
     return _draining_eps_gate.close().finally([this] {
         return parallel_for_each(_ep_managers, [] (auto& pair) {
                 return pair.second.stop();
-            }).finally([this] {
+        }).finally([this] {
             _ep_managers.clear();
             manager_logger.info("Stopped");
         }).discard_result();
