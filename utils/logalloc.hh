@@ -603,6 +603,9 @@ public:
     // Doesn't invalidate references to allocated objects.
     void merge(region& other) noexcept;
 
+    // Moves this region to under a given region group.
+    void set_group(region_group&) noexcept;
+
     // Compacts everything. Mainly for testing.
     // Invalidates references to allocated objects.
     void full_compaction();

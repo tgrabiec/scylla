@@ -1516,6 +1516,14 @@ public:
         other._sanitizer = { };
     }
 
+    void set_group(region_group& dst) noexcept {
+        if (_group) {
+            _group->del(this);
+        }
+        dst.add(this);
+        _group = &dst;
+    }
+
     // Returns occupancy of the sparsest compactible segment.
     occupancy_stats min_occupancy() const {
         if (_segment_descs.empty()) {
@@ -1728,6 +1736,10 @@ void region::merge(region& other) noexcept {
         get_impl().merge(other.get_impl());
         other._impl = _impl;
     }
+}
+
+void region::set_group(region_group& gr) noexcept {
+    get_impl().set_group(gr);
 }
 
 void region::full_compaction() {

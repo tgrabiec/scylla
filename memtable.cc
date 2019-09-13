@@ -496,13 +496,21 @@ void memtable::revert_flushed_memory() noexcept {
 
 class flush_memory_accounter {
     memtable& _mt;
+    bool _second_flush;
 public:
     void update_bytes_read(uint64_t delta) {
+        if (_second_flush) {
+            // When previous flush failed and we're retrying, we should not subtract from dirty
+            // because we would be subtracting in total more than the memtable occupied before it
+            // started flushing.
+            return;
+        }
         _mt.add_flushed_memory(delta);
     }
     explicit flush_memory_accounter(memtable& mt)
         : _mt(mt)
-	{}
+        , _second_flush(mt._flushed_memory > 0)
+    {}
     ~flush_memory_accounter() {
         assert(_mt._flushed_memory <= _mt.occupancy().used_space());
     }

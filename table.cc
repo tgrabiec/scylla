@@ -736,16 +736,23 @@ public:
 
 // Handles all tasks related to sstable writing: permit management, compaction backlog updates, etc
 class database_sstable_write_monitor : public permit_monitor, public backlog_write_progress_manager {
+    shared_memtable _memtable;
     sstables::shared_sstable _sst;
     compaction_manager& _compaction_manager;
     sstables::compaction_strategy& _compaction_strategy;
     const sstables::writer_offset_tracker* _tracker = nullptr;
     uint64_t _progress_seen = 0;
     api::timestamp_type _maximum_timestamp;
+private:
+    void move_memtable_to_real_dirty_group() {
+        _memtable->revert_flushed_memory();
+        _memtable->region().set_group(_memtable->get_dirty_memory_manager().real_dirty_region_group());
+    }
 public:
-    database_sstable_write_monitor(sstable_write_permit&& permit, sstables::shared_sstable sst, compaction_manager& manager,
+    database_sstable_write_monitor(shared_memtable mt, sstable_write_permit&& permit, sstables::shared_sstable sst, compaction_manager& manager,
                                    sstables::compaction_strategy& strategy, api::timestamp_type max_timestamp)
             : permit_monitor(std::move(permit))
+            , _memtable(std::move(mt))
             , _sst(std::move(sst))
             , _compaction_manager(manager)
             , _compaction_strategy(strategy)
@@ -759,12 +766,15 @@ public:
 
     virtual void on_data_write_completed() override {
         permit_monitor::on_data_write_completed();
+        move_memtable_to_real_dirty_group();
         _progress_seen = _tracker->offset;
         _tracker = nullptr;
+
     }
 
     void write_failed() {
         _compaction_strategy.get_backlog_tracker().revert_charges(_sst);
+        move_memtable_to_real_dirty_group();
     }
 
     virtual uint64_t written() const override {
@@ -813,7 +823,7 @@ table::seal_active_streaming_memtable_immediate(flush_permit&& permit) {
             // Lastly, we don't have any commitlog RP to update, and we don't need to deal manipulate the
             // memtable list, since this memtable was not available for reading up until this point.
             auto fp = permit.release_sstable_write_permit();
-            database_sstable_write_monitor monitor(std::move(fp), newtab, _compaction_manager, _compaction_strategy, old->get_max_timestamp());
+            database_sstable_write_monitor monitor(old, std::move(fp), newtab, _compaction_manager, _compaction_strategy, old->get_max_timestamp());
             return do_with(std::move(monitor), [this, newtab, old, permit = std::move(permit)] (auto& monitor) mutable {
                 auto&& priority = service::get_local_streaming_write_priority();
                 return write_memtable_to_sstable(*old, newtab, monitor, incremental_backups_enabled(), priority, false).then([this, newtab, old] {
@@ -862,7 +872,7 @@ future<> table::seal_active_streaming_memtable_big(streaming_memtable_big& smb, 
                 newtab->set_unshared();
 
                 auto fp = permit.release_sstable_write_permit();
-                auto monitor = std::make_unique<database_sstable_write_monitor>(std::move(fp), newtab, _compaction_manager, _compaction_strategy, old->get_max_timestamp());
+                auto monitor = std::make_unique<database_sstable_write_monitor>(old, std::move(fp), newtab, _compaction_manager, _compaction_strategy, old->get_max_timestamp());
                 auto&& priority = service::get_local_streaming_write_priority();
                 auto fut = write_memtable_to_sstable(*old, newtab, *monitor, incremental_backups_enabled(), priority, true);
                 return fut.then_wrapped([this, newtab, old, &smb, permit = std::move(permit), monitor = std::move(monitor)] (future<> f) mutable {
@@ -957,7 +967,7 @@ table::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old, sstable_write_
     //
     // The code as is guarantees that we'll never partially backup a
     // single sstable, so that is enough of a guarantee.
-    database_sstable_write_monitor monitor(std::move(permit), newtab, _compaction_manager, _compaction_strategy, old->get_max_timestamp());
+    database_sstable_write_monitor monitor(old, std::move(permit), newtab, _compaction_manager, _compaction_strategy, old->get_max_timestamp());
     return do_with(std::move(monitor), [this, old, newtab] (auto& monitor) {
         auto&& priority = service::get_local_memtable_flush_priority();
         auto f = write_memtable_to_sstable(*old, newtab, monitor, incremental_backups_enabled(), priority, false);
@@ -981,9 +991,6 @@ table::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old, sstable_write_
                 newtab->mark_for_deletion();
                 _config.cf_stats->failed_memtables_flushes_count++;
                 tlogger.error("failed to write sstable {}: {}", newtab->get_filename(), e);
-                // If we failed this write we will try the write again and that will create a new flush reader
-                // that will decrease dirty memory again. So we need to reset the accounting.
-                old->revert_flushed_memory();
                 return stop_iteration(_async_gate.is_closed());
             });
         });
