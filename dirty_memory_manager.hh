@@ -175,6 +175,10 @@ public:
         return _virtual_region_group;
     }
 
+    logalloc::region_group& real_dirty_region_group() {
+        return _real_region_group;
+    }
+
     const logalloc::region_group& region_group() const {
         return _virtual_region_group;
     }
