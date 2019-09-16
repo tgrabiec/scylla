@@ -30,6 +30,7 @@ debian_base_packages=(
     thrift-compiler
     git
     pigz
+    rapidjson-dev
 )
 
 fedora_packages=(
@@ -70,6 +71,7 @@ fedora_packages=(
     util-linux
     ethtool
     hwloc
+    rapidjson-devel
 )
 
 centos_packages=(

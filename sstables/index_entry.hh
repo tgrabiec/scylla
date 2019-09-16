@@ -113,7 +113,7 @@ public:
 
 };
 
-using promoted_index_blocks = seastar::circular_buffer<promoted_index_block>;
+using promoted_index_blocks = seastar::chunked_fifo<promoted_index_block>;
 
 inline void erase_all_but_last_two(promoted_index_blocks& pi_blocks) {
     while (pi_blocks.size() > 2) {

@@ -1416,7 +1416,9 @@ future<> sstable::load(sstables::foreign_sstable_open_info info) {
         validate_min_max_metadata();
         validate_max_local_deletion_time();
         validate_partitioner();
-        return update_info_for_opened_data();
+        return update_info_for_opened_data().then([this] {
+            _open = true;
+        });
     });
 }
 

@@ -432,7 +432,7 @@ def list_unordered_map(map, cache=True):
     kt = map.type.template_argument(0)
     vt = map.type.template_argument(1)
     value_type = gdb.lookup_type('::std::pair<{} const, {} >'.format(str(kt), str(vt)))
-    hashnode_ptr_type = gdb.lookup_type('::std::__detail::_Hash_node<' + value_type.name + ', ' + ('false', 'true')[cache] + '>').pointer()
+    hashnode_ptr_type = gdb.lookup_type('::std::__detail::_Hash_node<' + str(value_type) + ', ' + ('false', 'true')[cache] + '>').pointer()
     h = map['_M_h']
     p = h['_M_before_begin']['_M_nxt']
     while p:
@@ -546,6 +546,7 @@ class scylla_task_histogram(gdb.Command):
                 obj_addr = span.start + idx2 * objsize
                 addr = gdb.Value(obj_addr).reinterpret_cast(vptr_type).dereference()
                 if addr >= text_start and addr <= text_end:
+                    gdb.write("0x%x\n" % obj_addr)
                     vptr_count[int(addr)] += 1
             if scanned_pages >= limit or len(vptr_count) >= limit:
                 break
@@ -721,6 +722,9 @@ class lsa_region():
     def used(self):
         return self.total() - self.free()
 
+    def evictable(self):
+        return self.region['_evictable_space'] if self.region['_evictable_space_mask'] else 0
+
 
 class dirty_mem_mgr():
     def __init__(self, ref):
@@ -810,7 +814,7 @@ def spans():
     page_size = int(gdb.parse_and_eval('\'seastar::memory::page_size\''))
     nr_pages = int(cpu_mem['nr_pages'])
     pages = cpu_mem['pages']
-    mem_start = int(cpu_mem['memory'])
+    mem_start = long(cpu_mem['memory'])
     idx = 1
     while idx < nr_pages:
         page = pages[idx]
@@ -1172,7 +1176,7 @@ def get_seastar_memory_start_and_size():
     cpu_mem = gdb.parse_and_eval('\'seastar::memory::cpu_mem\'')
     page_size = int(gdb.parse_and_eval('\'seastar::memory::page_size\''))
     total_mem = int(cpu_mem['nr_pages']) * page_size
-    start = int(cpu_mem['memory'])
+    start = long(cpu_mem['memory'])
     return start, total_mem
 
 
@@ -2368,7 +2372,8 @@ class scylla_memtables(gdb.Command):
             for mt_ptr in std_vector(memtable_list['_memtables']):
                 mt = seastar_lw_shared_ptr(mt_ptr).get()
                 reg = lsa_region(mt.cast(region_ptr_type))
-                gdb.write('  (memtable*) 0x%x: total=%d, used=%d, free=%d, flushed=%d\n' % (mt, reg.total(), reg.used(), reg.free(), mt['_flushed_memory']))
+                gdb.write('  (memtable*) 0x%x: total=%d, used=%d, free=%d, evictable=%d, flushed=%d\n' % (
+                    mt, reg.total(), reg.used(), reg.free(), reg.evictable(), mt['_flushed_memory']))
 
 
 scylla()

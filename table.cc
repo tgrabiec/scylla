@@ -976,6 +976,9 @@ table::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old, sstable_write_
         // priority inversion.
         return with_scheduling_group(default_scheduling_group(), [this, &monitor, old = std::move(old), newtab = std::move(newtab), f = std::move(f)] () mutable {
             return f.then([this, newtab, old, &monitor] {
+                //if (old->schema()->ks_name() == "keyspace1") {
+                //    throw std::runtime_error("asd");
+                //}
                 return newtab->open_data().then([this, old, newtab] () {
                     tlogger.debug("Flushing to {} done", newtab->get_filename());
                     return with_scheduling_group(_config.memtable_to_cache_scheduling_group, [this, old, newtab] {
