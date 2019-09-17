@@ -1369,9 +1369,8 @@ future<> dirty_memory_manager::flush_when_needed() {
                 // SSTables.
                 memtable& candidate_memtable = memtable::from_region(*(this->_virtual_region_group.get_largest_region()));
                 memtable_list& mtlist = *(candidate_memtable.get_memtable_list());
-                bool flushable = !candidate_memtable.empty() && &candidate_memtable == &mtlist.active_memtable();
 
-                if (!flushable) {
+                if (!candidate_memtable.region().evictable_occupancy()) {
                     // Soft pressure, but nothing to flush. It could be due to fsync, memtable_to_cache lagging,
                     // or candidate_memtable failed to flush.
                     // Back off to avoid OOMing with flush continuations.
