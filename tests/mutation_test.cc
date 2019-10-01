@@ -1794,10 +1794,10 @@ SEASTAR_THREAD_TEST_CASE(test_row_size_is_immune_to_application_order) {
 
     auto value = utf8_type->decompose(data_value("value"));
 
-    row r1;
+    row r1(*s);
     r1.append_cell(7, make_atomic_cell(value));
 
-    row r2;
+    row r2(*s);
     r2.append_cell(8, make_atomic_cell(value));
 
     auto size1 = [&] {

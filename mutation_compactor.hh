@@ -82,7 +82,8 @@ class mutation_compactor_garbage_collector : public compaction_garbage_collector
 
 public:
     explicit mutation_compactor_garbage_collector(const schema& schema)
-        : _schema(schema) {
+        : _schema(schema)
+        , _row(schema) {
     }
     void start_collecting_static_row() {
         _kind = column_kind::static_column;
@@ -111,7 +112,7 @@ public:
     void consume_static_row(Consumer&& consumer) {
         if (!_row.empty()) {
             consumer(static_row(std::move(_row)));
-            _row = {};
+            _row = row(_schema);
         }
     }
     template <typename Consumer>
@@ -121,7 +122,7 @@ public:
             _ckey.reset();
             _tomb = {};
             _marker = {};
-            _row = {};
+            _row = row(_schema);
         }
     }
 };

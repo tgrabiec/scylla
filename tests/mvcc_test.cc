@@ -518,7 +518,7 @@ SEASTAR_TEST_CASE(test_apply_to_incomplete_respects_continuity) {
 
                 auto expected_to_apply_slice = mutation_partition(*s, to_apply.partition());
                 if (!before.static_row_continuous()) {
-                    expected_to_apply_slice.static_row() = {};
+                    expected_to_apply_slice.static_row() = row(*s);
                 }
 
                 auto expected = mutation_partition(*s, before);

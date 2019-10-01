@@ -128,7 +128,7 @@ class compaction_garbage_collector;
 //
 // Can be used as a range of row::cell_entry.
 //
-class row {
+class row : public schema_dependent {
 
     class cell_entry {
         boost::intrusive::set_member_hook<> _link;
@@ -207,7 +207,9 @@ private:
         vector_storage vector;
     } _storage;
 public:
-    row();
+    struct copy_schema_tag {};
+    row(copy_schema_tag, const schema_dependent& o);
+    row(const schema&);
     ~row();
     row(const schema&, column_kind, const row&);
     row(row&& other) noexcept;
@@ -686,7 +688,7 @@ class deletable_row final {
     row_marker _marker;
     row _cells;
 public:
-    deletable_row() {}
+    deletable_row(const schema& s) : _cells(s) {}
     explicit deletable_row(clustering_row&&);
     deletable_row(const schema& s, const deletable_row& other)
         : _deleted_at(other._deleted_at)
@@ -751,7 +753,7 @@ public:
 
 class cache_tracker;
 
-class rows_entry {
+class rows_entry : public schema_dependent {
     using lru_link_type = bi::list_member_hook<bi::link_mode<bi::auto_unlink>>;
     friend class cache_tracker;
     friend class size_calculator;
@@ -773,14 +775,20 @@ class rows_entry {
     friend class mutation_partition;
 public:
     struct last_dummy_tag {};
-    explicit rows_entry(clustering_key&& key)
-        : _key(std::move(key))
+    explicit rows_entry(const schema& s, clustering_key&& key)
+        : schema_dependent(s)
+        , _key(std::move(key))
+        , _row(s)
     { }
-    explicit rows_entry(const clustering_key& key)
-        : _key(key)
+    explicit rows_entry(const schema& s, const clustering_key& key)
+        : schema_dependent(s)
+        , _key(key)
+        , _row(s)
     { }
     rows_entry(const schema& s, position_in_partition_view pos, is_dummy dummy, is_continuous continuous)
-        : _key(pos.key())
+        : schema_dependent(s)
+        , _key(pos.key())
+        , _row(s)
     {
         _flags._last_dummy = bool(dummy) && pos.is_after_all_clustered_rows(s);
         _flags._dummy = bool(dummy);
@@ -791,19 +799,26 @@ public:
     rows_entry(const schema& s, last_dummy_tag, is_continuous continuous)
         : rows_entry(s, position_in_partition_view::after_all_clustered_rows(), is_dummy::yes, continuous)
     { }
-    rows_entry(const clustering_key& key, deletable_row&& row)
-        : _key(key), _row(std::move(row))
+    rows_entry(const schema& s, const clustering_key& key, deletable_row&& row)
+        : schema_dependent(s)
+        , _key(key)
+        , _row(std::move(row))
     { }
     rows_entry(const schema& s, const clustering_key& key, const deletable_row& row)
-        : _key(key), _row(s, row)
+        : schema_dependent(s)
+        , _key(key)
+        , _row(s, row)
     { }
     rows_entry(const schema& s, const clustering_key& key, row_tombstone tomb, const row_marker& marker, const row& row)
-        : _key(key), _row(s, tomb, marker, row)
+        : schema_dependent(s)
+        , _key(key)
+        , _row(s, tomb, marker, row)
     { }
     rows_entry(rows_entry&& o) noexcept;
     rows_entry(const schema& s, const rows_entry& e)
-        : _key(e._key)
-        , _row(s, e._row)
+        : schema_dependent(s)
+        , _key(e._key)
+        , _row(e.check_schema(s), e._row)
         , _flags(e._flags)
     { }
     // Valid only if !dummy()
@@ -835,6 +850,8 @@ public:
         _row.apply(t);
     }
     void apply_monotonically(const schema& s, rows_entry&& e) {
+        e.check_schema(s);
+        check_schema(s);
         _row.apply(s, std::move(e._row));
     }
     bool empty() const {
@@ -972,11 +989,13 @@ public:
     }
     mutation_partition(schema_ptr s)
         : schema_dependent(*s)
+        , _static_row(*s)
         , _rows()
         , _row_tombstones(*s)
     { }
     mutation_partition(mutation_partition& other, copy_comparators_only)
         : schema_dependent(other)
+        , _static_row(row::copy_schema_tag(), other)
         , _rows()
         , _row_tombstones(other._row_tombstones, range_tombstone_list::copy_comparator_only())
     { }

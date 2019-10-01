@@ -158,11 +158,11 @@ SEASTAR_TEST_CASE(test_range_tombstones_stream) {
         auto rt3 = range_tombstone(create_ck({ 1, 1 }), t0,  bound_kind::incl_start, create_ck({ 2 }), bound_kind::incl_end);
         auto rt4 = range_tombstone(create_ck({ 2 }), t0, bound_kind::incl_start, create_ck({ 2, 2 }), bound_kind::incl_end);
 
-        mutation_fragment cr1 = clustering_row(create_ck({ 0, 0 }));
-        mutation_fragment cr2 = clustering_row(create_ck({ 1, 0 }));
-        mutation_fragment cr3 = clustering_row(create_ck({ 1, 1 }));
-        auto cr4 = rows_entry(create_ck({ 1, 2 }));
-        auto cr5 = rows_entry(create_ck({ 1, 3 }));
+        mutation_fragment cr1 = clustering_row(*s, create_ck({ 0, 0 }));
+        mutation_fragment cr2 = clustering_row(*s, create_ck({ 1, 0 }));
+        mutation_fragment cr3 = clustering_row(*s, create_ck({ 1, 1 }));
+        auto cr4 = rows_entry(*s, create_ck({ 1, 2 }));
+        auto cr5 = rows_entry(*s, create_ck({ 1, 3 }));
 
         range_tombstone_stream rts(*s);
         rts.apply(range_tombstone(rt1));

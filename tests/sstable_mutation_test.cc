@@ -867,7 +867,7 @@ SEASTAR_THREAD_TEST_CASE(buffer_overflow) {
     r.set_max_buffer_size(std::max(
                 mutation_fragment(partition_start(dk1, tomb)).memory_usage(*s)
                     + mutation_fragment(range_tombstone(rt1)).memory_usage(*s),
-                mutation_fragment(clustering_row(ck1)).memory_usage(*s)));
+                mutation_fragment(clustering_row(*s, ck1)).memory_usage(*s)));
     flat_reader_assertions rd(std::move(r));
     rd.produces_partition_start(dk1)
         .produces_range_tombstone(rt1)
