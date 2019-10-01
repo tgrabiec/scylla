@@ -106,6 +106,7 @@ public:
     }
 
     std::pair<sstring, api::timestamp_type> get_value(const clustering_row& row) {
+        row.cells().check_schema(*_s);
         auto cell = row.cells().find_cell(_v_def.id);
         if (!cell) {
             throw std::runtime_error("cell not found");
@@ -118,14 +119,14 @@ public:
     }
 
     mutation_fragment make_row(const clustering_key& key, sstring v) {
-        auto row = clustering_row(key);
+        auto row = clustering_row(*_s, key);
         row.cells().apply(*_s->get_column_definition(to_bytes(sstring("v"))),
             atomic_cell::make_live(*_v_def.type, new_timestamp(), data_value(v).serialize()));
         return mutation_fragment(std::move(row));
     }
 
     mutation_fragment make_row_from_serialized_value(const clustering_key& key, bytes_view v) {
-        auto row = clustering_row(key);
+        auto row = clustering_row(*_s, key);
         row.cells().apply(_v_def, atomic_cell::make_live(*_v_def.type, new_timestamp(), v));
         return mutation_fragment(std::move(row));
     }

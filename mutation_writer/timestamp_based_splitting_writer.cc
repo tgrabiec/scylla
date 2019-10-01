@@ -112,6 +112,11 @@ small_flat_map<Key, Value, Size, ValueConstructor>::find(const key_type& k) {
     return end();
 }
 
+struct row_ctor {
+    const schema& s;
+    row operator()() { return row(s); }
+};
+
 } // anonymous namespace
 
 class timestamp_based_splitting_mutation_writer {
@@ -168,7 +173,7 @@ private:
     std::optional<bucket_id> examine_static_row(const static_row& sr);
     std::optional<bucket_id> examine_clustering_row(const clustering_row& cr);
     small_flat_map<bucket_id, atomic_cell_or_collection, 4> split_collection(atomic_cell_or_collection&& collection, const column_definition& cdef);
-    small_flat_map<bucket_id, row, 4> split_row(column_kind kind, row&& r);
+    small_flat_map<bucket_id, row, 4, row_ctor> split_row(column_kind kind, row&& r);
     small_flat_map<bucket_id, static_row, 4> split_static_row(static_row&& sr);
     small_flat_map<bucket_id, clustering_row, 4> split_clustering_row(clustering_row&& cr);
     future<> write_marker_and_tombstone(const clustering_row& cr);
@@ -335,10 +340,11 @@ timestamp_based_splitting_mutation_writer::split_collection(atomic_cell_or_colle
     return pieces_by_bucket;
 }
 
-small_flat_map<timestamp_based_splitting_mutation_writer::bucket_id, row, 4>
+small_flat_map<timestamp_based_splitting_mutation_writer::bucket_id, row, 4, row_ctor>
 timestamp_based_splitting_mutation_writer::split_row(column_kind kind, row&& r) {
-    small_flat_map<bucket_id, row, 4> rows_by_bucket;
+    small_flat_map<bucket_id, row, 4, row_ctor> rows_by_bucket(row_ctor{*_schema});
 
+    r.check_schema(*_schema);
     r.for_each_cell([&, this, kind] (column_id id, atomic_cell_or_collection& cell) {
         const auto& cdef = _schema->column_at(kind, id);
         if (cdef.type->is_atomic()) {
@@ -379,7 +385,7 @@ timestamp_based_splitting_mutation_writer::split_clustering_row(clustering_row&&
         if (auto it = clustering_rows_by_bucket.find(marker_bucket_id); it != clustering_rows_by_bucket.end()) {
             it->second.apply(cr.marker());
         } else {
-            clustering_rows_by_bucket.emplace(marker_bucket_id, clustering_row(cr.key(), {}, cr.marker(), {}));
+            clustering_rows_by_bucket.emplace(marker_bucket_id, clustering_row(cr.key(), {}, cr.marker(), row(*_schema)));
         }
     }
 
@@ -389,7 +395,7 @@ timestamp_based_splitting_mutation_writer::split_clustering_row(clustering_row&&
             it->second.apply(cr.tomb().regular());
             it->second.apply(cr.tomb().shadowable());
         } else {
-            clustering_rows_by_bucket.emplace(tomb_bucket_id, clustering_row(cr.key(), cr.tomb(), {}, {}));
+            clustering_rows_by_bucket.emplace(tomb_bucket_id, clustering_row(cr.key(), cr.tomb(), {}, row(*_schema)));
         }
     }
 
@@ -404,17 +410,17 @@ future<> timestamp_based_splitting_mutation_writer::write_marker_and_tombstone(c
     }
 
     if (marker_bucket_id == tomb_bucket_id) {
-        return write_to_bucket(*marker_bucket_id, clustering_row(cr.key(), cr.tomb(), cr.marker(), {}));
+        return write_to_bucket(*marker_bucket_id, clustering_row(cr.key(), cr.tomb(), cr.marker(), row(*_schema)));
     }
 
     auto write_marker_fut = make_ready_future<>();
     if (marker_bucket_id) {
-        write_marker_fut = write_to_bucket(*marker_bucket_id, clustering_row(cr.key(), {}, cr.marker(), {}));
+        write_marker_fut = write_to_bucket(*marker_bucket_id, clustering_row(cr.key(), {}, cr.marker(), row(*_schema)));
     }
 
     auto write_tomb_fut = make_ready_future<>();
     if (tomb_bucket_id) {
-        write_tomb_fut = write_to_bucket(*tomb_bucket_id, clustering_row(cr.key(), cr.tomb(), {}, {}));
+        write_tomb_fut = write_to_bucket(*tomb_bucket_id, clustering_row(cr.key(), cr.tomb(), {}, row(*_schema)));
     }
     return when_all_succeed(std::move(write_marker_fut), std::move(write_tomb_fut));
 }

@@ -155,12 +155,12 @@ namespace view {
 
 bool partition_key_matches(const schema& base, const view_info& view, const dht::decorated_key& key) {
     return view.select_statement().get_restrictions()->get_partition_key_restrictions()->is_satisfied_by(
-            base, key.key(), clustering_key_prefix::make_empty(), row(), cql3::query_options({ }), gc_clock::now());
+            base, key.key(), clustering_key_prefix::make_empty(), row(base), cql3::query_options({ }), gc_clock::now());
 }
 
 bool clustering_prefix_matches(const schema& base, const view_info& view, const partition_key& key, const clustering_key_prefix& ck) {
     return view.select_statement().get_restrictions()->get_clustering_columns_restrictions()->is_satisfied_by(
-            base, key, ck, row(), cql3::query_options({ }), gc_clock::now());
+            base, key, ck, row(base), cql3::query_options({ }), gc_clock::now());
 }
 
 bool may_be_affected_by(const schema& base, const view_info& view, const dht::decorated_key& key, const rows_entry& update) {
@@ -813,7 +813,7 @@ future<stop_iteration> view_update_builder::on_results() {
                 apply_tracked_tombstones(_update_tombstone_tracker, update);
                 auto tombstone = _existing_tombstone_tracker.current_tombstone();
                 auto existing = tombstone
-                              ? std::optional<clustering_row>(std::in_place, update.key(), row_tombstone(std::move(tombstone)), row_marker(), ::row())
+                              ? std::optional<clustering_row>(std::in_place, update.key(), row_tombstone(std::move(tombstone)), row_marker(), ::row(*_schema))
                               : std::nullopt;
                 generate_update(std::move(update), std::move(existing));
             }
@@ -832,7 +832,7 @@ future<stop_iteration> view_update_builder::on_results() {
                 // tombstone, since we wouldn't have read the existing row otherwise. We don't assert that in case the
                 // read method ever changes.
                 if (tombstone) {
-                    auto update = clustering_row(existing.key(), row_tombstone(std::move(tombstone)), row_marker(), ::row());
+                    auto update = clustering_row(existing.key(), row_tombstone(std::move(tombstone)), row_marker(), ::row(*_schema));
                     generate_update(std::move(update), { std::move(existing) });
                 }
             }
@@ -857,7 +857,7 @@ future<stop_iteration> view_update_builder::on_results() {
         // We don't care if it's a range tombstone, as we're only looking for existing entries that get deleted
         if (_existing->is_clustering_row()) {
             auto existing = clustering_row(*_schema, _existing->as_clustering_row());
-            auto update = clustering_row(existing.key(), row_tombstone(std::move(tombstone)), row_marker(), ::row());
+            auto update = clustering_row(existing.key(), row_tombstone(std::move(tombstone)), row_marker(), ::row(*_schema));
             generate_update(std::move(update), { std::move(existing) });
         }
         return advance_existings();

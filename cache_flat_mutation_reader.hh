@@ -339,7 +339,7 @@ future<> cache_flat_mutation_reader::read_from_underlying(db::timeout_clock::tim
                         if (query::is_single_row(*_schema, *_ck_ranges_curr)) {
                             with_allocator(_snp->region().allocator(), [&] {
                                 auto e = alloc_strategy_unique_ptr<rows_entry>(
-                                    current_allocator().construct<rows_entry>(_ck_ranges_curr->start()->value()));
+                                    current_allocator().construct<rows_entry>(*_schema, _ck_ranges_curr->start()->value()));
                                 // Use _next_row iterator only as a hint, because there could be insertions after _upper_bound.
                                 auto insert_result = rows.insert_check(_next_row.get_iterator_in_latest_version(), *e, less);
                                 auto inserted = insert_result.second;
