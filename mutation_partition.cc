@@ -141,18 +141,14 @@ struct reversal_traits<true> {
 };
 
 mutation_partition::mutation_partition(const schema& s, const mutation_partition& x)
-        : _tombstone(x._tombstone)
+        : schema_dependent(s)
+        , _tombstone(x._tombstone)
         , _static_row(s, column_kind::static_column, x._static_row)
         , _static_row_continuous(x._static_row_continuous)
         , _rows()
         , _row_tombstones(x._row_tombstones)
-#ifdef DEBUG_SCHEMA
-        , _schema_version(s.version())
-#endif
 {
-#ifdef DEBUG_SCHEMA
-    assert(x._schema_version == _schema_version);
-#endif
+    x.check_schema(s);
     auto cloner = [&s] (const auto& x) {
         return current_allocator().construct<rows_entry>(s, x);
     };
@@ -161,18 +157,14 @@ mutation_partition::mutation_partition(const schema& s, const mutation_partition
 
 mutation_partition::mutation_partition(const mutation_partition& x, const schema& schema,
         query::clustering_key_filter_ranges ck_ranges)
-        : _tombstone(x._tombstone)
+        : schema_dependent(schema)
+        , _tombstone(x._tombstone)
         , _static_row(schema, column_kind::static_column, x._static_row)
         , _static_row_continuous(x._static_row_continuous)
         , _rows()
         , _row_tombstones(x._row_tombstones, range_tombstone_list::copy_comparator_only())
-#ifdef DEBUG_SCHEMA
-        , _schema_version(schema.version())
-#endif
 {
-#ifdef DEBUG_SCHEMA
-    assert(x._schema_version == _schema_version);
-#endif
+    x.check_schema(schema);
     try {
         for(auto&& r : ck_ranges) {
             for (const rows_entry& e : x.range(schema, r)) {
@@ -190,18 +182,14 @@ mutation_partition::mutation_partition(const mutation_partition& x, const schema
 
 mutation_partition::mutation_partition(mutation_partition&& x, const schema& schema,
     query::clustering_key_filter_ranges ck_ranges)
-    : _tombstone(x._tombstone)
+    : schema_dependent(schema)
+    , _tombstone(x._tombstone)
     , _static_row(std::move(x._static_row))
     , _static_row_continuous(x._static_row_continuous)
     , _rows(std::move(x._rows))
     , _row_tombstones(std::move(x._row_tombstones))
-#ifdef DEBUG_SCHEMA
-    , _schema_version(schema.version())
-#endif
 {
-#ifdef DEBUG_SCHEMA
-    assert(x._schema_version == _schema_version);
-#endif
+    x.check_schema(schema);
     {
         auto deleter = current_deleter<rows_entry>();
         auto it = _rows.begin();
@@ -304,10 +292,8 @@ mutation_partition::apply(const schema& s, const mutation_fragment& mf) {
 }
 
 stop_iteration mutation_partition::apply_monotonically(const schema& s, mutation_partition&& p, cache_tracker* tracker, is_preemptible preemptible) {
-#ifdef DEBUG_SCHEMA
-    assert(s.version() == _schema_version);
-    assert(p._schema_version == _schema_version);
-#endif
+    check_schema(s);
+    p.check_schema(s);
     _tombstone.apply(p._tombstone);
     _static_row.apply_monotonically(s, column_kind::static_column, std::move(p._static_row));
     _static_row_continuous |= p._static_row_continuous;
@@ -1095,10 +1081,8 @@ bool mutation_partition::equal(const schema& s, const mutation_partition& p) con
 }
 
 bool mutation_partition::equal(const schema& this_schema, const mutation_partition& p, const schema& p_schema) const {
-#ifdef DEBUG_SCHEMA
-    assert(_schema_version == this_schema.version());
-    assert(p._schema_version == p_schema.version());
-#endif
+    check_schema(this_schema);
+    p.check_schema(p_schema);
     if (_tombstone != p._tombstone) {
         return false;
     }
@@ -2256,13 +2240,11 @@ public:
 };
 
 mutation_partition::mutation_partition(mutation_partition::incomplete_tag, const schema& s, tombstone t)
-    : _tombstone(t)
+    : schema_dependent(s)
+    , _tombstone(t)
     , _static_row_continuous(!s.has_static_columns())
     , _rows()
     , _row_tombstones(s)
-#ifdef DEBUG_SCHEMA
-    , _schema_version(s.version())
-#endif
 {
     _rows.insert_before(_rows.end(),
         *current_allocator().construct<rows_entry>(s, rows_entry::last_dummy_tag(), is_continuous::no));

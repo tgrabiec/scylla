@@ -54,6 +54,30 @@
 #define DEBUG_SCHEMA
 #endif
 
+struct schema_dependent {
+#ifdef DEBUG_SCHEMA
+    table_schema_version _schema_version;
+#endif
+
+    schema_dependent(const schema& s)
+#ifdef DEBUG_SCHEMA
+        : _schema_version(s.version())
+#endif
+    { }
+
+    schema_dependent(const schema_dependent& other)
+#ifdef DEBUG_SCHEMA
+        : _schema_version(other._schema_version)
+#endif
+    { }
+
+    void check_schema(const schema& s) const {
+#ifdef DEBUG_SCHEMA
+        assert(s.version() == _schema_version);
+#endif
+    }
+};
+
 class mutation_fragment;
 class clustering_row;
 
@@ -933,7 +957,7 @@ public:
 // The default continuity merging rules are those required by MVCC to
 // preserve its invariants. For details, refer to "Continuity merging rules" section
 // in the doc in partition_version.hh.
-class mutation_partition final {
+class mutation_partition final : public schema_dependent {
 public:
     using rows_type = intrusive_set_external_comparator<rows_entry, &rows_entry::_link>;
     friend class rows_entry;
@@ -946,9 +970,6 @@ private:
     // Contains only strict prefixes so that we don't have to lookup full keys
     // in both _row_tombstones and _rows.
     range_tombstone_list _row_tombstones;
-#ifdef DEBUG_SCHEMA
-    table_schema_version _schema_version;
-#endif
 
     friend class mutation_partition_applier;
     friend class converting_mutation_partition_applier;
@@ -961,18 +982,14 @@ public:
         return mutation_partition(incomplete_tag(), s, t);
     }
     mutation_partition(schema_ptr s)
-        : _rows()
+        : schema_dependent(*s)
+        , _rows()
         , _row_tombstones(*s)
-#ifdef DEBUG_SCHEMA
-        , _schema_version(s->version())
-#endif
     { }
     mutation_partition(mutation_partition& other, copy_comparators_only)
-        : _rows()
+        : schema_dependent(other)
+        , _rows()
         , _row_tombstones(other._row_tombstones, range_tombstone_list::copy_comparator_only())
-#ifdef DEBUG_SCHEMA
-        , _schema_version(other._schema_version)
-#endif
     { }
     mutation_partition(mutation_partition&&) = default;
     mutation_partition(const schema& s, const mutation_partition&);
@@ -1197,11 +1214,6 @@ private:
     void for_each_row(const schema& schema, const query::clustering_range& row_range, bool reversed, Func&& func) const;
     friend class counter_write_query_result_builder;
 
-    void check_schema(const schema& s) const {
-#ifdef DEBUG_SCHEMA
-        assert(s.version() == _schema_version);
-#endif
-    }
 };
 
 inline
