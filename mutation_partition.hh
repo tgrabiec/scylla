@@ -56,25 +56,26 @@
 
 struct schema_dependent {
 #ifdef DEBUG_SCHEMA
-    table_schema_version _schema_version;
+    schema_ptr _schema; // nullptr means unknown.
 #endif
+
+    schema_dependent(schema_ptr s)
+#ifdef DEBUG_SCHEMA
+        : _schema(std::move(s))
+#endif
+    { }
 
     schema_dependent(const schema& s)
 #ifdef DEBUG_SCHEMA
-        : _schema_version(s.version())
+        : _schema(s.shared_from_this())
 #endif
     { }
 
-    schema_dependent(const schema_dependent& other)
+    const schema& check_schema(const schema& s) const {
 #ifdef DEBUG_SCHEMA
-        : _schema_version(other._schema_version)
+        assert(!_schema || s.version() == _schema->version());
 #endif
-    { }
-
-    void check_schema(const schema& s) const {
-#ifdef DEBUG_SCHEMA
-        assert(s.version() == _schema_version);
-#endif
+        return s;
     }
 };
 
