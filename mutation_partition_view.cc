@@ -272,7 +272,7 @@ mutation_fragment frozen_mutation_fragment::unfreeze(const schema& s)
                 mutation_fragment _mf;
             public:
                 clustering_row_builder(const schema& s, clustering_key key, row_tombstone t, row_marker m)
-                    : _s(s), _mf(mutation_fragment::clustering_row_tag_t(), std::move(key), std::move(t), std::move(m), row()) { }
+                    : _s(s), _mf(mutation_fragment::clustering_row_tag_t(), std::move(key), std::move(t), std::move(m), row(s)) { }
                 void accept_atomic_cell(column_id id, atomic_cell ac) {
                     _mf.as_mutable_clustering_row().cells().append_cell(id, atomic_cell_or_collection(std::move(ac)));
                 }
@@ -294,7 +294,7 @@ mutation_fragment frozen_mutation_fragment::unfreeze(const schema& s)
                 const schema& _s;
                 mutation_fragment _mf;
             public:
-                explicit static_row_builder(const schema& s) : _s(s), _mf(static_row()) { }
+                explicit static_row_builder(const schema& s) : _s(s), _mf(static_row(s)) { }
                 void accept_atomic_cell(column_id id, atomic_cell ac) {
                     _mf.as_mutable_static_row().cells().append_cell(id, atomic_cell_or_collection(std::move(ac)));
                 }

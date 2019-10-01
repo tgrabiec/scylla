@@ -30,7 +30,8 @@ class schema_upgrader {
     schema_ptr _new;
 private:
     row transform(row&& r, column_kind kind) {
-        row new_row;
+        row new_row(*_new);
+        r.check_schema(*_prev);
         r.for_each_cell([&] (column_id id, atomic_cell_or_collection& cell) {
             const column_definition& col = _prev->column_at(kind, id);
             const column_definition* new_col = _new->get_column_definition(col.name());

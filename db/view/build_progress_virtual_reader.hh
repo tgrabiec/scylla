@@ -118,7 +118,7 @@ class build_progress_virtual_reader {
                     auto mf = _underlying.pop_mutation_fragment();
                     if (mf.is_clustering_row()) {
                         auto scylla_in_progress_row = std::move(mf).as_clustering_row();
-                        auto legacy_in_progress_row = row();
+                        auto legacy_in_progress_row = row(*_schema);
                         // Drop the first_token from the regular columns
                         scylla_in_progress_row.cells().for_each_cell([&, this] (column_id id, atomic_cell_or_collection& c) {
                             if (id == _scylla_next_token_col) {

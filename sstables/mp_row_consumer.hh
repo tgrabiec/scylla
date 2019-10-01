@@ -443,9 +443,9 @@ public:
         if (!_in_progress) {
             advance_to(pos);
             if (is_static) {
-                _in_progress = mutation_fragment(static_row());
+                _in_progress = mutation_fragment(static_row(*_schema));
             } else {
-                _in_progress = mutation_fragment(clustering_row(std::move(pos.key())));
+                _in_progress = mutation_fragment(clustering_row(*_schema, std::move(pos.key())));
             }
             if (_out_of_range) {
                 ret = push_ready_fragments_out_of_range();
@@ -959,6 +959,7 @@ public:
         , _fwd(fwd)
         , _treat_static_row_as_regular(_schema->is_static_compact_table()
             && (!sst->has_scylla_component() || sst->features().is_enabled(sstable_feature::CorrectStaticCompact))) // See #4139
+        , _in_progress_static_row(*_schema)
     {
         _cells.reserve(std::max(_schema->static_columns_count(), _schema->regular_columns_count()));
     }
@@ -1092,12 +1093,12 @@ public:
             _opened_range_tombstone->kind = was_non_full_key ? bound_kind::incl_start : bound_kind::excl_start;
 
             if (maybe_push_range_tombstone(std::move(rt)) == proceed::no) {
-                _in_progress_row.emplace(std::move(key));
+                _in_progress_row.emplace(*_schema, std::move(key));
                 return consumer_m::row_processing_result::retry_later;
             }
         }
 
-        _in_progress_row.emplace(std::move(key));
+        _in_progress_row.emplace(*_schema, std::move(key));
 
         switch (_mf_filter->apply(_in_progress_row->position())) {
         case mutation_fragment_filter::result::emit:
@@ -1137,7 +1138,7 @@ public:
             return consume_row_start({});
         }
         _inside_static_row = true;
-        _in_progress_static_row = static_row();
+        _in_progress_static_row = static_row(*_schema);
         return consumer_m::row_processing_result::do_proceed;
     }
 

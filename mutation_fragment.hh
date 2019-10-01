@@ -42,15 +42,20 @@
 // mutation_fragment objects. It reflects the order in which content of
 // partition appears in the sstables.
 
-class clustering_row {
+class clustering_row : public schema_dependent {
     clustering_key_prefix _ck;
     row_tombstone _t;
     row_marker _marker;
     row _cells;
 public:
-    explicit clustering_row(clustering_key_prefix ck) : _ck(std::move(ck)) { }
+    explicit clustering_row(const schema& s, clustering_key_prefix ck)
+        : schema_dependent(s)
+        , _ck(std::move(ck))
+        , _cells(s)
+    { }
     clustering_row(clustering_key_prefix ck, row_tombstone t, row_marker marker, row cells)
-            : _ck(std::move(ck)), _t(t), _marker(std::move(marker)), _cells(std::move(cells)) {
+            : schema_dependent(cells)
+            , _ck(std::move(ck)), _t(t), _marker(std::move(marker)), _cells(std::move(cells)) {
         _t.maybe_shadow(marker);
     }
     clustering_row(const schema& s, const clustering_row& other)
@@ -82,11 +87,13 @@ public:
     }
 
     void apply(const schema& s, clustering_row&& cr) {
+        check_schema(s);
         _marker.apply(std::move(cr._marker));
         _t.apply(cr._t, _marker);
         _cells.apply(s, column_kind::regular_column, std::move(cr._cells));
     }
     void apply(const schema& s, const clustering_row& cr) {
+        check_schema(s);
         _marker.apply(cr._marker);
         _t.apply(cr._t, _marker);
         _cells.apply(s, column_kind::regular_column, cr._cells);
@@ -105,6 +112,7 @@ public:
         _t.apply(t, _marker);
     }
     void apply(const schema& s, const rows_entry& r) {
+        check_schema(s);
         _marker.apply(r.row().marker());
         _t.apply(r.row().deleted_at(), _marker);
         _cells.apply(s, column_kind::regular_column, r.row().cells());
@@ -113,14 +121,18 @@ public:
     position_in_partition_view position() const;
 
     size_t external_memory_usage(const schema& s) const {
+        check_schema(s);
         return _ck.external_memory_usage() + _cells.external_memory_usage(s, column_kind::regular_column);
     }
 
     size_t memory_usage(const schema& s) const {
+        check_schema(s);
         return sizeof(clustering_row) + external_memory_usage(s);
     }
 
     bool equal(const schema& s, const clustering_row& other) const {
+        check_schema(s);
+        other.check_schema(s);
         return _ck.equal(s, other._ck)
                && _t == other._t
                && _marker == other._marker
@@ -131,7 +143,7 @@ public:
         const schema& _schema;
         const clustering_row& _clustering_row;
     public:
-        printer(const schema& s, const clustering_row& r) : _schema(s), _clustering_row(r) { }
+        printer(const schema& s, const clustering_row& r) : _schema(r.check_schema(s)), _clustering_row(r) { }
         printer(const printer&) = delete;
         printer(printer&&) = delete;
 

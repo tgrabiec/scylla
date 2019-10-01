@@ -606,7 +606,7 @@ private:
 
     void ensure_static_row_is_written_if_needed() {
         if (!_sst_schema.static_columns.empty() && !_static_row_written) {
-            consume(static_row{});
+            consume(static_row{_schema});
         }
     }
 

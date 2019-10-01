@@ -499,7 +499,7 @@ void mutation_partition::apply_insert(const schema& s, clustering_key_view key, 
 }
 void mutation_partition::insert_row(const schema& s, const clustering_key& key, deletable_row&& row) {
     auto e = alloc_strategy_unique_ptr<rows_entry>(
-        current_allocator().construct<rows_entry>(key, std::move(row)));
+        current_allocator().construct<rows_entry>(s, key, std::move(row)));
     _rows.insert(_rows.end(), *e, rows_entry::compare(s));
     e.release();
 }
@@ -528,7 +528,7 @@ mutation_partition::clustered_row(const schema& s, clustering_key&& key) {
     auto i = _rows.find(key, rows_entry::compare(s));
     if (i == _rows.end()) {
         auto e = alloc_strategy_unique_ptr<rows_entry>(
-            current_allocator().construct<rows_entry>(std::move(key)));
+            current_allocator().construct<rows_entry>(s, std::move(key)));
         i = _rows.insert(i, *e, rows_entry::compare(s));
         e.release();
     }
@@ -541,7 +541,7 @@ mutation_partition::clustered_row(const schema& s, const clustering_key& key) {
     auto i = _rows.find(key, rows_entry::compare(s));
     if (i == _rows.end()) {
         auto e = alloc_strategy_unique_ptr<rows_entry>(
-            current_allocator().construct<rows_entry>(key));
+            current_allocator().construct<rows_entry>(s, key));
         i = _rows.insert(i, *e, rows_entry::compare(s));
         e.release();
     }
@@ -554,7 +554,7 @@ mutation_partition::clustered_row(const schema& s, clustering_key_view key) {
     auto i = _rows.find(key, rows_entry::compare(s));
     if (i == _rows.end()) {
         auto e = alloc_strategy_unique_ptr<rows_entry>(
-            current_allocator().construct<rows_entry>(key));
+            current_allocator().construct<rows_entry>(s, key));
         i = _rows.insert(i, *e, rows_entry::compare(s));
         e.release();
     }
@@ -1471,7 +1471,8 @@ mutation_partition::live_row_count(const schema& s, gc_clock::time_point query_t
 }
 
 rows_entry::rows_entry(rows_entry&& o) noexcept
-    : _link(std::move(o._link))
+    : schema_dependent(o)
+    , _link(std::move(o._link))
     , _key(std::move(o._key))
     , _row(std::move(o._row))
     , _lru_link()
@@ -1485,9 +1486,11 @@ rows_entry::rows_entry(rows_entry&& o) noexcept
 }
 
 row::row(const schema& s, column_kind kind, const row& o)
-    : _type(o._type)
+    : schema_dependent(s)
+    , _type(o._type)
     , _size(o._size)
 {
+    o.check_schema(s);
     if (_type == storage_type::vector) {
         auto& other_vec = o._storage.vector;
         auto& vec = *new (&_storage.vector) vector_storage;
@@ -1619,12 +1622,16 @@ bool row::equal(column_kind kind, const schema& this_schema, const row& other, c
     });
 }
 
-row::row() {
+row::row(const schema_dependent& o) : schema_dependent(o) {
+    new (&_storage.vector) vector_storage;
+}
+
+row::row(const schema& s) : schema_dependent(s) {
     new (&_storage.vector) vector_storage;
 }
 
 row::row(row&& other) noexcept
-    : _type(other._type), _size(other._size) {
+        : schema_dependent(other), _type(other._type), _size(other._size) {
     if (_type == storage_type::vector) {
         new (&_storage.vector) vector_storage(std::move(other._storage.vector));
     } else {
@@ -1642,6 +1649,8 @@ row& row::operator=(row&& other) noexcept {
 }
 
 void row::apply(const schema& s, column_kind kind, const row& other) {
+    check_schema(s);
+    other.check_schema(s);
     if (other.empty()) {
         return;
     }
@@ -1660,6 +1669,8 @@ void row::apply(const schema& s, column_kind kind, row&& other) {
 }
 
 void row::apply_monotonically(const schema& s, column_kind kind, row&& other) {
+    check_schema(s);
+    other.check_schema(s);
     if (other.empty()) {
         return;
     }
@@ -1694,6 +1705,7 @@ bool row::compact_and_expire(
         gc_clock::time_point gc_before,
         const row_marker& marker)
 {
+    check_schema(s);
     if (dead_marker_shadows_row(s, kind, marker)) {
         tomb.apply(shadowable_tombstone(api::max_timestamp, gc_clock::time_point::max()), row_marker());
     }
@@ -1753,7 +1765,7 @@ bool row::compact_and_expire(
 
 deletable_row deletable_row::difference(const schema& s, column_kind kind, const deletable_row& other) const
 {
-    deletable_row dr;
+    deletable_row dr(s);
     if (_deleted_at > other._deleted_at) {
         dr.apply(_deleted_at);
     }
@@ -1766,7 +1778,9 @@ deletable_row deletable_row::difference(const schema& s, column_kind kind, const
 
 row row::difference(const schema& s, column_kind kind, const row& other) const
 {
-    row r;
+    check_schema(s);
+    other.check_schema(s);
+    row r(s);
     with_both_ranges(other, [&] (auto this_range, auto other_range) {
         auto it = other_range.begin();
         for (auto&& c : this_range) {
@@ -1938,7 +1952,7 @@ stop_iteration mutation_querier::consume(static_row&& sr, tombstone current_tomb
 
 void mutation_querier::prepare_writers() {
     if (!_rows_wr) {
-        row empty_row;
+        row empty_row(_schema);
         query_static_row(empty_row, { });
         _live_data_in_static_row = false;
     }
@@ -2242,6 +2256,7 @@ public:
 mutation_partition::mutation_partition(mutation_partition::incomplete_tag, const schema& s, tombstone t)
     : schema_dependent(s)
     , _tombstone(t)
+    , _static_row(s)
     , _static_row_continuous(!s.has_static_columns())
     , _rows()
     , _row_tombstones(s)
