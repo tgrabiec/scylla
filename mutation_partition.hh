@@ -48,6 +48,12 @@
 #include "utils/with_relational_operators.hh"
 #include "utils/preempt.hh"
 
+#ifdef SEASTAR_DEBUG
+// Will make schema-dependent objects track their schema and assert
+// that they're accessed with the matching schema objects.
+#define DEBUG_SCHEMA
+#endif
+
 class mutation_fragment;
 class clustering_row;
 
@@ -940,7 +946,7 @@ private:
     // Contains only strict prefixes so that we don't have to lookup full keys
     // in both _row_tombstones and _rows.
     range_tombstone_list _row_tombstones;
-#ifdef SEASTAR_DEBUG
+#ifdef DEBUG_SCHEMA
     table_schema_version _schema_version;
 #endif
 
@@ -957,14 +963,14 @@ public:
     mutation_partition(schema_ptr s)
         : _rows()
         , _row_tombstones(*s)
-#ifdef SEASTAR_DEBUG
+#ifdef DEBUG_SCHEMA
         , _schema_version(s->version())
 #endif
     { }
     mutation_partition(mutation_partition& other, copy_comparators_only)
         : _rows()
         , _row_tombstones(other._row_tombstones, range_tombstone_list::copy_comparator_only())
-#ifdef SEASTAR_DEBUG
+#ifdef DEBUG_SCHEMA
         , _schema_version(other._schema_version)
 #endif
     { }
@@ -1192,7 +1198,7 @@ private:
     friend class counter_write_query_result_builder;
 
     void check_schema(const schema& s) const {
-#ifdef SEASTAR_DEBUG
+#ifdef DEBUG_SCHEMA
         assert(s.version() == _schema_version);
 #endif
     }

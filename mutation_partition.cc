@@ -146,11 +146,11 @@ mutation_partition::mutation_partition(const schema& s, const mutation_partition
         , _static_row_continuous(x._static_row_continuous)
         , _rows()
         , _row_tombstones(x._row_tombstones)
-#ifdef SEASTAR_DEBUG
+#ifdef DEBUG_SCHEMA
         , _schema_version(s.version())
 #endif
 {
-#ifdef SEASTAR_DEBUG
+#ifdef DEBUG_SCHEMA
     assert(x._schema_version == _schema_version);
 #endif
     auto cloner = [&s] (const auto& x) {
@@ -166,11 +166,11 @@ mutation_partition::mutation_partition(const mutation_partition& x, const schema
         , _static_row_continuous(x._static_row_continuous)
         , _rows()
         , _row_tombstones(x._row_tombstones, range_tombstone_list::copy_comparator_only())
-#ifdef SEASTAR_DEBUG
+#ifdef DEBUG_SCHEMA
         , _schema_version(schema.version())
 #endif
 {
-#ifdef SEASTAR_DEBUG
+#ifdef DEBUG_SCHEMA
     assert(x._schema_version == _schema_version);
 #endif
     try {
@@ -195,11 +195,11 @@ mutation_partition::mutation_partition(mutation_partition&& x, const schema& sch
     , _static_row_continuous(x._static_row_continuous)
     , _rows(std::move(x._rows))
     , _row_tombstones(std::move(x._row_tombstones))
-#ifdef SEASTAR_DEBUG
+#ifdef DEBUG_SCHEMA
     , _schema_version(schema.version())
 #endif
 {
-#ifdef SEASTAR_DEBUG
+#ifdef DEBUG_SCHEMA
     assert(x._schema_version == _schema_version);
 #endif
     {
@@ -304,7 +304,7 @@ mutation_partition::apply(const schema& s, const mutation_fragment& mf) {
 }
 
 stop_iteration mutation_partition::apply_monotonically(const schema& s, mutation_partition&& p, cache_tracker* tracker, is_preemptible preemptible) {
-#ifdef SEASTAR_DEBUG
+#ifdef DEBUG_SCHEMA
     assert(s.version() == _schema_version);
     assert(p._schema_version == _schema_version);
 #endif
@@ -1095,7 +1095,7 @@ bool mutation_partition::equal(const schema& s, const mutation_partition& p) con
 }
 
 bool mutation_partition::equal(const schema& this_schema, const mutation_partition& p, const schema& p_schema) const {
-#ifdef SEASTAR_DEBUG
+#ifdef DEBUG_SCHEMA
     assert(_schema_version == this_schema.version());
     assert(p._schema_version == p_schema.version());
 #endif
@@ -2260,7 +2260,7 @@ mutation_partition::mutation_partition(mutation_partition::incomplete_tag, const
     , _static_row_continuous(!s.has_static_columns())
     , _rows()
     , _row_tombstones(s)
-#ifdef SEASTAR_DEBUG
+#ifdef DEBUG_SCHEMA
     , _schema_version(s.version())
 #endif
 {
