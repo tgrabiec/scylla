@@ -321,6 +321,7 @@ public:
 
     // Locks or unlocks the snapshot.
     // Locking the snapshot prevents it from getting detached from the entry.
+    // It also prevents the partition entry from being evicted.
     // Can be called only when at_lastest_version(). The snapshot must remain latest as long as it's locked.
     void set_locked(bool locked) noexcept;
 
