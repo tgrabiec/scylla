@@ -172,6 +172,9 @@ tombstone partition_entry::partition_tombstone() const {
 
 partition_snapshot::~partition_snapshot() {
     with_allocator(region().allocator(), [this] {
+        if (_locked) {
+            touch();
+        }
         if (_version && _version.is_unique_owner()) {
             auto v = &*_version;
             _version = {};
@@ -574,6 +577,7 @@ coroutine partition_entry::apply_to_incomplete(const schema& s,
                     auto has_next = src_cur.erase_and_advance();
                     acc.unpin_memory(size);
                     if (!has_next) {
+                        assert(dst_snp->at_latest_version());
                         dst_snp->set_locked(false);
                         return stop_iteration::yes;
                     }
@@ -705,6 +709,7 @@ void partition_entry::evict(mutation_cleaner& cleaner) noexcept {
         return;
     }
     if (_snapshot) {
+        assert(!_snapshot->is_locked());
         _snapshot->_version = std::move(_version);
         _snapshot->_version.mark_as_unique_owner();
         _snapshot->_entry = nullptr;
@@ -732,4 +737,8 @@ void partition_snapshot::set_locked(bool locked) noexcept {
     assert(at_latest_version());
 
     _locked = locked;
+    if (!locked) {
+        // Make the entry evictable again in case it was fully unlinked by eviction attempt.
+        touch();
+    }
 }
