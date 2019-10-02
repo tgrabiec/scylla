@@ -166,6 +166,7 @@ flat_mutation_reader flat_mutation_reader::impl::reverse_partitions(flat_mutatio
 }
 
 future<bool> flat_mutation_reader::impl::fill_buffer_from(flat_mutation_reader& source, db::timeout_clock::time_point timeout) {
+    assert(_schema == source._impl->_schema);
     if (source.is_buffer_empty()) {
         if (source.is_end_of_stream()) {
             return make_ready_future<bool>(true);
