@@ -165,8 +165,7 @@ flat_mutation_reader flat_mutation_reader::impl::reverse_partitions(flat_mutatio
     return make_flat_mutation_reader<partition_reversing_mutation_reader>(original);
 }
 
-template<typename Source>
-future<bool> flat_mutation_reader::impl::fill_buffer_from(Source& source, db::timeout_clock::time_point timeout) {
+future<bool> flat_mutation_reader::impl::fill_buffer_from(flat_mutation_reader& source, db::timeout_clock::time_point timeout) {
     if (source.is_buffer_empty()) {
         if (source.is_end_of_stream()) {
             return make_ready_future<bool>(true);
@@ -181,8 +180,6 @@ future<bool> flat_mutation_reader::impl::fill_buffer_from(Source& source, db::ti
         return make_ready_future<bool>(source.is_end_of_stream() && source.is_buffer_empty());
     }
 }
-
-template future<bool> flat_mutation_reader::impl::fill_buffer_from<flat_mutation_reader>(flat_mutation_reader&, db::timeout_clock::time_point);
 
 flat_mutation_reader& to_reference(reference_wrapper<flat_mutation_reader>& wrapper) {
     return wrapper.get();

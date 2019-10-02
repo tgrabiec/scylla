@@ -109,8 +109,7 @@ public:
         }
         void forward_buffer_to(const position_in_partition& pos);
         void clear_buffer_to_next_partition();
-        template<typename Source>
-        future<bool> fill_buffer_from(Source&, db::timeout_clock::time_point);
+        future<bool> fill_buffer_from(flat_mutation_reader&, db::timeout_clock::time_point);
         // When succeeds, makes sure that the next push_mutation_fragment() will not fail.
         void reserve_one() {
             if (_buffer.capacity() == _buffer.size()) {
