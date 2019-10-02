@@ -303,6 +303,7 @@ private:
     mutation_cleaner* _cleaner;
     cache_tracker* _tracker;
     boost::intrusive::slist_member_hook<> _cleaner_hook;
+    bool _locked = false;
     friend class partition_entry;
     friend class mutation_cleaner_impl;
 public:
@@ -317,6 +318,15 @@ public:
     partition_snapshot(partition_snapshot&&) = delete;
     partition_snapshot& operator=(const partition_snapshot&) = delete;
     partition_snapshot& operator=(partition_snapshot&&) = delete;
+
+    // Locks or unlocks the snapshot.
+    // Locking the snapshot prevents it from getting detached from the entry.
+    // Can be called only when at_lastest_version(). The snapshot must remain latest as long as it's locked.
+    void set_locked(bool locked) noexcept;
+
+    bool is_locked() const {
+        return _locked;
+    }
 
     static partition_snapshot& container_of(partition_version_ref* ref) {
         return *boost::intrusive::get_parent_from_member(ref, &partition_snapshot::_version);
@@ -503,6 +513,14 @@ public:
         return _version->all_elements_reversed();
     }
 
+    // Tells whether this entry is locked.
+    // Locked entries are undergoing an update and should not have their snapshots
+    // detached from the entry.
+    // Certain methods can only be called when !is_locked().
+    bool is_locked() const {
+        return _snapshot && _snapshot->is_locked();
+    }
+
     // Strong exception guarantees.
     // Assumes this instance and mp are fully continuous.
     // Use only on non-evictable entries.
@@ -568,6 +586,7 @@ public:
     tombstone partition_tombstone() const;
 
     // needs to be called with reclaiming disabled
+    // Must not be called when is_locked().
     void upgrade(schema_ptr from, schema_ptr to, mutation_cleaner&, cache_tracker*);
 
     // Snapshots with different values of phase will point to different partition_version objects.
