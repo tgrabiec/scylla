@@ -27,6 +27,7 @@
 #include "partition_snapshot_row_cursor.hh"
 #include "partition_snapshot_reader.hh"
 #include "utils/coroutine.hh"
+#include "utils/exceptions.hh"
 #include "real_dirty_memory_accounter.hh"
 
 static void remove_or_mark_as_unique_owner(partition_version* current, mutation_cleaner* cleaner)

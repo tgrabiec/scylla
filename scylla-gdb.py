@@ -1747,7 +1747,7 @@ class scylla_tasks(gdb.Command):
         vptr_type = gdb.lookup_type('uintptr_t').pointer()
         for ptr in get_local_tasks():
             vptr = int(ptr.reinterpret_cast(vptr_type).dereference())
-            gdb.write('(task*) 0x%x  %s\n' % (ptr, resolve(vptr)))
+            gdb.write('(task*) %s  %s\n' % (ptr, resolve(vptr)))
 
 
 

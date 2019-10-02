@@ -1004,6 +1004,19 @@ future<> row_cache::update(external_updater eu, memtable& m) {
         if (cache_i != partitions_end() && cache_i->key().equal(*_schema, mem_e.key())) {
             cache_entry& entry = *cache_i;
             upgrade_entry(entry);
+
+            // We must work with the current schema of the cache so that we don't loose writes
+            // using the latest schema which may come from the memtable.
+            // We assume that upgrade_entry() does not fail to upgrade. It currently only fails
+            // if the entry is undergoing an upgrade, which shouldn't happen here as the upgrades
+            // are serialized.
+            assert(entry._schema == _schema);
+
+            //if (mem_e.schema()->version() != _schema->version()) {
+            //    mem_e.partition().upgrade(mem_e.schema(), _schema, _tracker.memtable_cleaner(), no_cache_tracker);
+            //    mem_e._schema = _schema;
+            //}
+
             _tracker.on_partition_merge();
             return entry.partition().apply_to_incomplete(*_schema, std::move(mem_e.partition()), *mem_e.schema(), _tracker.memtable_cleaner(),
                 alloc, _tracker.region(), _tracker, _underlying_phase, acc);
@@ -1017,6 +1030,12 @@ future<> row_cache::update(external_updater eu, memtable& m) {
             entry->set_continuous(cache_i->continuous());
             _tracker.insert(*entry);
             _partitions.insert_before(cache_i, *entry);
+
+            //if (mem_e.schema()->version() != _schema->version()) {
+            //    mem_e.partition().upgrade(mem_e.schema(), _schema, _tracker.memtable_cleaner(), no_cache_tracker);
+            //    mem_e._schema = _schema;
+            //}
+
             return entry->partition().apply_to_incomplete(*_schema, std::move(mem_e.partition()), *mem_e.schema(), _tracker.memtable_cleaner(),
                 alloc, _tracker.region(), _tracker, _underlying_phase, acc);
         } else {

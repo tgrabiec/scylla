@@ -50,6 +50,7 @@ class memtable_entry {
     partition_entry _pe;
 public:
     friend class memtable;
+    friend class row_cache;
 
     memtable_entry(schema_ptr s, dht::decorated_key key, mutation_partition p)
         : _schema(std::move(s))

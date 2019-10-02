@@ -39,7 +39,7 @@ class simple_schema {
     friend class global_simple_schema;
 
     schema_ptr _s;
-    api::timestamp_type _timestamp = api::min_timestamp;
+    api::timestamp_type _timestamp = 0;
     const column_definition* _v_def = nullptr;
     table_schema_version _v_def_version;
 

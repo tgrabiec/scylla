@@ -209,6 +209,16 @@ public:
         }
         auto lowest_timestamp = _writetimes[_key];
         if (t < lowest_timestamp) {
+            row_cache& rc = _t.cache;
+            std::cout << rc << "\n";
+            std::cout << *_t.mt << "\n";
+            if (_t.prev_mt) {
+                std::cout << *_t.prev_mt << "\n";
+            }
+            test_log.error("Expected to see the write @{}, but saw @{} ({}), c_key={}", lowest_timestamp, t, value, row.key());
+            std::cout << std::endl;
+            std::cerr << std::endl;
+            abort();
             throw std::runtime_error(format("Expected to see the write @{:d}, but saw @{:d} ({}), c_key={}", lowest_timestamp, t, value, row.key()));
         }
         _value = std::move(value);
@@ -373,7 +383,7 @@ int main(int argc, char** argv) {
                 test_log.trace("changing schema to {}", *new_s);
                 t.set_schema(new_s);
             });
-            schema_changer.arm_periodic(1s);
+            schema_changer.arm_periodic(400ms);
 
             // Mutator
             while (!cancelled) {
