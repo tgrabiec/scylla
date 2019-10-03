@@ -32,8 +32,13 @@ namespace mutation_writer {
 
 namespace {
 
+template<typename T>
+struct default_constructor {
+    T operator()() { return T(); }
+};
+
 // TODO: should probably move to utils and make it a proper container.
-template <typename Key, typename Value, size_t Size>
+template <typename Key, typename Value, size_t Size, typename ValueConstructor = default_constructor<Value>>
 class small_flat_map {
 public:
     // The underlying flat container requires value_type to be move
@@ -45,8 +50,11 @@ public:
     using iterator = typename container::iterator;
 private:
     container _values;
-
+    ValueConstructor _value_ctor;
 public:
+    small_flat_map() = default;
+    small_flat_map(ValueConstructor value_ctor) : _value_ctor(std::move(value_ctor)) {}
+
     // Element access
     mapped_type& at(const key_type& k);
     mapped_type& operator[](const key_type& k);
@@ -63,29 +71,29 @@ public:
     iterator find(const key_type& k);
 };
 
-template <typename Key, typename Value, size_t Size>
-typename small_flat_map<Key, Value, Size>::mapped_type&
-small_flat_map<Key, Value, Size>::at(const key_type& k) {
+template <typename Key, typename Value, size_t Size, typename ValueConstructor>
+typename small_flat_map<Key, Value, Size, ValueConstructor>::mapped_type&
+small_flat_map<Key, Value, Size, ValueConstructor>::at(const key_type& k) {
     if (auto it = find(k); it != end()) {
         return it->second;
     }
     throw std::out_of_range();
 }
 
-template <typename Key, typename Value, size_t Size>
-typename small_flat_map<Key, Value, Size>::mapped_type&
-small_flat_map<Key, Value, Size>::operator[](const key_type& k) {
+template <typename Key, typename Value, size_t Size, typename ValueConstructor>
+typename small_flat_map<Key, Value, Size, ValueConstructor>::mapped_type&
+small_flat_map<Key, Value, Size, ValueConstructor>::operator[](const key_type& k) {
     if (auto it = find(k); it != end()) {
         return it->second;
     }
-    _values.emplace_back(k, mapped_type{});
+    _values.emplace_back(k, _value_ctor());
     return _values.back().second;
 }
 
-template <typename Key, typename Value, size_t Size>
+template <typename Key, typename Value, size_t Size, typename ValueConstructor>
 template <typename... Args>
-std::pair<typename small_flat_map<Key, Value, Size>::iterator, bool>
-small_flat_map<Key, Value, Size>::emplace(Args&&... args) {
+std::pair<typename small_flat_map<Key, Value, Size, ValueConstructor>::iterator, bool>
+small_flat_map<Key, Value, Size, ValueConstructor>::emplace(Args&&... args) {
     value_type elem(std::forward<Args>(args)...);
     if (auto it = find(elem.first); it != end()) {
         return std::pair(it, false);
@@ -94,9 +102,9 @@ small_flat_map<Key, Value, Size>::emplace(Args&&... args) {
     return std::pair(end() - 1, true);
 }
 
-template <typename Key, typename Value, size_t Size>
-typename small_flat_map<Key, Value, Size>::iterator
-small_flat_map<Key, Value, Size>::find(const key_type& k) {
+template <typename Key, typename Value, size_t Size, typename ValueConstructor>
+typename small_flat_map<Key, Value, Size, ValueConstructor>::iterator
+small_flat_map<Key, Value, Size, ValueConstructor>::find(const key_type& k) {
     auto key_matches = [&k] (const value_type& v) { return v.first == k; };
     if (auto it = std::find_if(begin(), end(), key_matches); it != _values.end()) {
         return it;
