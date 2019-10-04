@@ -82,10 +82,16 @@ class built_indexes_virtual_reader {
                     auto mf = _underlying.pop_mutation_fragment();
                     if (mf.is_partition_start()) {
                         _current_keyspace = value_cast<sstring>(utf8_type->deserialize(*mf.as_partition_start().key().key().begin(*_underlying.schema())));
-                    } else if (mf.is_clustering_row() && !is_index(mf.as_clustering_row())) {
-                        continue;
+                        push_mutation_fragment(std::move(mf));
+                    } else if (mf.is_clustering_row()) {
+                        const clustering_row& src = mf.as_clustering_row();
+                        if (!is_index(src)) {
+                            continue;
+                        }
+                        push_mutation_fragment(mutation_fragment(clustering_row(src.key(), src.tomb(), src.marker(), row(*_schema))));
+                    } else {
+                        push_mutation_fragment(std::move(mf));
                     }
-                    push_mutation_fragment(std::move(mf));
                 }
             });
         }
