@@ -32,7 +32,7 @@
 class gc_clock final {
 public:
     using base = seastar::lowres_system_clock;
-    using rep = int64_t;
+    using rep = int32_t;
     using period = std::ratio<1, 1>; // seconds
     using duration = std::chrono::duration<rep, period>;
     using time_point = std::chrono::time_point<gc_clock, duration>;
