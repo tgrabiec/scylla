@@ -239,12 +239,6 @@ inline sstring get_test_dir(const sstring& name, const schema_ptr s)
     return seastar::format("test/resource/sstables/{}/{}/{}-1c6ace40fad111e7b9cf000000000002", name, s->ks_name(), s->cf_name());
 }
 
-inline std::array<sstables::sstable::version_types, 3> all_sstable_versions = {
-    sstables::sstable::version_types::ka,
-    sstables::sstable::version_types::la,
-    sstables::sstable::version_types::mc,
-};
-
 template<typename AsyncAction>
 GCC6_CONCEPT( requires requires (AsyncAction aa, sstables::sstable::version_types& c) { { aa(c) } -> future<>; } )
 inline
