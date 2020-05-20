@@ -245,14 +245,13 @@ def make_new_ring(tx: TransactionId) -> TokenMetadata:
     return ring
 
 
-def cql(query: str, *args) -> Mapping[str, object]:
-    """Executes a CQL query"""
-    pass
-
-
 def cql_serial(query: str, *args) -> Mapping[str, object]:
     """Executes a CQL query with SERIAL consistency level"""
     pass
+
+#
+# Distributed locking
+#
 
 
 def try_lock(lock_name: str, owner: UUID) -> bool:
@@ -283,16 +282,13 @@ def unlock(lock_name: str, owner: UUID):
     cql_serial("update system.global_locks set owner = null where key = {} if owner = {}", lock_name, owner)
 
 
+#
+# Topology change transaction state
+#
+
+
 def remove_transaction(tx: TransactionId):
     """Removes transaction record from system.topology_changes."""
-    pass
-
-
-def get_all_tables() -> Set[UUID]:
-    """
-	Returns the set of existing tables.
-	This read, as well as writes which modify this set, needs to be performed using linearizable consistency.
-	"""
     pass
 
 
@@ -370,7 +366,7 @@ def run_state_machine(txid: TransactionId,
 
 
 #
-# Normal steps of the topology change state machine
+# Step definitions for topology change transactions
 #
 
 
@@ -378,13 +374,13 @@ def set_step(tx: TransactionId, coid: CoordinatorId, step: StepName):
     # coordinator_id comparison is needed so that failover() always preempts the previous coordinator.
     # Comparing just the previous step is not enough, since the old coordinator could still win the race
     # and take down the new coordinator.
-    result = cql("update system.topology_changes set step = {} where id = {} if coordinator_id = {}", step, tx, coid)
+    result = cql_serial("update system.topology_changes set step = {} where id = {} if coordinator_id = {}", step, tx, coid)
     if not result['applied']:
         raise Exception('Preempted, another coordinator took over')
 
 
 def read_step(tx: TransactionId) -> Tuple[StepName, Timestamp]:
-    result = cql("select step, timestamp(step) as t from system.topology_changes where id = {}", tx)
+    result = cql_serial("select step, timestamp(step) as t from system.topology_changes where id = {}", tx)
     if not result:
         raise Exception('Transaction no longer exists')
     return result['step'], result['t']
@@ -439,6 +435,15 @@ def step_advertise_ring(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
 def step_before_streaming(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
     set_stage(tx, ReplicationStage.write_both_read_old, t)
     return 'streaming'
+
+
+def get_all_tables() -> Set[UUID]:
+    """
+	Returns the set of existing tables.
+	This read, as well as writes which modify this set, needs to be performed using linearizable consistency
+	So that streaming doesn't miss any tables which may have already received writes.
+	"""
+    pass
 
 
 def step_streaming(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
@@ -511,9 +516,15 @@ def step_5a(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
     return 'unlock'
 
 
+#
+# Transaction execution
+#
+
+
 def failover(tx: TransactionId) -> CoordinatorId:
     """Starts a new coordinator for the transaction on current node.
     The previous coordinator will be preempted and will eventually stop.
+    Call run_topology_change() to actually start executing.
     """
     coordinator_id = new_uuid()
     cql_serial('update system.topology_changes set coordinator = {}, coordinator_host = {} where id = {}',
@@ -524,10 +535,7 @@ def failover(tx: TransactionId) -> CoordinatorId:
 
 def run_topology_change(tx: TransactionId, coid: CoordinatorId = None):
     """
-    Becomes the new coordinator for the transaction.
-    The coordinator's job is to advance the state machine of the transaction.
-    The previous coordinator will be preempted if still running, and will eventually stop.
-
+    Takes over the task of advancing the state machine of the transaction.
     Can be invoked only on an existing member of the cluster.
     """
     steps = {
