@@ -262,7 +262,6 @@ def make_new_ring(tx: TransactionId) -> TokenMetadata:
             if not node in ring.members():
                 raise Exception("Node is not a member")
             ring.set_tokens(node, ring.get_tokens(node), TokenStatus.LEAVING)
-        ring.add_leaving_members(set(nodes))
 
     elif op == TopologyChangeAction.Replace:
         ...
@@ -474,10 +473,10 @@ def step_before_streaming(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
 
 def get_all_tables() -> Set[UUID]:
     """
-	Returns the set of existing tables.
-	This read, as well as writes which modify this set, needs to be performed using linearizable consistency
-	So that streaming doesn't miss any tables which may have already received writes.
-	"""
+    Returns the set of existing tables.
+    This read, as well as writes which modify this set, needs to be performed using linearizable consistency
+    So that streaming doesn't miss any tables which may have already received writes.
+    """
     pass
 
 
