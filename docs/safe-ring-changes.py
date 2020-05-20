@@ -27,6 +27,8 @@ create table system.topology_changes {
    action_targets list<UUID>,
    participants list<UUID>,
    intent UUID,
+   failed bool,
+   result text,
    primary key (id)
 };
 
@@ -77,12 +79,6 @@ def send(h: Host, m: RpcMessage):
     pass
 
 
-def dead() -> Set[Host]:
-    """Returns nodes marked as permanently dead.
-    Those nodes are guaranteed to not be currently executing any RpcMessage, nor at any
-    later point in time."""
-
-
 def current_node() -> Host:
     pass
 
@@ -119,20 +115,29 @@ class TokenMetadata:
     """
 	Represents a ring, or a transition between two rings
 
-	Is encoded like:
+	It has the following structure:
+
 	   Mapping[Host, Mapping[Token, TokenStatus]]
 	"""
 
-    def members(self) -> Set[Host]: pass
+    def members(self) -> Set[Host]:
+        """Returns present members as well those which are in transition"""
+        pass
+
+    def leaving_members(self) -> Set[Host]:
+        """Returns nodes present in the old ring but not in the new ring"""
+        pass
+
     def set_stage(self, s: ReplicationStage): pass
     def get_stage(self) -> ReplicationStage: pass
+
     def set_tokens(self, node: Host, tokens: Set[Token], s: TokenStatus): pass
     def get_tokens(self, node: Host) -> Set[Token]: pass
 
 
 def get_new_ring(r: TokenMetadata) -> TokenMetadata:
     """
-	Given a transitional TokenMetadata, returns the one corresponding to the state before
+	Given a transitional TokenMetadata, returns the one corresponding to the state after
 	the transition.
 	All tokens with TokenStatus.PENDING switch to TokenStatus.NORMAL.
 	All tokens with TokenStatus.LEAVING are removed.
@@ -143,7 +148,7 @@ def get_new_ring(r: TokenMetadata) -> TokenMetadata:
 
 def get_old_ring(r: TokenMetadata) -> TokenMetadata:
     """
-	Given a transitional TokenMetadata, returns the one corresponding to the state after
+	Given a transitional TokenMetadata, returns the one corresponding to the state before
 	the transition.
 	All tokens with TokenStatus.LEAVING switch to TokenStatus.NORMAL.
 	All tokens with TokenStatus.PENDING are removed.
@@ -166,6 +171,17 @@ def as_mutation(r: TokenMetadata, timestamp: Timestamp) -> Mutation:
 
 def local_ring() -> TokenMetadata:
     """Reads local node's TokenMetadata from system.token_metadata"""
+    pass
+
+
+def get_dead_nodes() -> Set[Host]:
+    """Returns nodes marked as permanently dead.
+    Messages received from dead nodes will be ignored.
+    """
+    pass
+
+
+def add_to_dead(nodes: Set[Host]):
     pass
 
 
@@ -233,15 +249,24 @@ def make_new_ring(tx: TransactionId) -> TokenMetadata:
     ring = local_ring()
     op = get_topology_change_action(tx)
     nodes = get_topology_change_targets(tx)
+
     if op == TopologyChangeAction.Add:
         for node in nodes:
+            if node in ring.members():
+                raise Exception("Node is already a member")
             tokens = choose_new_tokens(ring)
             ring.set_tokens(node, tokens, TokenStatus.PENDING)
+
     elif op == TopologyChangeAction.Decommission:
         for node in nodes:
+            if not node in ring.members():
+                raise Exception("Node is not a member")
             ring.set_tokens(node, ring.get_tokens(node), TokenStatus.LEAVING)
+        ring.add_leaving_members(set(nodes))
+
     elif op == TopologyChangeAction.Replace:
         ...
+
     return ring
 
 
@@ -330,7 +355,7 @@ def participants(tx: TransactionId) -> Set[Host]:
     It's not enough to look at the local ring because it may have some participants
     already removed in the middle of final steps, which may need to be replayed.
     """
-    return read_participants(tx) - dead()
+    return read_participants(tx) - get_dead_nodes()
 
 
 def set_stage(tx: TransactionId, stage: ReplicationStage, t: Timestamp):
@@ -421,8 +446,18 @@ def step_lock(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
     return 'make_ring'
 
 
+def set_result(tx: TransactionId, coid: CoordinatorId, failed: bool, reason: str):
+    cql_serial("update system.topology_changes set failed = {}, result = {} where id = {} if coordiantor_id = {}",
+               failed, reason, tx, coid)
+
+
 def step_make_ring(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
-    new_ring = make_new_ring(tx)
+    try:
+        new_ring = make_new_ring(tx)
+    except Exception as e:
+        # Fail the transaction if make_new_ring() fails.
+        set_result(tx, coid, True, str(e))
+        return 'unlock'
     save_intent(tx, coid, new_ring.members(), as_mutation(new_ring, t))
     return 'advertise_ring'
 
@@ -469,6 +504,27 @@ def step_use_only_new(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
 
 def step_cleanup(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
     set_stage(tx, ReplicationStage.cleanup, t)
+    return 'mark_dead'
+
+
+class MarkDead(RpcMessage):
+    def __init__(self, nodes):
+        self.nodes = nodes
+
+    def execute(self):
+        add_to_dead(self.nodes)
+
+
+def step_mark_dead(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
+    # We must not let decommissioned nodes issue calls to the cluster because
+    # they will not receive topology updates after they are removed from
+    # membership and otherwise could corrupt global registers by using stale topology.
+    # This must be done before next changes are made, so before unlocking the ring.
+    # FIXME: We could combine this with the next step by having get_new_ring() encode this in TokenMetadata
+    nodes = local_ring().leaving_members()
+    add_to_dead(nodes)
+    for node in participants(tx):
+        send(node, MarkDead(nodes))
     return 'only_new_ring'
 
 
@@ -479,17 +535,22 @@ def step_only_new_ring(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
 
 def step_unlock(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
     unlock('ring', tx)
-    remove_transaction(tx)
+    return 'done'
+
+
+def step_done(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
+    return None
+
+
+#
+# Abort steps
+#
 
 
 def step_abort_lock(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
     interrupt_lock_attempt('ring')
     return 'unlock'
 
-
-#
-# Abort steps
-#
 
 def step_1a(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
     set_stage(tx, ReplicationStage.write_both_read_old, t)
@@ -547,9 +608,11 @@ def run_topology_change(tx: TransactionId, coid: CoordinatorId = None):
         'after_streaming': step_after_streaming,
         'use_only_new': step_use_only_new,
         'cleanup': step_cleanup,
+        'mark_dead': step_mark_dead,
         'only_new_ring': step_only_new_ring,
         'unlock': step_unlock,
         'abort_lock': step_abort_lock,
+        'done': step_done,
         '1a': step_1a,
         '2a': step_2a,
         '3a': step_3a,
