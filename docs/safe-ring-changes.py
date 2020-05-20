@@ -501,19 +501,18 @@ def decommission_nodes(nodes: Set[Host]):
     run_topology_change(id)
 
 
-def replace_nodes(old: Host, new: Host):
-    id = create_topology_change(TopologyChangeAction.Replace, [old, new])
-    run_topology_change(id)
+class Replace(RpcMessage):
+    def __init__(self, old: Host, new: Host):
+        self.old = old
+        self.new = new
+
+    def execute(self):
+        id = create_topology_change(TopologyChangeAction.Replace, [self.old, self.new])
+        run_topology_change(id)
 
 
-def resume(id: UUID):
-    """Resumes execution of a given topology change"""
-    run_topology_change(id)
-
-
-def abort(id: UUID):
-    """Aborts given topology change. Will restore the topology to the initial state."""
-    abort_topology_change(id)
+def replace_node(old: Host):
+    Call(seed(), Replace(old, current_node()))
 
 
 class Bootstrap(RpcMessage):
@@ -528,4 +527,14 @@ class Bootstrap(RpcMessage):
 def bootstrap():
     """Executed by the bootstrapping node, when bootstrapped the old auto-bootstrap way"""
     Call(seed(), Bootstrap(current_node()))
+
+
+def resume(id: UUID):
+    """Resumes execution of a given topology change"""
+    run_topology_change(id)
+
+
+def abort(id: UUID):
+    """Aborts given topology change. Will restore the topology to the initial state."""
+    abort_topology_change(id)
 
