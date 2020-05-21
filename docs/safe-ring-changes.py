@@ -9,19 +9,22 @@ import time
 
 
 """
+
 /* local table */
-create table system.token_metadata {
+create table system.token_metadata (
    pk int,
    node UUID,
-   token bigint,
+   "token" bigint,
    status int,
    replication_stage int static,
-   primary key (pk, node, token)
-};
+   primary key (pk, node, "token")
+);
 
 /* distributed, LWT-managed table */
-create table system.topology_changes {
+create table system.topology_changes (
    id UUID,
+   coordinator_id UUID,
+   coordinator_host UUID,
    state int,
    action int,
    action_targets list<UUID>,
@@ -30,22 +33,22 @@ create table system.topology_changes {
    failed bool,
    result text,
    primary key (id)
-};
+);
 
 /* distributed, LWT-managed table */
-create table system.topology_change_intents {
+create table system.topology_change_intents (
    intent_id UUID,
    tx_id UUID,
    mutation blob,
    primary key (intent_id)
-};
+);
 
 /* distributed, LWT-managed table */
-create table system.global_locks {
+create table system.global_locks (
     name text primary key,
     owner UUID,
     candidate UUID
-};
+);
 
 """
 
@@ -279,10 +282,10 @@ def cql_serial(query: str, *args) -> Mapping[str, object]:
 
 
 def try_lock(lock_name: str, owner: UUID) -> bool:
-    """Acquires a mutually-exclusive lock on the ring if not already locked by someone else.
+    """Acquires a mutually-exclusive lock if not already locked by someone else.
     If already locked by the one who attempts to lock, does nothing.
     Will not succeed unless prepare_for_locking() was called earlier.
-    Returns true if and only if owner has the lock after the call.
+    Returns true if and only if a given owner has the lock after the call.
     """
     result = cql_serial("update system.global_locks set owner = {} where key = {} if owner is null and candidate = {}",
                         owner, lock_name, owner)
@@ -301,7 +304,7 @@ def interrupt_lock_attempt(lock_name: str):
 
 
 def unlock(lock_name: str, owner: UUID):
-    """Unlocks the ring if owner is still the lock owner. Otherwise has no effect.
+    """Unlocks the lock if a given owner still owns it. Otherwise has no effect.
     """
     cql_serial("update system.global_locks set owner = null where key = {} if owner = {}", lock_name, owner)
 
@@ -610,7 +613,7 @@ def failover(tx: TransactionId) -> CoordinatorId:
     """
 
     coordinator_id = new_uuid()
-    cql_serial('update system.topology_changes set coordinator = {}, coordinator_host = {} where id = {}',
+    cql_serial('update system.topology_changes set coordinator_id = {}, coordinator_host = {} where id = {}',
                coordinator_id, current_node(), tx)
     # TODO: Interrupt existing coordinator using RPC in the background as an optimization.
     return coordinator_id
