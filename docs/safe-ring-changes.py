@@ -576,6 +576,28 @@ def step_5a(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
     return 'unlock'
 
 
+topology_change_state_machine = {
+    'lock': step_lock,
+    'make_ring': step_make_ring,
+    'advertise_ring': step_advertise_ring,
+    'before_streaming': step_before_streaming,
+    'streaming': step_streaming,
+    'after_streaming': step_after_streaming,
+    'use_only_new': step_use_only_new,
+    'cleanup': step_cleanup,
+    'mark_dead': step_mark_dead,
+    'only_new_ring': step_only_new_ring,
+    'unlock': step_unlock,
+    'abort_lock': step_abort_lock,
+    'done': step_done,
+    '1a': step_1a,
+    '2a': step_2a,
+    '3a': step_3a,
+    '4a': step_4a,
+    '5a': step_5a,
+}
+
+
 #
 # Transaction execution
 #
@@ -586,6 +608,7 @@ def failover(tx: TransactionId) -> CoordinatorId:
     The previous coordinator will be preempted and will eventually stop.
     Call run_topology_change() to actually start executing.
     """
+
     coordinator_id = new_uuid()
     cql_serial('update system.topology_changes set coordinator = {}, coordinator_host = {} where id = {}',
                coordinator_id, current_node(), tx)
@@ -594,54 +617,33 @@ def failover(tx: TransactionId) -> CoordinatorId:
 
 
 def run_topology_change(tx: TransactionId, coid: CoordinatorId = None):
-    """
-    Takes over the task of advancing the state machine of the transaction.
+    """Takes over the task of advancing the state machine of the transaction.
     Can be invoked only on an existing member of the cluster.
     """
-    steps = {
-        'lock': step_lock,
-        'make_ring': step_make_ring,
-        'advertise_ring': step_advertise_ring,
-        'before_streaming': step_before_streaming,
-        'streaming': step_streaming,
-        'after_streaming': step_after_streaming,
-        'use_only_new': step_use_only_new,
-        'cleanup': step_cleanup,
-        'mark_dead': step_mark_dead,
-        'only_new_ring': step_only_new_ring,
-        'unlock': step_unlock,
-        'abort_lock': step_abort_lock,
-        'done': step_done,
-        '1a': step_1a,
-        '2a': step_2a,
-        '3a': step_3a,
-        '4a': step_4a,
-        '5a': step_5a,
-    }
+
     if not coid:
         coid = failover(tx)
-    run_state_machine(tx, coid, steps, read_step, set_step)
+    run_state_machine(tx, coid, topology_change_state_machine, read_step, set_step)
 
 
 def abort_topology_change(tx: TransactionId):
     """Aborts execution of a given topology change in a safe manner.
     Returns when topology change is undone."""
+
+    abort_steps = {
+        'after_streaming': '1a',
+        'streaming': '2a',
+        'before_streaming': '4a',
+        'advertise_ring': '5a',
+        'make_ring': 'unlock',
+        'lock': 'abort_lock'
+    }
+
     coid = failover(tx)
     step, t = read_step(tx)
-    if step == 'after_streaming':
-        set_step(tx, coid, '1a')
-    elif step == 'streaming':
-        set_step(tx, coid, '2a')
-    elif step == 'before_streaming':
-        set_step(tx, coid, '4a')
-    elif step == 'advertise_ring':
-        set_step(tx, coid, '5a')
-    elif step == "make_ring":
-        set_step(tx, coid, 'unlock')
-    elif step == "lock":
-        set_step(tx, coid, 'abort_lock')
-    else:
-        raise Exception('Impossible to abort at this stage')
+    if step not in abort_steps:
+        raise Exception('Impossible to abort at this stage, pausing')
+    set_step(tx, coid, abort_steps[step])
     run_topology_change(tx, coid)
 
 
