@@ -1416,15 +1416,22 @@ void test_large_partition_slicing(column_family& cf, clustered_ds& ds) {
       });
     };
 
-    test(0, 1);
-    test(0, 32);
-    test(0, 256);
-    test(0, 4096);
+    //test(0, 1);
+    //test(0, 32);
+    //test(0, 256);
+    //test(0, 4096);
 
-    test(n_rows / 2, 1);
+    //test(n_rows / 2, 1);
+    //test(n_rows / 2, 32);
+    //test(n_rows / 2, 256);
+    //test(n_rows / 2, 4096);
+
+    test(0, 32);
+    test(1, 32);
+    test(n_rows * 0.1, 32);
     test(n_rows / 2, 32);
-    test(n_rows / 2, 256);
-    test(n_rows / 2, 4096);
+    test(n_rows * 0.9, 32);
+    test(n_rows - 1, 32);
 }
 
 void test_large_partition_slicing_clustering_keys(column_family& cf, clustered_ds& ds) {
@@ -1440,15 +1447,16 @@ void test_large_partition_slicing_clustering_keys(column_family& cf, clustered_d
       });
     };
 
-    test(0, 1);
-    test(0, 32);
-    test(0, 256);
-    test(0, 4096);
-
+    if (0) {
+        test(0, 1);
+        test(0, 32);
+        test(0, 256);
+        test(0, 4096);
+    }
     test(n_rows / 2, 1);
-    test(n_rows / 2, 32);
-    test(n_rows / 2, 256);
-    test(n_rows / 2, 4096);
+    //test(n_rows / 2, 32);
+    //test(n_rows / 2, 256);
+    //test(n_rows / 2, 4096);
 }
 
 void test_large_partition_slicing_single_partition_reader(column_family& cf, clustered_ds& ds) {
@@ -1536,7 +1544,7 @@ void test_small_partition_skips(column_family& cf2, multipart_ds& ds) {
 
     auto r = test(1, 0);
     check_and_report_no_index_reads(r);
-
+if (0) {
     test(1, 1);
     test(1, 8);
     test(1, 16);
@@ -1554,7 +1562,7 @@ void test_small_partition_skips(column_family& cf2, multipart_ds& ds) {
     test(64, 256);
     test(64, 1024);
     test(64, 4096);
-
+}
     if (cache_enabled) {
         output_mgr->add_test_static_param("cache_enabled", "Testing cache scan with small partitions with varying continuity.");
         for (auto n_read : {1, 64}) {
@@ -1847,6 +1855,7 @@ int main(int argc, char** argv) {
         }
 
         std::cout << "Data directory: " << db_cfg.data_file_directories() << "\n";
+        std::cout << "Output directory: " << output_dir << "\n";
 
         auto init = [] {
             auto conf_seed = app.configuration()["random-seed"];
