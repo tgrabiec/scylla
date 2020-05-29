@@ -938,11 +938,6 @@ public:
     int n_rows(const table_config& cfg) override {
         return cfg.n_rows;
     }
-};
-
-class large_part_ds1 : public simple_large_part_ds {
-public:
-    large_part_ds1() : simple_large_part_ds("large-part-ds1", "One large partition with many small rows") {}
 
     generator_fn make_generator(schema_ptr s, const table_config& cfg) override {
         auto value = serialized(make_blob(cfg.value_size));
@@ -959,6 +954,29 @@ public:
             ++ck;
             return m;
         };
+    }
+};
+
+class large_part_ds1 : public simple_large_part_ds {
+public:
+    large_part_ds1() : simple_large_part_ds("large-part-ds1", "One large partition with many small rows") {}
+};
+
+class large_part_large_index : public simple_large_part_ds {
+public:
+    large_part_large_index() : simple_large_part_ds("large-part-large-index", "One large partition with many small rows, large index") {}
+
+    int n_rows(const table_config& cfg) override {
+        return 10000000;
+    }
+};
+
+class large_part_large_index_2 : public simple_large_part_ds {
+public:
+    large_part_large_index_2() : simple_large_part_ds("large-part-large-index-2", "One large partition with many small rows, large index 2") {}
+
+    int n_rows(const table_config& cfg) override {
+        return 100000000;
     }
 };
 
@@ -1589,6 +1607,8 @@ auto make_datasets() {
     };
     add(std::make_unique<small_part_ds1>());
     add(std::make_unique<large_part_ds1>());
+    add(std::make_unique<large_part_large_index>());
+    add(std::make_unique<large_part_large_index_2>());
     return dsets;
 }
 
