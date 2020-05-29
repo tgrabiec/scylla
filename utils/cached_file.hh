@@ -30,8 +30,6 @@
 
 using namespace seastar;
 
-class cached_file;
-
 class cached_file {
     friend class stream;
 public:
@@ -39,7 +37,7 @@ public:
     using page_idx_type = uint64_t;
 
     // Must be aligned to _file.disk_read_dma_alignment(). 4K is always safe.
-    static const size_t page_size = 4096;
+    static constexpr size_t page_size = 4096;
 private:
     file _file;
     reader_permit _permit;
