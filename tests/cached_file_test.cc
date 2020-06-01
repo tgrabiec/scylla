@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 ScyllaDB
+ * Copyright (C) 2020 ScyllaDB
  */
 
 /*
@@ -29,6 +29,7 @@
 
 #include "utils/cached_file.hh"
 #include "tests/random-utils.hh"
+#include "test/lib/log.hh"
 #include "tests/tmpdir.hh"
 
 #include <random>
@@ -47,7 +48,7 @@ SEASTAR_THREAD_TEST_CASE(test_reading_from_small_file) {
 
     auto file_contents = tests::random::get_sstring(1024);
 
-    std::cout << file_contents << "\n";
+    testlog.debug("file contents: {}", file_contents);
 
     output_stream<char> out = make_file_output_stream(f);
     out.write(file_contents.begin(), file_contents.size()).get();
