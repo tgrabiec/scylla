@@ -28,8 +28,7 @@
 
 #include <seastar/core/byteorder.hh>
 
-namespace sstables {
-namespace mc {
+namespace sstables::mc {
 
 // Cursor implementation which does binary search over index entries.
 //
@@ -244,5 +243,4 @@ public:
     }
 };
 
-}
 }
