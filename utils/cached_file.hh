@@ -30,27 +30,40 @@
 
 using namespace seastar;
 
+/// An in-memory read-through cache of a subset of a file.
+///
+/// Caches contents with page granularity (4KiB).
+/// Cached pages are evicted manually or when the object is destroyed.
+///
+/// The reason this represents a subset rather than the whole range is so that we can
+/// have a page-aligned caching and an effective populate_front() which can be given
+/// an unaligned buffer. If the cached_file represented the whole range, we wouldn't be
+/// able to populate a range starting at an unaligned address.
+///
 class cached_file {
-    friend class stream;
 public:
     using offset_type = uint64_t;
+
+    // The content of the underlying file (_file) is divided into pages
+    // of equal size (page_size). This type is used to identify pages.
+    // Pages are assigned consecutive identifiers starting from 0.
     using page_idx_type = uint64_t;
 
     // Must be aligned to _file.disk_read_dma_alignment(). 4K is always safe.
     static constexpr size_t page_size = 4096;
 private:
-    file _file;
-    reader_permit _permit;
-
     struct cached_page {
         temporary_buffer<char> buf;
         cached_page(temporary_buffer<char> buf) : buf(std::move(buf)) {}
     };
 
+    file _file;
+    reader_permit _permit;
     std::map<page_idx_type, cached_page> _cache;
 
     const offset_type _start;
     const offset_type _size;
+
     offset_type _last_page_size; // Ignores _start in case the start lies on the same page.
     page_idx_type _last_page;
 private:
@@ -80,13 +93,31 @@ private:
         auto read_idx = idx - leading_pages;
         auto buf = temporary_buffer<char>::aligned(_file.memory_dma_alignment(), (leading_pages + trailing_pages) * page_size);
         buf = make_tracked_temporary_buffer(std::move(buf), _permit);
-        return _file.dma_read(read_idx * page_size, buf.get_write(), buf.size(), pc).then([this, idx, leading_pages, read_idx, buf = std::move(buf)] (size_t size) mutable {
-            buf.trim(size);
-            populate_pages(read_idx, buf.share());
-            buf.trim_front(leading_pages * page_size);
-            buf.trim(std::min(size, page_size));
-            return std::move(buf);
-        });
+        //sstables::sstlog.trace("get_page {} {} {} {} {} {}", idx, io_size, read_idx * page_size, buf.size(), leading_pages, trailing_pages);
+        return _file.dma_read(read_idx * page_size, buf.get_write(), buf.size(), pc)
+            .then([this, idx, leading_pages, read_idx, buf = std::move(buf)] (size_t size) mutable {
+                buf.trim(size);
+                populate_pages(read_idx, buf.share());
+                buf.trim_front(leading_pages * page_size);
+                buf.trim(std::min(size, page_size));
+                return std::move(buf);
+            });
+    }
+
+    future<temporary_buffer<char>> get_page(page_idx_type idx, const io_priority_class& pc) {
+        auto i = _cache.lower_bound(idx);
+        if (i != _cache.end() && i->first == idx) {
+            cached_page& cp = i->second;
+            return make_ready_future<temporary_buffer<char>>(cp.buf.share());
+        }
+        auto buf = temporary_buffer<char>::aligned(_file.memory_dma_alignment(), page_size);
+        buf = make_tracked_temporary_buffer(std::move(buf), _permit);
+        return _file.dma_read(idx * page_size, buf.get_write(), buf.size(), pc)
+            .then([this, idx, buf = std::move(buf)] (size_t size) mutable {
+                buf.trim(size);
+                _cache.emplace(idx, cached_page(buf.share()));
+                return std::move(buf);
+            });
     }
 public:
     // Generator for subsequent pages of data read from the file.
@@ -140,6 +171,7 @@ public:
     }
 public:
     // This instance will represent a subset of f consisting of bytes from the range [start, start + size).
+    // All offsets passed to public methods are relative to that subset's start.
     cached_file(file f, reader_permit permit, offset_type start, offset_type size)
         : _file(std::move(f))
         , _permit(std::move(permit))
@@ -190,11 +222,7 @@ public:
         _cache.erase(_cache.begin(), _cache.lower_bound((_start + end) / page_size));
     }
 
-    size_t cached_bytes() const {
-        return _cache.size() * page_size;
-    }
-
-    // Returns a stream representing the subset of the file starting at pos.
+    // Returns a stream with data which starts at position pos in the area managed by this instance.
     // The stream does not do any read-ahead.
     // io_size must be a multiple of page_size.
     stream read(offset_type pos, const io_priority_class& pc, size_t io_size = page_size) {
@@ -205,5 +233,12 @@ public:
         return stream(*this, pc, page_idx, offset, io_size);
     }
 
-    offset_type size() const { return _size; }
+    // Number of bytes in the area managed by this instance.
+    offset_type size() const {
+        return _size;
+    }
+
+    size_t cached_bytes() const {
+        return _cache.size() * page_size;
+    }
 };
