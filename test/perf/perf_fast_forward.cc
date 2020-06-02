@@ -196,7 +196,8 @@ using stats_values = std::tuple<
     uint64_t, // c_hit
     uint64_t, // c_miss
     uint64_t, // c_blk
-    float // cpu
+    float, // cpu
+    ssize_t // mem
 >;
 
 
@@ -237,6 +238,7 @@ std::array<sstring, std::tuple_size<stats_values>::value> stats_formats =
     "{}",
     "{}",
     "{:.1f}%",
+    "{}",
 };
 
 class text_output_writer final
@@ -571,6 +573,7 @@ struct test_result {
     uint64_t fragments_read;
     metrics_snapshot before;
     metrics_snapshot after;
+    reader_resources consumed_reader_resources;
 private:
     unsigned _iterations = 1;
     double _fragment_rate_mad = 0;
@@ -583,9 +586,10 @@ public:
 
     test_result() = default;
 
-    test_result(metrics_snapshot before, uint64_t fragments_read)
+    test_result(metrics_snapshot before, uint64_t fragments_read, reader_resources consumed_reader_resources = {})
         : fragments_read(fragments_read)
         , before(before)
+        , consumed_reader_resources(consumed_reader_resources)
     { }
 
     double duration_in_seconds() const {
@@ -650,7 +654,8 @@ public:
             {"c hit",    "{:>8}"},
             {"c miss",   "{:>8}"},
             {"c blk",    "{:>8}"},
-            {"cpu",      "{:>6}"}
+            {"cpu",      "{:>6}"},
+            {"mem",      "{:>6}"}
         };
     }
 
@@ -680,7 +685,8 @@ public:
             cache_hits(),
             cache_misses(),
             cache_insertions(),
-            cpu_utilization() * 100
+            cpu_utilization() * 100,
+            consumed_reader_resources.memory
         };
     }
 };
@@ -753,6 +759,7 @@ static test_result scan_rows_with_stride(column_family& cf, int n_rows, int n_re
         nullptr,
         n_skip ? streamed_mutation::forwarding::yes : streamed_mutation::forwarding::no);
 
+    auto before_resources = cf.read_concurrency_semaphore().consumed_resources();
     metrics_snapshot before;
     assert_partition_start(rd);
 
@@ -768,8 +775,9 @@ static test_result scan_rows_with_stride(column_family& cf, int n_rows, int n_re
         fragments += consume_all(rd);
         ck += n_read + n_skip;
     }
-
-    return {before, fragments};
+    auto after_resources = cf.read_concurrency_semaphore().consumed_resources();
+    after_resources -= before_resources;
+    return {before, fragments, after_resources};
 }
 
 static dht::decorated_key make_pkey(const schema& s, int n) {
