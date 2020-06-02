@@ -109,6 +109,7 @@ private:
 
 private:
     resources _resources;
+    const resources _max_resources;
 
     expiring_fifo<entry, expiry_handler, db::timeout_clock> _wait_list;
 
@@ -146,6 +147,7 @@ public:
             size_t max_queue_length = std::numeric_limits<size_t>::max(),
             std::function<void()> prethrow_action = nullptr)
         : _resources(count, memory)
+        , _max_resources(_resources)
         , _wait_list(expiry_handler(name))
         , _name(std::move(name))
         , _max_queue_length(max_queue_length)
@@ -206,6 +208,12 @@ public:
 
     const resources available_resources() const {
         return _resources;
+    }
+
+    resources consumed_resources() const {
+        resources ret = _max_resources;
+        ret -= _resources;
+        return ret;
     }
 
     size_t waiters() const {
