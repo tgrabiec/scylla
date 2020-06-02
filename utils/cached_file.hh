@@ -54,6 +54,7 @@ private:
     offset_type _last_page_size; // Ignores _start in case the start lies on the same page.
     page_idx_type _last_page;
 private:
+    // io_size must be aligned to page_size
     future<temporary_buffer<char>> get_page(page_idx_type idx, const io_priority_class& pc, size_t io_size) {
         auto i = _cache.lower_bound(idx);
         if (i != _cache.end() && i->first == idx) {
@@ -63,14 +64,14 @@ private:
 
         auto io_pages = io_size / page_size;
 
-        page_idx_type leading_pages = 0; // Holds number of pages with index < idx
+        page_idx_type leading_pages = std::min(io_pages / 2, idx); // Holds number of pages with index < idx
         if (i != _cache.begin()) {
             page_idx_type prev_idx = std::prev(i)->first;
-            leading_pages = std::min(io_pages / 2, idx - prev_idx - 1);
+            leading_pages = std::min(leading_pages, idx - prev_idx - 1);
         }
 
         const auto pages_up_to_area_end = _last_page - idx + 1;
-        page_idx_type trailing_pages = pages_up_to_area_end; // Holds number of pages with index >= idx
+        page_idx_type trailing_pages = std::min(div_ceil(io_pages, 2), pages_up_to_area_end); // Holds number of pages with index >= idx
         if (i != _cache.end()) {
             page_idx_type next_idx = std::next(i)->first;
             trailing_pages = std::min(trailing_pages, next_idx - idx);
@@ -168,6 +169,29 @@ public:
         if (buf.size() == page_size) {
             _cache.emplace(idx, cached_page(std::move(buf)));
         }
+    }
+
+    // Invalidates [start, end) or less.
+    //
+    // Postconditions:
+    //
+    //   - all bytes outside [start, end) which were cached before the call will still be cached.
+    //
+    void invalidate_at_most(offset_type start, offset_type end) {
+        auto lo_page = (_start + start - std::min<offset_type>(start, 1)) / page_size + 1;
+        auto hi_page = (_start + end) / page_size;
+        if (lo_page < hi_page) {
+            _cache.erase(_cache.lower_bound(lo_page), _cache.lower_bound(hi_page));
+        }
+    }
+
+    // Equivalent to invalidate_at_most(0, end).
+    void invalidate_at_most_front(offset_type end) {
+        _cache.erase(_cache.begin(), _cache.lower_bound((_start + end) / page_size));
+    }
+
+    size_t cached_bytes() const {
+        return _cache.size() * page_size;
     }
 
     // Returns a stream representing the subset of the file starting at pos.
