@@ -32,9 +32,9 @@ namespace sstables::mc {
 
 // Cursor implementation which does binary search over index entries.
 //
-// Memory complexity: O(1)
+// Memory consumption: O(log(N))
 //
-// Average cost of first lookup:
+// Worst-case lookup cost:
 //
 //    comparisons: O(log(N))
 //    I/O:         O(log(N))
@@ -60,6 +60,7 @@ class bsearch_clustered_cursor : public clustered_index_cursor {
     data_consumer::primitive_consumer _primitive_parser;
     clustering_parser _clustering_parser;
     promoted_index_block_parser _block_parser;
+    pi_offset_type _block_offset;
     cached_file::stream _stream;
     pi_index_type _upper_idx;
 private:
@@ -75,10 +76,15 @@ private:
         });
     }
 
+    // Returns offset in the _promoted_index of the entry in the offset map for the promoted index block identified by idx.
+    // idx must be in 0..(_blocks_count-1)
+    pi_offset_type get_offset_entry_pos(pi_index_type idx) const {
+        return _promoted_index.size() - (_blocks_count - idx) * sizeof(pi_offset_type);
+    }
+
     // idx must be in 0..(_blocks_count-1)
     future<pi_offset_type> get_block_offset(pi_index_type idx) {
-        auto offset_entry_pos = _promoted_index.size() - (_blocks_count - idx) * sizeof(pi_offset_type);
-        _stream = _promoted_index.read(offset_entry_pos, _pc);
+        _stream = _promoted_index.read(get_offset_entry_pos(idx), _pc);
         return _stream.next().then([this, idx] (temporary_buffer<char>&& buf) {
             if (__builtin_expect(_primitive_parser.read_32(buf) == data_consumer::read_status::ready, true)) {
                 return make_ready_future<uint32_t>(_primitive_parser._u32);
@@ -108,6 +114,7 @@ private:
         // which may have been already parsed when scanning through the index.
         return get_block_offset(idx).then([idx, this] (pi_offset_type offset) {
             _stream = _promoted_index.read(offset, _pc);
+            _block_offset = offset;
             _block_parser.reset();
             return consume_stream(_stream, _block_parser);
         });
@@ -210,6 +217,10 @@ public:
                         skip_info{datafile_offset, tombstone(), position_in_partition::before_all_clustered_rows()});
                 }
                 return parse_block(_current_idx - 2).then([this, datafile_offset] () -> std::optional<skip_info> {
+                    // We need to invalidate cached index blocks as we walk so that memory
+                    // footprint is not O(N) but O(log(N)).
+                    _promoted_index.invalidate_at_most_front(_block_offset);
+                    _promoted_index.invalidate_at_most(get_offset_entry_pos(0), get_offset_entry_pos(_current_idx - 2));
                     if (!_block_parser.end_open_marker()) {
                         return skip_info{datafile_offset, tombstone(), position_in_partition::before_all_clustered_rows()};
                     }
