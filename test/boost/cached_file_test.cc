@@ -19,20 +19,21 @@
  * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-
 #include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
 #include <seastar/core/iostream.hh>
 #include <seastar/core/fstream.hh>
+#include <seastar/core/file.hh>
+#include <seastar/core/reactor.hh>
+#include <seastar/util/defer.hh>
 
-#include <iostream>
+#include "test/lib/random_utils.hh"
+#include "test/lib/log.hh"
+#include "test/lib/tmpdir.hh"
 
 #include "utils/cached_file.hh"
-#include "tests/random-utils.hh"
-#include "test/lib/log.hh"
-#include "tests/tmpdir.hh"
 
-#include <random>
+using namespace seastar;
 
 static sstring read_to_string(cached_file::stream& s) {
     sstring b;
@@ -51,11 +52,12 @@ SEASTAR_THREAD_TEST_CASE(test_reading_from_small_file) {
     testlog.debug("file contents: {}", file_contents);
 
     output_stream<char> out = make_file_output_stream(f);
+    auto close_out = defer([&] { out.close().get(); });
     out.write(file_contents.begin(), file_contents.size()).get();
     out.flush().get();
 
     {
-        cached_file cf(f, 0, file_contents.size());
+        cached_file cf(f, no_reader_permit(), 0, file_contents.size());
 
         {
             auto s = cf.read(0, default_priority_class());
@@ -75,7 +77,7 @@ SEASTAR_THREAD_TEST_CASE(test_reading_from_small_file) {
 
     {
         size_t off = 100;
-        cached_file cf(f, off, file_contents.size() - off);
+        cached_file cf(f, no_reader_permit(), off, file_contents.size() - off);
 
         {
             auto s = cf.read(0, default_priority_class());
