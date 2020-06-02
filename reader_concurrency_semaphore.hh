@@ -45,7 +45,7 @@ using namespace seastar;
 /// number of waiting readers becomes equal or greater than
 /// `max_queue_length` (upon calling `wait_admission()`) an exception of
 /// type `std::runtime_error` is thrown. Optionally, some additional
-/// code can be executed just before throwing (`prethrow_action` 
+/// code can be executed just before throwing (`prethrow_action`
 /// constructor parameter).
 class reader_concurrency_semaphore {
 public:
@@ -109,6 +109,7 @@ private:
 private:
     const resources _initial_resources;
     resources _resources;
+    const resources _max_resources;
 
     expiring_fifo<entry, expiry_handler, db::timeout_clock> _wait_list;
 
@@ -140,6 +141,7 @@ public:
             std::function<void()> prethrow_action = nullptr)
         : _initial_resources(count, memory)
         , _resources(count, memory)
+        , _max_resources(_resources)
         , _wait_list(expiry_handler(name))
         , _name(std::move(name))
         , _max_queue_length(max_queue_length)
@@ -217,6 +219,12 @@ public:
     }
 
     void signal(const resources& r) noexcept;
+
+    resources consumed_resources() const {
+        resources ret = _max_resources;
+        ret -= _resources;
+        return ret;
+    }
 
     size_t waiters() const {
         return _wait_list.size();
