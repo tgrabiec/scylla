@@ -940,6 +940,7 @@ public:
 class multipart_ds {
 public:
     virtual int n_partitions(const table_config&) = 0;
+    virtual int rows_per_partition(const table_config&) = 0;
 };
 
 class simple_large_part_ds : public clustered_ds, public dataset {
@@ -997,6 +998,10 @@ public:
 
     int n_partitions(const table_config& cfg) override {
         return cfg.n_rows;
+    }
+
+    int rows_per_partition(const table_config&) override {
+        return 1;
     }
 };
 
@@ -1517,7 +1522,7 @@ void test_small_partition_skips(column_family& cf2, multipart_ds& ds) {
         auto r = scan_with_stride_partitions(cf2, n_parts, n_read, n_skip);
         r.set_params(to_sstrings(new_test_case ? "->" : "", n_read, n_skip));
         new_test_case = false;
-        check_fragment_count(r, count_for_skip_pattern(n_parts, n_read, n_skip));
+        check_fragment_count(r, count_for_skip_pattern(n_parts, n_read, n_skip) * ds.rows_per_partition(cfg));
         return r;
     };
     auto test = [&] (int n_read, int n_skip) {
@@ -1574,7 +1579,7 @@ void test_small_partition_slicing(column_family& cf2, multipart_ds& ds) {
       run_test_case([&] {
         auto r = slice_partitions(cf2, keys, offset, read);
         r.set_params(to_sstrings(offset, read));
-        check_fragment_count(r, std::min(n_parts - offset, read));
+        check_fragment_count(r, std::min(n_parts - offset, read) *  ds.rows_per_partition(cfg));
         return r;
       });
     };
