@@ -1005,6 +1005,38 @@ public:
     }
 };
 
+class medium_part_ds1 : public multipart_ds, public dataset {
+public:
+    medium_part_ds1() : dataset("medium-part", "Many medium-sized (100 rows) partitions with clustering key",
+        "create table {} (pk int, ck int, value blob, primary key (pk, ck))") {}
+
+    generator_fn make_generator(schema_ptr s, const table_config& cfg) override {
+        auto value = serialized(make_blob(cfg.value_size));
+        auto& value_cdef = *s->get_column_definition("value");
+        return [this, s, pk = 0, n_pk = n_partitions(cfg), n_cks = rows_per_partition(cfg), &value_cdef, value] () mutable -> std::optional<mutation> {
+            if (pk == n_pk) {
+                return std::nullopt;
+            }
+            auto ts = api::new_timestamp();
+            mutation m(s, partition_key::from_single_value(*s, serialized(pk)));
+            for (int ck = 0; ck < n_cks; ++ck) {
+                auto& row = m.partition().clustered_row(*s, clustering_key::from_single_value(*s, serialized(ck)));
+                row.cells().apply(value_cdef, atomic_cell::make_live(*value_cdef.type, ts, value));
+            }
+            ++pk;
+            return m;
+        };
+    }
+
+    int n_partitions(const table_config& cfg) override {
+        return cfg.n_rows / rows_per_partition(cfg);
+    }
+
+    int rows_per_partition(const table_config&) override {
+        return 100;
+    }
+};
+
 static test_result test_forwarding_with_restriction(column_family& cf, clustered_ds& ds, table_config& cfg, bool single_partition) {
     auto first_key = ds.n_rows(cfg) / 2;
     auto slice = partition_slice_builder(*cf.schema())
@@ -1606,6 +1638,7 @@ auto make_datasets() {
         dsets.emplace(std::move(name), std::move(ds));
     };
     add(std::make_unique<small_part_ds1>());
+    add(std::make_unique<medium_part_ds1>());
     add(std::make_unique<large_part_ds1>());
     return dsets;
 }
