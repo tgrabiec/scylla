@@ -3460,6 +3460,10 @@ sstable::sstable(schema_ptr schema,
     tracker.add(*this);
 }
 
+std::ostream& operator<<(std::ostream& out, const deletion_time& dt) {
+    return out << "{timestamp=" << dt.marked_for_delete_at << ", deletion_time=" << dt.marked_for_delete_at << "}";
+}
+
 }
 
 std::ostream& operator<<(std::ostream& out, const sstables::component_type& comp_type) {
