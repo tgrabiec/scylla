@@ -124,8 +124,7 @@ public:
     ~data_consume_context() {
         if (_ctx) {
             auto f = _ctx->close();
-            //FIXME: discarded future.
-            (void)f.handle_exception([ctx = std::move(_ctx), sst = std::move(_sst)](auto) {});
+            (void)f.handle_exception([ctx = std::move(_ctx), sst = std::move(_sst), op = background_jobs().start()](auto) {});
         }
     }
 
