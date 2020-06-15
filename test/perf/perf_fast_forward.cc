@@ -1480,15 +1480,18 @@ void test_large_partition_slicing_clustering_keys(column_family& cf, clustered_d
       });
     };
 
-    test(0, 1);
-    test(0, 32);
-    test(0, 256);
-    test(0, 4096);
-
+    if (1) {
+        test(0, 1);
+        test(0, 32);
+        test(0, 256);
+        test(0, 4096);
+    }
     test(n_rows / 2, 1);
-    test(n_rows / 2, 32);
-    test(n_rows / 2, 256);
-    test(n_rows / 2, 4096);
+    if (1) {
+        test(n_rows / 2, 32);
+        test(n_rows / 2, 256);
+        test(n_rows / 2, 4096);
+    }
 }
 
 void test_large_partition_slicing_single_partition_reader(column_family& cf, clustered_ds& ds) {
