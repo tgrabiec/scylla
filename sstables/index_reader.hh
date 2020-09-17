@@ -700,7 +700,7 @@ private:
         return _sstable->data_size();
     }
 
-    future<> close(index_bound& b) {
+    static future<> close(index_bound& b) {
         return reset_clustered_cursor(b);
     }
 public:
@@ -747,14 +747,20 @@ public:
         return options;
     }
 
+    // Returns a pointer to the clustered index cursor for the current partition
+    // or nullptr if there is no clustered index in the current partition.
+    // Returns the same instance until we move to a different partition.
     clustered_index_cursor* current_clustered_cursor(index_bound& bound) {
-        index_entry& e = current_partition_entry(bound);
-        promoted_index* pi = e.get_promoted_index().get();
-        if (!pi) {
-            return nullptr;
+        if (!bound.clustered_cursor) {
+            index_entry& e = current_partition_entry(bound);
+            promoted_index* pi = e.get_promoted_index().get();
+            if (!pi) {
+                return nullptr;
+            }
+            bound.clustered_cursor = pi->make_cursor(_sstable, _permit, _trace_state,
+                get_file_input_stream_options(_pc));
         }
-        bound.clustered_cursor = pi->make_cursor(_sstable, _permit, _trace_state, get_file_input_stream_options(_pc));
-        return &*_lower_bound.clustered_cursor;
+        return &*bound.clustered_cursor;
     }
 
     // Returns tombstone for the current partition if it was recorded in the sstable.
