@@ -30,6 +30,8 @@
 #include "utils/overloaded_functor.hh"
 #include "sstables/mx/parsers.hh"
 
+#include <seastar/core/fstream.hh>
+
 namespace sstables {
 
 using promoted_index_block_position_view = std::variant<composite_view, position_in_partition_view>;
