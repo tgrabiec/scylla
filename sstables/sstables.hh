@@ -24,6 +24,7 @@
 
 #include "version.hh"
 #include "shared_sstable.hh"
+#include "shared_index_lists.hh"
 #include <seastar/core/file.hh>
 #include <seastar/core/fstream.hh>
 #include <seastar/core/future.hh>
@@ -552,7 +553,7 @@ private:
 
     sstables_stats _stats;
     tracker_link_type _tracker_link;
-
+    shared_index_lists _index_lists;
 public:
     const bool has_component(component_type f) const;
 private:
