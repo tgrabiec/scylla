@@ -400,7 +400,7 @@ class promoted_index {
     deletion_time _del_time;
     file _index_file;
     uint64_t _promoted_index_start;
-    uint32_t _promoted_index_size;
+    uint64_t _promoted_index_size;
     uint32_t _num_blocks;
     temporary_buffer<char> _front; // pre-read front of the promoted index.
     bool _use_binary_search;
@@ -409,7 +409,7 @@ public:
         deletion_time del_time,
         file index_file,
         uint64_t promoted_index_start,
-        uint32_t promoted_index_size,
+        uint64_t promoted_index_size,
         uint32_t num_blocks,
         temporary_buffer<char> front,
         bool use_binary_search)
