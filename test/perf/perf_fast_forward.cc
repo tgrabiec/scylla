@@ -761,7 +761,7 @@ static test_result scan_rows_with_stride(column_family& cf, int n_rows, int n_re
         nullptr,
         n_skip ? streamed_mutation::forwarding::yes : streamed_mutation::forwarding::no);
 
-    auto before_resources = cql_env->local_db().make_query_class_config().semaphore.consumed_resources();
+    auto before_resources = tests::make_query_class_config().semaphore.consumed_resources();
     metrics_snapshot before;
     assert_partition_start(rd);
 
@@ -777,7 +777,7 @@ static test_result scan_rows_with_stride(column_family& cf, int n_rows, int n_re
         fragments += consume_all(rd);
         ck += n_read + n_skip;
     }
-    auto after_resources = cql_env->local_db().make_query_class_config().semaphore.consumed_resources();
+    auto after_resources = tests::make_query_class_config().semaphore.consumed_resources();
     after_resources -= before_resources;
     return {before, fragments, after_resources};
 }
