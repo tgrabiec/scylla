@@ -952,7 +952,7 @@ class scylla_task_histogram(gdb.Command):
         vptr_type = gdb.lookup_type('uintptr_t').pointer()
 
         pages = cpu_mem['pages']
-        nr_pages = int(cpu_mem['nr_pages'])
+        nr_pages = long(cpu_mem['nr_pages'])
         page_samples = range(0, nr_pages) if args.all else random.sample(range(0, nr_pages), nr_pages)
 
         text_start, text_end = get_text_range()
@@ -994,7 +994,7 @@ def find_vptrs():
     mem_start = cpu_mem['memory']
     vptr_type = gdb.lookup_type('uintptr_t').pointer()
     pages = cpu_mem['pages']
-    nr_pages = int(cpu_mem['nr_pages'])
+    nr_pages = long(cpu_mem['nr_pages'])
 
     text_start, text_end = get_text_range()
     def is_vptr(addr):
@@ -1271,9 +1271,9 @@ class span(object):
 def spans():
     cpu_mem = gdb.parse_and_eval('\'seastar::memory::cpu_mem\'')
     page_size = int(gdb.parse_and_eval('\'seastar::memory::page_size\''))
-    nr_pages = int(cpu_mem['nr_pages'])
+    nr_pages = long(cpu_mem['nr_pages'])
     pages = cpu_mem['pages']
-    mem_start = int(cpu_mem['memory'])
+    mem_start = long(cpu_mem['memory'])
     idx = 1
     while idx < nr_pages:
         page = pages[idx]
@@ -1479,8 +1479,8 @@ class scylla_memory(gdb.Command):
     def invoke(self, arg, from_tty):
         cpu_mem = gdb.parse_and_eval('\'seastar::memory::cpu_mem\'')
         page_size = int(gdb.parse_and_eval('\'seastar::memory::page_size\''))
-        free_mem = int(cpu_mem['nr_free_pages']) * page_size
-        total_mem = int(cpu_mem['nr_pages']) * page_size
+        free_mem = long(cpu_mem['nr_free_pages']) * page_size
+        total_mem = long(cpu_mem['nr_pages']) * page_size
         gdb.write('Used memory: {used_mem:>13}\nFree memory: {free_mem:>13}\nTotal memory: {total_mem:>12}\n\n'
                   .format(used_mem=total_mem - free_mem, free_mem=free_mem, total_mem=total_mem))
 
@@ -1568,7 +1568,7 @@ class scylla_memory(gdb.Command):
         gdb.write('{index:5} {size:>13} {total:>13} {allocated_size:>13} {allocated_count:>7}\n'.format(
             index="index", size="size [B]", total="free [B]", allocated_size="large [B]", allocated_count="[spans]"))
         total_large_bytes = 0
-        for index in range(int(cpu_mem['nr_span_lists'])):
+        for index in range(long(cpu_mem['nr_span_lists'])):
             span_list = cpu_mem['free_spans'][index]
             front = int(span_list['_front'])
             pages = cpu_mem['pages']
@@ -1782,8 +1782,8 @@ class scylla_heapprof(gdb.Command):
 def get_seastar_memory_start_and_size():
     cpu_mem = gdb.parse_and_eval('\'seastar::memory::cpu_mem\'')
     page_size = int(gdb.parse_and_eval('\'seastar::memory::page_size\''))
-    total_mem = int(cpu_mem['nr_pages']) * page_size
-    start = int(cpu_mem['memory'])
+    total_mem = long(cpu_mem['nr_pages']) * page_size
+    start = long(cpu_mem['memory'])
     return start, total_mem
 
 
@@ -1906,7 +1906,7 @@ class scylla_ptr(gdb.Command):
 
         cpu_mem = gdb.parse_and_eval('\'seastar::memory::cpu_mem\'')
         page_size = int(gdb.parse_and_eval('\'seastar::memory::page_size\''))
-        offset = ptr - int(cpu_mem['memory'])
+        offset = ptr - long(cpu_mem['memory'])
         ptr_page_idx = offset / page_size
         pages = cpu_mem['pages']
         page = pages[ptr_page_idx]
