@@ -35,9 +35,8 @@
 
 namespace sstables::mc {
 
-/// A read-through cache of promoted index entries.
-///
-/// Designed for a single user. Methods must not be invoked concurrently.
+/// Holds cached promoted index entries.
+/// Access through cached_promoted_index_reader.
 ///
 /// All methods provide basic exception guarantee.
 class cached_promoted_index {
@@ -161,9 +160,45 @@ private:
     //
     using block_set_type = std::set<promoted_index_block, block_comparator>;
     block_set_type _blocks;
+
+    friend class cached_promoted_index_reader;
 public:
+    cached_promoted_index(const schema& s)
+        : _blocks(block_comparator{s})
+    { }
+
+    ~cached_promoted_index() {
+        assert(_blocks.empty());
+    }
+
+    void erase_range(metrics& m, block_set_type::iterator begin, block_set_type::iterator end) {
+        while (begin != end) {
+            --m.block_count;
+            ++m.evictions;
+            m.used_bytes -= begin->memory_usage();
+            begin = _blocks.erase(begin);
+        }
+    }
+
+    void clear(metrics& m) {
+        erase_range(m, _blocks.begin(), _blocks.end());
+    }
+};
+
+/// A read-through cache of promoted index entries.
+///
+/// Designed for a single user. Methods must not be invoked concurrently.
+///
+/// All methods provide basic exception guarantee.
+class cached_promoted_index_reader {
+public:
+    using pi_offset_type = cached_promoted_index::pi_offset_type;
+    using pi_index_type = cached_promoted_index::pi_index_type;
+    using promoted_index_block = cached_promoted_index::promoted_index_block;
+private:
     const schema& _s;
-    metrics& _metrics;
+    cached_promoted_index::metrics& _metrics;
+    cached_promoted_index& _cache;
     const pi_index_type _blocks_count;
     const io_priority_class _pc;
     cached_file _cached_file;
@@ -235,40 +270,32 @@ private:
 
     /// \brief Returns a pointer to promoted_index_block entry which has at least offset and index fields valid.
     future<promoted_index_block*> get_block_only_offset(pi_index_type idx, tracing::trace_state_ptr trace_state) {
-        auto i = _blocks.lower_bound(idx);
-        if (i != _blocks.end() && i->index == idx) {
+        auto i = _cache._blocks.lower_bound(idx);
+        if (i != _cache._blocks.end() && i->index == idx) {
             ++_metrics.hits_l0;
             return make_ready_future<promoted_index_block*>(const_cast<promoted_index_block*>(&*i));
         }
         ++_metrics.misses_l0;
         return read_block_offset(idx, trace_state).then([this, idx, hint = i] (pi_offset_type offset) {
-            auto i = this->_blocks.emplace_hint(hint, idx, offset);
+            auto i = this->_cache._blocks.emplace_hint(hint, idx, offset);
             _metrics.used_bytes += sizeof(promoted_index_block);
             ++_metrics.block_count;
             ++_metrics.populations;
             return const_cast<promoted_index_block*>(&*i);
         });
     }
-
-    void erase_range(block_set_type::iterator begin, block_set_type::iterator end) {
-        while (begin != end) {
-            --_metrics.block_count;
-            ++_metrics.evictions;
-            _metrics.used_bytes -= begin->memory_usage();
-            begin = _blocks.erase(begin);
-        }
-    }
 public:
-    cached_promoted_index(const schema& s,
-            metrics& m,
+    cached_promoted_index_reader(const schema& s,
+            cached_promoted_index::metrics& m,
+            cached_promoted_index& c,
             reader_permit permit,
             column_values_fixed_lengths cvfl,
             cached_file f,
             io_priority_class pc,
             pi_index_type blocks_count)
-        : _blocks(block_comparator{s})
-        , _s(s)
+        : _s(s)
         , _metrics(m)
+        , _cache(c)
         , _blocks_count(blocks_count)
         , _pc(pc)
         , _cached_file(std::move(f))
@@ -276,14 +303,6 @@ public:
         , _clustering_parser(s, permit, cvfl, true)
         , _block_parser(s, std::move(permit), std::move(cvfl))
     { }
-
-    ~cached_promoted_index() {
-        _metrics.block_count -= _blocks.size();
-        _metrics.evictions += _blocks.size();
-        for (auto&& b : _blocks) {
-            _metrics.used_bytes -= b.memory_usage();
-        }
-    }
 
     /// \brief Returns a pointer to promoted_index_block entry which has at least offset, index and start fields valid.
     future<promoted_index_block*> get_block_with_start(pi_index_type idx, tracing::trace_state_ptr trace_state) {
@@ -320,8 +339,8 @@ public:
     /// Resolving with std::nullopt means the position is not known. The caller should
     /// use the end of the partition as the upper bound.
     future<std::optional<uint64_t>> upper_bound_cache_only(position_in_partition_view pos, tracing::trace_state_ptr trace_state) {
-        auto i = _blocks.upper_bound(pos);
-        if (i == _blocks.end()) {
+        auto i = _cache._blocks.upper_bound(pos);
+        if (i == _cache._blocks.end()) {
             return make_ready_future<std::optional<uint64_t>>(std::nullopt);
         }
         auto& block = const_cast<promoted_index_block&>(*i);
@@ -337,7 +356,7 @@ public:
     void invalidate_prior(promoted_index_block* block, tracing::trace_state_ptr trace_state) {
         _cached_file.invalidate_at_most_front(block->offset, trace_state);
         _cached_file.invalidate_at_most(get_offset_entry_pos(0), get_offset_entry_pos(block->index), trace_state);
-        erase_range(_blocks.begin(), _blocks.lower_bound(block->index));
+        _cache.erase_range(_metrics, _cache._blocks.begin(), _cache._blocks.lower_bound(block->index));
     }
 
     cached_file& file() { return _cached_file; }
@@ -361,7 +380,9 @@ class bsearch_clustered_cursor : public clustered_index_cursor {
 
     const schema& _s;
     const pi_index_type _blocks_count;
-    cached_promoted_index _promoted_index;
+    cached_promoted_index _cache;
+    cached_promoted_index_reader _promoted_index;
+    cached_promoted_index::metrics& _metrics;
 
     // Points to the block whose start is greater than the position of the cursor (its upper bound).
     pi_index_type _current_idx = 0;
@@ -439,9 +460,15 @@ public:
             tracing::trace_state_ptr trace_state)
         : _s(s)
         , _blocks_count(blocks_count)
-        , _promoted_index(s, metrics, std::move(permit), std::move(cvfl), std::move(f), pc, blocks_count)
+        , _cache(s)
+        , _promoted_index(s, metrics, _cache, std::move(permit), std::move(cvfl), std::move(f), pc, blocks_count)
+        , _metrics(metrics)
         , _trace_state(std::move(trace_state))
     { }
+
+    ~bsearch_clustered_cursor() {
+        _cache.clear(_metrics);
+    }
 
     future<std::optional<skip_info>> advance_to(position_in_partition_view pos) override {
         position_in_partition::less_compare less(_s);
