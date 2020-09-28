@@ -125,6 +125,30 @@ SEASTAR_TEST_CASE(test_loading_shared_values_parallel_loading_same_key) {
     });
 }
 
+SEASTAR_TEST_CASE(test_loading_shared_values_eviction) {
+    return seastar::async([] {
+        std::vector<int> ivec(num_loaders);
+        load_count = 0;
+        utils::loading_shared_values<int, sstring> shared_values;
+        std::list<typename utils::loading_shared_values<int, sstring>::entry_ptr> anchors_list;
+
+        prepare().get();
+
+        std::fill(ivec.begin(), ivec.end(), 0);
+
+        parallel_for_each(ivec, [&] (int& k) {
+            return shared_values.get_or_load(k, loader).then([&] (auto entry_ptr) {
+                anchors_list.emplace_back(std::move(entry_ptr));
+            });
+        }).get();
+
+        // "loader" must be called exactly once
+        BOOST_REQUIRE_EQUAL(load_count, 1);
+        BOOST_REQUIRE_EQUAL(shared_values.size(), 1);
+        anchors_list.clear();
+    });
+}
+
 SEASTAR_TEST_CASE(test_loading_shared_values_parallel_loading_different_keys) {
     return seastar::async([] {
         std::vector<int> ivec(num_loaders);

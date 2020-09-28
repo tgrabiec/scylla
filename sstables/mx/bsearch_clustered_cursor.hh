@@ -244,8 +244,8 @@ private:
 
     // Postconditions:
     //   - block.start is engaged and valid.
-    future<> read_block_start(promoted_index_block& block, tracing::trace_state_ptr trace_state) {
-        _stream = _cached_file.read(block.offset, _pc, trace_state);
+    future<> read_block_start(pi_idx_type idx, pi_offset_type offset, tracing::trace_state_ptr trace_state) {
+        _stream = _cached_file.read(offset, _pc, trace_state);
         _clustering_parser.reset();
         return consume_stream(_stream, _clustering_parser).then([this, &block] {
             auto mem_before = block.memory_usage();
@@ -322,7 +322,7 @@ public:
                 return make_ready_future<promoted_index_block*>(block);
             }
             ++_metrics.misses_l1;
-            return read_block_start(*block, trace_state).then([block] { return block; });
+            return read_block_start(idx, block.offset, trace_state).then([block] { return block; });
         });
     }
 

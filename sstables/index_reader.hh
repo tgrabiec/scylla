@@ -714,6 +714,11 @@ public:
         sstlog.trace("index {}: index_reader for {}", fmt::ptr(this), _sstable->get_filename());
     }
 
+    ~index_reader() {
+        assert(!_lower_bound.clustered_cursor);
+        assert(!_upper_bound || !_upper_bound->clustered_cursor);
+    }
+
     // Ensures that partition_data_ready() returns true.
     // Can be called only when !eof()
     future<> read_partition_data() {

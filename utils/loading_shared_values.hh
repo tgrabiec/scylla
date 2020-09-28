@@ -21,6 +21,8 @@
 
 #pragma once
 
+#include "lru.hh"
+
 #include <vector>
 #include <memory>
 #include <seastar/core/shared_future.hh>
@@ -42,11 +44,45 @@ struct do_nothing_loading_shared_values_stats {
     static void inc_blocks() noexcept {} // Increase the number of times entry was not ready (>= misses)
     static void inc_evictions() noexcept {} // Increase the number of times entry was evicted
 };
+//
+//namespace internal {
+//
+//using lru_link_type = bi::list_member_hook<bi::link_mode<bi::auto_unlink>>;
+//
+//template<bool Evictable> struct entry_base;
+//
+//template<>
+//struct entry_base<false> {};
+//
+//template<>
+//struct entry_base<true> {
+//    lru_link_type _lru_link;
+//};
+//
+//template<bool Evictable> struct evictable_feature_base;
+//
+//template<>
+//struct evictable_feature_base<false> {};
+//
+//template<>
+//class evictable_feature_base<true> {
+//    using lru_type = bi::list<entry_base,
+//        bi::member_hook<entry, lru_link_type, &entry::_lru_link>,
+//        bi::constant_time_size<false>>; // we need this to have bi::auto_unlink on hooks.
+//public:
+//
+//};
+//
+//}
 
 // Entries stay around as long as there is any live external reference (entry_ptr) to them.
 // Supports asynchronous insertion, ensures that only one entry will be loaded.
 // InitialBucketsCount is required to be greater than zero. Otherwise a constructor will throw an
 // std::invalid_argument exception.
+//
+// When Evictable is false, entries are removed immediately when the last reference (entry_ptr) dies.
+// When Evictable is true, entries which are not referenced are linked into the supplied LRU instead.
+// Referenced entries are not linked in the LRU and thus not evictable.
 template<typename Key,
          typename Tp,
          typename Hash = std::hash<Key>,
@@ -66,7 +102,10 @@ public:
     static constexpr size_t initial_buckets_count = InitialBucketsCount;
 
 private:
-    class entry : public bi::unordered_set_base_hook<bi::store_hash<true>>, public enable_lw_shared_from_this<entry> {
+    // Owned either by entry_ptr or by _parent._lru.
+    class entry : public bi::unordered_set_base_hook<bi::store_hash<true>>,
+        public enable_lw_shared_from_this<entry>,
+        public evictable {
     private:
         loading_shared_values& _parent;
         key_type _key;
@@ -92,6 +131,18 @@ private:
         /// \return The r-value reference to the value kept inside this object.
         value_type&& release() {
             return *std::move(_val);
+        }
+
+        void link_to_lru() {
+            if (_parent._lru) {
+                _parent._lru->add(*this);
+            }
+        }
+
+        // Called by LRU when the entry is unlinked.
+        // The entry doesn't have any live entry_ptr at this point, we're responsible for freeing it.
+        void on_evicted() override {
+            lw_shared_ptr<entry>::dispose(this);
         }
 
         void set_value(value_type new_val) {
@@ -155,6 +206,16 @@ public:
         using element_type = value_type;
         entry_ptr() = default;
         explicit entry_ptr(lw_shared_ptr<entry> e) : _e(std::move(e)) {}
+        ~entry_ptr() {
+            if (_e) {
+                // The last dying entry_ptr links to LRU.
+                auto ptr = _e.release();
+                if (ptr) {
+                    ptr->link_to_lru();
+                    ptr.release();
+                }
+            }
+        }
         entry_ptr& operator=(std::nullptr_t) noexcept {
             _e = nullptr;
             return *this;
@@ -179,12 +240,15 @@ public:
 private:
     std::vector<typename set_type::bucket_type> _buckets;
     set_type _set;
+    lru* _lru;
     value_extractor_fn _value_extractor_fn;
 
 public:
     static const key_type& to_key(const entry_ptr& e_ptr) noexcept {
         return e_ptr._e->key();
     }
+
+    void set_lru(lru* an_lru) { _lru = an_lru; }
 
     /// \throw std::invalid_argument if InitialBucketsCount is zero
     loading_shared_values()
@@ -221,6 +285,7 @@ public:
             future<> f = make_ready_future<>();
             if (i != _set.end()) {
                 e = i->shared_from_this();
+                e->unlink_from_lru();
                 // take a short cut if the value is ready
                 if (e->ready()) {
                     Stats::inc_hits();
