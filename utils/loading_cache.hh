@@ -438,6 +438,10 @@ public:
         return _current_size;
     }
 
+    future<> destroy() {
+        return _loading_values.destroy();
+    }
+
 private:
     /// Should only be called on values for which the following holds: set_it == set_end() || set_it->ready()
     /// For instance this always holds for iterators returned by set_find(...).
