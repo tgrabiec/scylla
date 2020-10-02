@@ -26,6 +26,7 @@
 #include "parsers.hh"
 #include "schema.hh"
 #include "utils/cached_file.hh"
+#include "utils/bptree.hh"
 
 #include <seastar/core/byteorder.hh>
 #include <seastar/core/on_internal_error.hh>
@@ -145,6 +146,12 @@ public:
             return lhs < rhs.index;
         }
     };
+
+    struct index_less_comparator {
+        bool operator()(pi_index_type lhs, pi_index_type rhs) const noexcept {
+            return lhs < rhs;
+        }
+    };
 private:
     // Cache of the parsed promoted index blocks.
     //
@@ -158,13 +165,13 @@ private:
     // savings in CPU time from less over-reads more than compensate
     // for it.
     //
-    using block_set_type = std::set<promoted_index_block, block_comparator>;
+    using block_set_type = bplus::tree<pi_index_type, promoted_index_block, index_less_comparator, 8>;
     block_set_type _blocks;
 
     friend class cached_promoted_index_reader;
 public:
     cached_promoted_index(const schema& s)
-        : _blocks(block_comparator{s})
+        : _blocks(index_less_comparator{})
     { }
 
     ~cached_promoted_index() {
@@ -176,7 +183,7 @@ public:
             --m.block_count;
             ++m.evictions;
             m.used_bytes -= begin->memory_usage();
-            begin = _blocks.erase(begin);
+            begin = begin.erase(index_less_comparator());
         }
     }
 
@@ -276,12 +283,15 @@ private:
             return make_ready_future<promoted_index_block*>(const_cast<promoted_index_block*>(&*i));
         }
         ++_metrics.misses_l0;
-        return read_block_offset(idx, trace_state).then([this, idx, hint = i] (pi_offset_type offset) {
-            auto i = this->_cache._blocks.emplace_hint(hint, idx, offset);
+        return read_block_offset(idx, trace_state).then([this, idx] (pi_offset_type offset) {
+            auto res = this->_cache._blocks.emplace(idx, idx, offset);
+            if (res.second) {
+                return &*res.first;
+            }
             _metrics.used_bytes += sizeof(promoted_index_block);
             ++_metrics.block_count;
             ++_metrics.populations;
-            return const_cast<promoted_index_block*>(&*i);
+            return &*res.first;
         });
     }
 public:
@@ -339,17 +349,19 @@ public:
     /// Resolving with std::nullopt means the position is not known. The caller should
     /// use the end of the partition as the upper bound.
     future<std::optional<uint64_t>> upper_bound_cache_only(position_in_partition_view pos, tracing::trace_state_ptr trace_state) {
-        auto i = _cache._blocks.upper_bound(pos);
-        if (i == _cache._blocks.end()) {
-            return make_ready_future<std::optional<uint64_t>>(std::nullopt);
-        }
-        auto& block = const_cast<promoted_index_block&>(*i);
-        if (!block.end) {
-            return read_block(block, trace_state).then([this, &block] {
-                return make_ready_future<std::optional<uint64_t>>(block.data_file_offset);
-            });
-        }
-        return make_ready_future<std::optional<uint64_t>>(block.data_file_offset);
+        // FIXME
+        return make_ready_future<std::optional<uint64_t>>(std::nullopt);
+        //auto i = _cache._blocks.upper_bound(pos);
+        //if (i == _cache._blocks.end()) {
+        //    return make_ready_future<std::optional<uint64_t>>(std::nullopt);
+        //}
+        //auto& block = const_cast<promoted_index_block&>(*i);
+        //if (!block.end) {
+        //    return read_block(block, trace_state).then([this, &block] {
+        //        return make_ready_future<std::optional<uint64_t>>(block.data_file_offset);
+        //    });
+        //}
+        //return make_ready_future<std::optional<uint64_t>>(block.data_file_offset);
     }
 
     // Invalidates information about blocks with smaller indexes than a given block.
