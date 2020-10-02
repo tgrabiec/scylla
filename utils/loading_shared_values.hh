@@ -21,6 +21,8 @@
 
 #pragma once
 
+#include "lru.hh"
+
 #include <vector>
 #include <memory>
 #include <seastar/core/shared_future.hh>
@@ -66,7 +68,10 @@ public:
     static constexpr size_t initial_buckets_count = InitialBucketsCount;
 
 private:
-    class entry : public bi::unordered_set_base_hook<bi::store_hash<true>>, public enable_lw_shared_from_this<entry> {
+    // Owned either by entry_ptr or by _parent._lru.
+    class entry : public bi::unordered_set_base_hook<bi::store_hash<true>>,
+        public enable_lw_shared_from_this<entry>,
+        public evictable {
     private:
         loading_shared_values& _parent;
         key_type _key;
@@ -92,6 +97,16 @@ private:
         /// \return The r-value reference to the value kept inside this object.
         value_type&& release() {
             return *std::move(_val);
+        }
+
+        // Called by LRU when the entry is unlinked.
+        // The entry doesn't have any live entry_ptr at this point, we're responsible for freeing it.
+        void on_evicted() override {
+            _parent.on_evicted(this);
+        }
+
+        void on_unused() {
+            _parent.on_unused(this);
         }
 
         void set_value(value_type new_val) {
@@ -155,8 +170,17 @@ public:
         using element_type = value_type;
         entry_ptr() = default;
         explicit entry_ptr(lw_shared_ptr<entry> e) : _e(std::move(e)) {}
+        ~entry_ptr() {
+            *this = nullptr;
+        }
         entry_ptr& operator=(std::nullptr_t) noexcept {
-            _e = nullptr;
+            if (_e) {
+                auto ptr = _e.release();
+                if (ptr) {
+                    ptr->on_unused();
+                    ptr.release();
+                }
+            }
             return *this;
         }
         explicit operator bool() const noexcept { return bool(_e); }
@@ -179,11 +203,16 @@ public:
 private:
     std::vector<typename set_type::bucket_type> _buckets;
     set_type _set;
+    lru* _lru = nullptr;
     value_extractor_fn _value_extractor_fn;
 
 public:
     static const key_type& to_key(const entry_ptr& e_ptr) noexcept {
         return e_ptr._e->key();
+    }
+
+    void set_lru(lru* an_lru) {
+        _lru = an_lru;
     }
 
     /// \throw std::invalid_argument if InitialBucketsCount is zero
@@ -201,7 +230,10 @@ public:
     loading_shared_values(loading_shared_values&&) = default;
     loading_shared_values(const loading_shared_values&) = delete;
     ~loading_shared_values() {
-         assert(!_set.size());
+        _set.clear_and_dispose([] (entry* e) {
+            assert(!e->use_count()); // No entry_ptr can be alive at this point.
+            e->on_evicted();
+        });
     }
 
     /// \brief
@@ -221,6 +253,7 @@ public:
             future<> f = make_ready_future<>();
             if (i != _set.end()) {
                 e = i->shared_from_this();
+                e->unlink_from_lru();
                 // take a short cut if the value is ready
                 if (e->ready()) {
                     Stats::inc_hits();
@@ -297,6 +330,20 @@ public:
         return find(key, Hash(), EqualPred());
     }
 
+    // May be called before the object is destroyed to avoid reactor stalls
+    // due to clearing.
+    // No entry_ptr can be alive at this point.
+    future<> destroy() {
+        return repeat([this] {
+            if (_set.empty()) {
+                return stop_iteration::yes;
+            }
+            entry* e = &*_set.begin();
+            assert(!e->use_count()); // No entry_ptr can be alive at this point.
+            on_evicted(e);
+            return stop_iteration::no;
+        });
+    }
 private:
     void rehash_before_insert() noexcept {
         try {
@@ -328,6 +375,19 @@ private:
         std::vector<typename set_type::bucket_type> new_buckets(new_buckets_count);
         _set.rehash(bi_set_bucket_traits(new_buckets.data(), new_buckets.size()));
         _buckets = std::move(new_buckets);
+    }
+private:
+    void on_evicted(entry* e) {
+        lw_shared_ptr<entry>::dispose(e);
+    }
+
+    // Called when the last entry_ptr dies
+    void on_unused(entry* e) {
+        if (_lru) {
+            _lru->add(*e);
+        } else {
+            on_evicted(e);
+        }
     }
 };
 

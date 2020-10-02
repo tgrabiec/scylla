@@ -24,6 +24,7 @@
 #include "index_entry.hh"
 #include <vector>
 #include <seastar/core/future.hh>
+#include <seastar/core/loop.hh>
 #include "utils/loading_shared_values.hh"
 #include "utils/chunked_vector.hh"
 
