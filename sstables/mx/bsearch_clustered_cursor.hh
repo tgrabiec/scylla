@@ -27,6 +27,8 @@
 #include "schema.hh"
 #include "utils/cached_file.hh"
 #include "utils/bptree.hh"
+#include "utils/logalloc.hh"
+#include "utils/shareable.hh"
 
 #include <seastar/core/byteorder.hh>
 #include <seastar/core/on_internal_error.hh>
@@ -40,6 +42,10 @@ namespace sstables::mc {
 /// Access through cached_promoted_index_reader.
 ///
 /// All methods provide basic exception guarantee.
+///
+/// This is a managed object (see allocation_strategy.hh).
+/// All methods must be called under owning allocation strategy.
+/// After calling clear() it's safe to destroy under any allocation strategy.
 class cached_promoted_index {
 public:
     using pi_index_type = uint32_t;  // promoted index block sequence number, 0 .. _blocks_count
@@ -54,7 +60,8 @@ public:
     //
     // This is in order to save on CPU by avoiding parsing the whole block during binary search,
     // which only needs the "start" field.
-    struct promoted_index_block {
+    class promoted_index_block : public lsa::weakly_referencable<promoted_index_block> {
+    public:
         pi_index_type index;
         pi_offset_type offset;
         std::optional<position_in_partition> start;
@@ -83,7 +90,7 @@ public:
         }
 
         /// \brief Returns the amount of memory occupied by this object and all its contents.
-        size_t memory_usage() const {
+        size_t memory_usage() const noexcept {
             size_t result = sizeof(promoted_index_block);
             if (!start) {
                 return result;
@@ -170,8 +177,11 @@ private:
 
     friend class cached_promoted_index_reader;
 public:
-    cached_promoted_index(const schema& s)
-        : _blocks(index_less_comparator{})
+    // All methods must be later called under alloc.
+    cached_promoted_index(const schema& s, allocation_strategy& alloc)
+        : _blocks([&alloc] {
+            return with_allocator(alloc, [] { return block_set_type(index_less_comparator{}); });
+        }())
     { }
 
     ~cached_promoted_index() {
@@ -187,10 +197,31 @@ public:
         }
     }
 
+    // After calling this it's safe to destroy the object under any allocation strategy.
     void clear(metrics& m) {
-        erase_range(m, _blocks.begin(), _blocks.end());
+        // We must deallocate the root node under current allocation strategy so
+        // we must call bplus::tree::clear*().
+        _blocks.clear_and_dispose([&m] (promoted_index_block* p) noexcept {
+            --m.block_count;
+            ++m.evictions;
+            m.used_bytes -= p->memory_usage();
+        });
     }
 };
+
+// A smart pointer for promoted index blocks.
+//
+// It remains valid across LSA invalidation, dereferencing will always give a valid reference.
+// The reference to the pointed-to block, obtained by dereferencing this, is invalidated when the
+// owning region invalidates references.
+//
+// The pointed-to block will not be evicted from cache as long as the pointer is alive.
+//
+// The pointed-to block is a managed object, so must be accessed under an allocating section
+// to ensure that it remains valid if memory allocation is involved in the access.
+//
+// Keys must be compared under with_linearized_managed_bytes(). Copying of keys does not require it.
+using promoted_index_block_ptr = lsa::weak_ptr<cached_promoted_index::promoted_index_block>;
 
 /// A read-through cache of promoted index entries.
 ///
@@ -206,6 +237,8 @@ private:
     const schema& _s;
     cached_promoted_index::metrics& _metrics;
     cached_promoted_index& _cache;
+    logalloc::region& _cache_region;
+    logalloc::allocating_section _as;
     const pi_index_type _blocks_count;
     const io_priority_class _pc;
     cached_file _cached_file;
@@ -249,55 +282,69 @@ private:
 
     // Postconditions:
     //   - block.start is engaged and valid.
-    future<> read_block_start(promoted_index_block& block, tracing::trace_state_ptr trace_state) {
-        _stream = _cached_file.read(block.offset, _pc, trace_state);
+    future<> read_block_start(promoted_index_block_ptr block, tracing::trace_state_ptr trace_state) {
+        _stream = _cached_file.read(block->offset, _pc, trace_state);
         _clustering_parser.reset();
-        return consume_stream(_stream, _clustering_parser).then([this, &block] {
-            auto mem_before = block.memory_usage();
-            block.start.emplace(_clustering_parser.get_and_reset());
-            _metrics.used_bytes += block.memory_usage() - mem_before;
+        return consume_stream(_stream, _clustering_parser).then([this, block] () mutable {
+            auto mem_before = block->memory_usage();
+            auto pos = _clustering_parser.get_and_reset();
+            _as(_cache_region, [&] {
+                return with_allocator(_cache_region.allocator(), [&] {
+                    block->start.emplace(position_in_partition(pos));
+                });
+            });
+            _metrics.used_bytes += block->memory_usage() - mem_before;
         });
     }
 
     // Postconditions:
     //   - block.end is engaged, all fields in the block are valid
-    future<> read_block(promoted_index_block& block, tracing::trace_state_ptr trace_state) {
-        _stream = _cached_file.read(block.offset, _pc, trace_state);
+    future<> read_block(promoted_index_block_ptr block, tracing::trace_state_ptr trace_state) {
+        _stream = _cached_file.read(block->offset, _pc, trace_state);
         _block_parser.reset();
-        return consume_stream(_stream, _block_parser).then([this, &block] {
-            auto mem_before = block.memory_usage();
-            block.start.emplace(std::move(_block_parser.start()));
-            block.end.emplace(std::move(_block_parser.end()));
-            block.end_open_marker = _block_parser.end_open_marker();
-            block.data_file_offset = _block_parser.offset();
-            block.width = _block_parser.width();
-            _metrics.used_bytes += block.memory_usage() - mem_before;
+        return consume_stream(_stream, _block_parser).then([this, block] () mutable noexcept {
+            auto mem_before = block->memory_usage();
+            _as(_cache_region, [&] {
+                return with_allocator(_cache_region.allocator(), [&] {
+                    block->start.emplace(_block_parser.start());
+                    block->end.emplace(_block_parser.end());
+                    block->end_open_marker = _block_parser.end_open_marker();
+                    block->data_file_offset = _block_parser.offset();
+                    block->width = _block_parser.width();
+                });
+            });
+            _metrics.used_bytes += block->memory_usage() - mem_before;
         });
     }
 
     /// \brief Returns a pointer to promoted_index_block entry which has at least offset and index fields valid.
-    future<promoted_index_block*> get_block_only_offset(pi_index_type idx, tracing::trace_state_ptr trace_state) {
+    future<promoted_index_block_ptr> get_block_only_offset(pi_index_type idx, tracing::trace_state_ptr trace_state) {
         auto i = _cache._blocks.lower_bound(idx);
         if (i != _cache._blocks.end() && i->index == idx) {
             ++_metrics.hits_l0;
-            return make_ready_future<promoted_index_block*>(const_cast<promoted_index_block*>(&*i));
+            return make_ready_future<promoted_index_block_ptr>(i->weak_from_this());
         }
         ++_metrics.misses_l0;
         return read_block_offset(idx, trace_state).then([this, idx] (pi_offset_type offset) {
-            auto res = this->_cache._blocks.emplace(idx, idx, offset);
-            if (res.second) {
-                return &*res.first;
+            auto res = _as(_cache_region, [&] {
+                return with_allocator(_cache_region.allocator(), [&] {
+                    return this->_cache._blocks.emplace(idx, idx, offset);
+                });
+            });
+            auto block = res.first->weak_from_this();
+            if (!res.second) {
+                _metrics.used_bytes += sizeof(promoted_index_block);
+                ++_metrics.block_count;
+                ++_metrics.populations;
             }
-            _metrics.used_bytes += sizeof(promoted_index_block);
-            ++_metrics.block_count;
-            ++_metrics.populations;
-            return &*res.first;
+            return block;
         });
     }
 public:
     cached_promoted_index_reader(const schema& s,
             cached_promoted_index::metrics& m,
             cached_promoted_index& c,
+            logalloc::region& cache_region,
             reader_permit permit,
             column_values_fixed_lengths cvfl,
             cached_file f,
@@ -306,6 +353,7 @@ public:
         : _s(s)
         , _metrics(m)
         , _cache(c)
+        , _cache_region(cache_region)
         , _blocks_count(blocks_count)
         , _pc(pc)
         , _cached_file(std::move(f))
@@ -315,26 +363,26 @@ public:
     { }
 
     /// \brief Returns a pointer to promoted_index_block entry which has at least offset, index and start fields valid.
-    future<promoted_index_block*> get_block_with_start(pi_index_type idx, tracing::trace_state_ptr trace_state) {
-        return get_block_only_offset(idx, trace_state).then([this, trace_state] (promoted_index_block* block) {
+    future<promoted_index_block_ptr> get_block_with_start(pi_index_type idx, tracing::trace_state_ptr trace_state) {
+        return get_block_only_offset(idx, trace_state).then([this, trace_state] (promoted_index_block_ptr block) {
             if (block->start) {
                 ++_metrics.hits_l1;
-                return make_ready_future<promoted_index_block*>(block);
+                return make_ready_future<promoted_index_block_ptr>(std::move(block));
             }
             ++_metrics.misses_l1;
-            return read_block_start(*block, trace_state).then([block] { return block; });
+            return read_block_start(block, trace_state).then([block] { return block; });
         });
     }
 
     /// \brief Returns a pointer to promoted_index_block entry which has all the fields valid.
-    future<promoted_index_block*> get_block(pi_index_type idx, tracing::trace_state_ptr trace_state) {
-        return get_block_only_offset(idx, trace_state).then([this, trace_state] (promoted_index_block* block) {
+    future<promoted_index_block_ptr> get_block(pi_index_type idx, tracing::trace_state_ptr trace_state) {
+        return get_block_only_offset(idx, trace_state).then([this, trace_state] (promoted_index_block_ptr block) {
             if (block->end) {
                 ++_metrics.hits_l2;
-                return make_ready_future<promoted_index_block*>(block);
+                return make_ready_future<promoted_index_block_ptr>(std::move(block));
             }
             ++_metrics.misses_l2;
-            return read_block(*block, trace_state).then([block] { return block; });
+            return read_block(block, trace_state).then([block] { return block; });
         });
     }
 
@@ -365,10 +413,12 @@ public:
     }
 
     // Invalidates information about blocks with smaller indexes than a given block.
-    void invalidate_prior(promoted_index_block* block, tracing::trace_state_ptr trace_state) {
+    void invalidate_prior(promoted_index_block_ptr block, tracing::trace_state_ptr trace_state) {
+      with_allocator(_cache_region.allocator(), [&] {
         _cached_file.invalidate_at_most_front(block->offset, trace_state);
         _cached_file.invalidate_at_most(get_offset_entry_pos(0), get_offset_entry_pos(block->index), trace_state);
         _cache.erase_range(_metrics, _cache._blocks.begin(), _cache._blocks.lower_bound(block->index));
+      });
     }
 
     cached_file& file() { return _cached_file; }
@@ -392,6 +442,8 @@ class bsearch_clustered_cursor : public clustered_index_cursor {
 
     const schema& _s;
     const pi_index_type _blocks_count;
+    logalloc::region& _cache_region;
+    logalloc::allocating_section _as;
     cached_promoted_index _cache;
     cached_promoted_index_reader _promoted_index;
     cached_promoted_index::metrics& _metrics;
@@ -446,23 +498,29 @@ private:
             auto mid = _current_idx + (_upper_idx - _current_idx) / 2;
             tracing::trace(_trace_state, "mc_bsearch_clustered_cursor: bisecting range [{}, {}], mid={}", _current_idx, _upper_idx, mid);
             sstlog.trace("mc_bsearch_clustered_cursor {}: bisecting range [{}, {}], mid={}", fmt::ptr(this), _current_idx, _upper_idx, mid);
-            return _promoted_index.get_block_with_start(mid, _trace_state).then([this, mid, pos] (promoted_index_block* block) {
+            return _promoted_index.get_block_with_start(mid, _trace_state).then([this, mid, pos] (promoted_index_block_ptr block) {
                 position_in_partition::less_compare less(_s);
                 sstlog.trace("mc_bsearch_clustered_cursor {}: compare with [{}] .start={}", fmt::ptr(this), mid, block->start);
-                if (less(pos, *block->start)) {
-                    // Eventually _current_idx will reach _upper_idx, so _current_pos only needs to be
-                    // updated whenever _upper_idx changes.
-                    _current_pos = *block->start;
-                    _upper_idx = mid;
-                } else {
-                    _current_idx = mid + 1;
-                }
+
+                _as(_cache_region, [&] {
+                    return with_linearized_managed_bytes([&] {
+                        if (less(pos, *block->start)) {
+                            // Eventually _current_idx will reach _upper_idx, so _current_pos only needs to be
+                            // updated whenever _upper_idx changes.
+                            _current_pos = *block->start;
+                            _upper_idx = mid;
+                        } else {
+                            _current_idx = mid + 1;
+                        }
+                    });
+                });
                 return stop_iteration::no;
             });
         });
     }
 public:
     bsearch_clustered_cursor(const schema& s,
+            logalloc::region& cache_region,
             cached_promoted_index::metrics& metrics,
             reader_permit permit,
             column_values_fixed_lengths cvfl,
@@ -472,14 +530,17 @@ public:
             tracing::trace_state_ptr trace_state)
         : _s(s)
         , _blocks_count(blocks_count)
-        , _cache(s)
-        , _promoted_index(s, metrics, _cache, std::move(permit), std::move(cvfl), std::move(f), pc, blocks_count)
+        , _cache_region(cache_region)
+        , _cache(s, _cache_region.allocator())
+        , _promoted_index(s, metrics, _cache, _cache_region, std::move(permit), std::move(cvfl), std::move(f), pc, blocks_count)
         , _metrics(metrics)
         , _trace_state(std::move(trace_state))
     { }
 
     ~bsearch_clustered_cursor() {
-        _cache.clear(_metrics);
+        with_allocator(_cache_region.allocator(), [this] {
+            _cache.clear(_metrics);
+        });
     }
 
     future<std::optional<skip_info>> advance_to(position_in_partition_view pos) override {
@@ -501,8 +562,11 @@ public:
                 sstlog.trace("mc_bsearch_clustered_cursor {}: same block", fmt::ptr(this));
                 return make_ready_future<std::optional<skip_info>>(std::nullopt);
             }
-            return _promoted_index.get_block(_current_idx - 1, _trace_state).then([this] (promoted_index_block* block) {
-                sstlog.trace("mc_bsearch_clustered_cursor {}: [{}] = {}", fmt::ptr(this), _current_idx - 1, *block);
+            return _promoted_index.get_block(_current_idx - 1, _trace_state).then([this] (promoted_index_block_ptr block) {
+                {
+                    logalloc::reclaim_lock rl(_cache_region);
+                    sstlog.trace("mc_bsearch_clustered_cursor {}: [{}] = {}", fmt::ptr(this), _current_idx - 1, *block);
+                }
                 offset_in_partition datafile_offset = block->data_file_offset;
                 sstlog.trace("mc_bsearch_clustered_cursor {}: datafile_offset={}", fmt::ptr(this), datafile_offset);
                 if (_current_idx < 2) {
@@ -515,8 +579,11 @@ public:
                 // active at the end of the block, not at the beginning of the block, so we need
                 // to read the active tombstone from the preceding block, _current_idx - 2.
                 return _promoted_index.get_block(_current_idx - 2, _trace_state)
-                        .then([this, datafile_offset] (promoted_index_block* block) -> std::optional<skip_info> {
-                    sstlog.trace("mc_bsearch_clustered_cursor {}: [{}] = {}", fmt::ptr(this), _current_idx - 2, *block);
+                        .then([this, datafile_offset] (promoted_index_block_ptr block) -> std::optional<skip_info> {
+                    {
+                        logalloc::reclaim_lock rl(_cache_region);
+                        sstlog.trace("mc_bsearch_clustered_cursor {}: [{}] = {}", fmt::ptr(this), _current_idx - 2, *block);
+                    }
                     // XXX: Until we have automatic eviction, we need to invalidate cached index blocks
                     // as we walk so that memory footprint is not O(N) but O(log(N)).
                     _promoted_index.invalidate_prior(block, _trace_state);
@@ -524,8 +591,13 @@ public:
                         return skip_info{datafile_offset, tombstone(), position_in_partition::before_all_clustered_rows()};
                     }
                     auto tomb = tombstone(*block->end_open_marker);
-                    sstlog.trace("mc_bsearch_clustered_cursor {}: tombstone={}, pos={}", fmt::ptr(this), tomb, *block->end);
-                    return skip_info{datafile_offset, tomb, *block->end};
+                    {
+                        logalloc::reclaim_lock rl(_cache_region);
+                        sstlog.trace("mc_bsearch_clustered_cursor {}: tombstone={}, pos={}", fmt::ptr(this), tomb, *block->end);
+                    }
+                    return _as(_cache_region, [&] {
+                        return skip_info{datafile_offset, tomb, *block->end};
+                    });
                 });
             });
         });
@@ -540,11 +612,14 @@ public:
             return make_ready_future<std::optional<entry_info>>(std::nullopt);
         }
         return _promoted_index.get_block(_current_idx, _trace_state)
-                .then([this] (promoted_index_block* block) -> std::optional<entry_info> {
-            sstlog.trace("mc_bsearch_clustered_cursor {}: block {}: start={}, end={}, offset={}", fmt::ptr(this), _current_idx,
-                *block->start, *block->end, block->data_file_offset);
+                .then([this] (promoted_index_block_ptr block) -> std::optional<entry_info> {
+            auto ei = _as(_cache_region, [&] {
+                sstlog.trace("mc_bsearch_clustered_cursor {}: block {}: start={}, end={}, offset={}", fmt::ptr(this), _current_idx,
+                    *block->start, *block->end, block->data_file_offset);
+                return entry_info{*block->start, *block->end, block->data_file_offset};
+            });
             ++_current_idx;
-            return entry_info{*block->start, *block->end, block->data_file_offset};
+            return ei;
         });
     }
 

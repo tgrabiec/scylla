@@ -36,6 +36,7 @@ namespace sstables {
 extern seastar::logger sstlog;
 extern thread_local cached_file::metrics index_page_cache_metrics;
 extern thread_local mc::cached_promoted_index::metrics promoted_index_cache_metrics;
+extern thread_local logalloc::region cache_region;
 
 class index_consumer {
     uint64_t max_quantity;
@@ -302,7 +303,7 @@ std::unique_ptr<clustered_index_cursor> promoted_index::make_cursor(shared_sstab
         f.populate_front(_front.share());
 
         return std::make_unique<mc::bsearch_clustered_cursor>(*sst->get_schema(),
-            promoted_index_cache_metrics, permit,
+            cache_region, promoted_index_cache_metrics, permit,
             *ck_values_fixed_lengths, std::move(f), options.io_priority_class, _num_blocks, trace_state);
     }
 

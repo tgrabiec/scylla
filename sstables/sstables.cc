@@ -2777,6 +2777,7 @@ thread_local sstables_stats::stats sstables_stats::_shard_stats;
 thread_local shared_index_lists::stats shared_index_lists::_shard_stats;
 thread_local cached_file::metrics index_page_cache_metrics;
 thread_local mc::cached_promoted_index::metrics promoted_index_cache_metrics;
+thread_local logalloc::region cache_region;
 static thread_local seastar::metrics::metric_groups metrics;
 
 future<> init_metrics() {
@@ -2821,6 +2822,11 @@ future<> init_metrics() {
             sm::description("Number of bytes currently used by cached promoted index blocks")),
         sm::make_gauge("pi_cache_block_count", [] { return promoted_index_cache_metrics.block_count; },
             sm::description("Number of promoted index blocks currently cached")),
+
+        sm::make_gauge("bytes_used", [] { return cache_region.occupancy().used_space(); },
+            sm::description("bytes used by live objects in the cache region")),
+        sm::make_gauge("bytes_total", [] { return cache_region.occupancy().total_space(); },
+            sm::description("bytes allocated in the cache region")),
 
         sm::make_derive("partition_writes", [] { return sstables_stats::get_shard_stats().partition_writes; },
             sm::description("Number of partitions written")),
