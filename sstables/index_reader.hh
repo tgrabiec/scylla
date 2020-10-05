@@ -30,6 +30,8 @@
 #include "tracing/traced_file.hh"
 #include "sstables/scanning_clustered_index_cursor.hh"
 #include "sstables/mx/bsearch_clustered_cursor.hh"
+#include "sstables/sstables_manager.hh"
+#include "utils/allocation_strategy.hh"
 
 namespace sstables {
 
@@ -302,7 +304,7 @@ std::unique_ptr<clustered_index_cursor> promoted_index::make_cursor(shared_sstab
         f.populate_front(_front.share());
 
         return std::make_unique<mc::bsearch_clustered_cursor>(*sst->get_schema(),
-            promoted_index_cache_metrics, permit,
+            sst->manager().get_cache_tracker().region(), promoted_index_cache_metrics, permit,
             *ck_values_fixed_lengths, std::move(f), options.io_priority_class, _num_blocks, trace_state);
     }
 
