@@ -31,6 +31,7 @@
 #include "sstables/scanning_clustered_index_cursor.hh"
 #include "sstables/mx/bsearch_clustered_cursor.hh"
 #include "sstables/sstables_manager.hh"
+#include "utils/allocation_strategy.hh"
 
 namespace sstables {
 
@@ -335,7 +336,7 @@ std::unique_ptr<clustered_index_cursor> promoted_index::make_cursor(shared_sstab
     if (sst->get_version() >= sstable_version_types::mc && use_binary_search_in_promoted_index) {
         return std::make_unique<mc::bsearch_clustered_cursor>(*sst->get_schema(),
             _promoted_index_start, _promoted_index_size,
-            promoted_index_cache_metrics, permit,
+            sst->manager().get_cache_tracker().region(), promoted_index_cache_metrics, permit,
             *ck_values_fixed_lengths, *sst->_cached_index_file, options.io_priority_class, _num_blocks, trace_state);
     }
 
