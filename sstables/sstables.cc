@@ -77,6 +77,7 @@
 #include "sstables_manager.hh"
 #include <boost/algorithm/string/predicate.hpp>
 #include "tracing/traced_file.hh"
+#include "utils/cached_file.hh"
 
 thread_local disk_error_signal_type sstable_read_error;
 thread_local disk_error_signal_type sstable_write_error;
@@ -1345,6 +1346,9 @@ future<> sstable::update_info_for_opened_data() {
     }).then([this] {
         return _index_file.size().then([this] (auto size) {
             _index_file_size = size;
+            assert(!_cached_index_file);
+            _cached_index_file = seastar::make_shared<cached_file>(_index_file, index_page_cache_metrics, 0, _index_file_size);
+            _index_file = make_cached_seastar_file(*_cached_index_file);
         });
     }).then([this] {
         if (this->has_component(component_type::Filter)) {

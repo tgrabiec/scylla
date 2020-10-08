@@ -69,6 +69,7 @@
 class sstable_assertions;
 class flat_mutation_reader;
 class row_consumer;
+class cached_file;
 
 namespace sstables {
 
@@ -500,6 +501,7 @@ private:
     // it is then used to generate the ancestors metadata in the statistics or scylla components.
     std::set<int> _compaction_ancestors;
     file _index_file;
+    seastar::shared_ptr<cached_file> _cached_index_file;
     file _data_file;
     uint64_t _data_file_size;
     uint64_t _index_file_size;
@@ -854,6 +856,7 @@ public:
     friend class sstable_writer_k_l;
     friend class mc::writer;
     friend class index_reader;
+    friend class promoted_index;
     friend class sstable_writer;
     friend class compaction;
     friend class sstables_manager;
