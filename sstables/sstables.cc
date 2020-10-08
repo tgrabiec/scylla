@@ -1347,7 +1347,7 @@ future<> sstable::update_info_for_opened_data() {
         return _index_file.size().then([this] (auto size) {
             _index_file_size = size;
             assert(!_cached_index_file);
-            _cached_index_file = seastar::make_shared<cached_file>(_index_file, index_page_cache_metrics, 0, _index_file_size);
+            _cached_index_file = seastar::make_shared<cached_file>(_index_file, index_page_cache_metrics, _index_file_size);
             _index_file = make_cached_seastar_file(*_cached_index_file);
         });
     }).then([this] {
