@@ -296,11 +296,11 @@ future<> migration_manager::do_merge_schema_from(netw::messaging_service::msg_ad
 future<> migration_manager::merge_schema_from(netw::messaging_service::msg_addr id)
 {
     mlogger.info("Requesting schema pull from {}", id);
-    auto i = _schema_pulls.find(id);
+    auto i = _schema_pulls.find(id.addr);
     if (i == _schema_pulls.end()) {
         // FIXME: Drop entries for removed nodes (or earlier).
         i = _schema_pulls.emplace(std::piecewise_construct,
-                std::tuple<netw::messaging_service::msg_addr>(id),
+                std::tuple<gms::inet_address>(id.addr),
                 std::tuple<std::function<future<>()>>([id, this] {
                     return do_merge_schema_from(id);
                 })).first;
