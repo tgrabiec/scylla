@@ -62,12 +62,148 @@ static logging::logger mlogger("migration_manager");
 
 using namespace std::chrono_literals;
 
+// The delay between schema agreement polls which may trigger schema pulls
 const std::chrono::milliseconds migration_manager::migration_delay = 60000ms;
 static future<schema_ptr> get_schema_definition(table_schema_version v, netw::messaging_service::msg_addr dst, netw::messaging_service& ms);
 
 migration_manager::migration_manager(migration_notifier& notifier, gms::feature_service& feat, netw::messaging_service& ms) :
         _notifier(notifier), _feat(feat), _messaging(ms)
+        , _sync_timer([this] { schedule_schema_pull_now(); })
 {
+    if (this_shard_id() == 0) {
+        start_schema_synchronizer();
+    }
+}
+
+bool migration_manager::has_active_schema_pull(gms::inet_address endpoint) {
+    auto i = _schema_pulls.find(endpoint);
+    if (i != _schema_pulls.end()) {
+        return i->second.active();
+    }
+    return false;
+}
+
+void migration_manager::schedule_schema_pull() {
+    database& db = get_local_storage_proxy().get_db().local();
+
+    if (db.get_version() == database::empty_version || runtime::get_uptime() < migration_delay) {
+        // If we think we may be bootstrapping or have recently started, pull immediately.
+        schedule_schema_pull_now();
+    } else {
+        // Defer the pull to avoid unnecessary full schema sync during schema changes.
+        // Let the normal propagation resolve the disagreement.
+        defer_schema_pull();
+
+        // ...but don't allow flaky nodes to defer the pull indefinitely, so force it after a delay.
+        // If schema is settled by then, this will do nothing.
+        (void)with_gate(_background_tasks, [this] {
+            return sleep_abortable(migration_delay, _as).then([this] {
+                schedule_schema_pull_now();
+            });
+        });
+    }
+}
+
+void migration_manager::schedule_schema_pull_now() noexcept {
+    _sync_scheduled = true;
+    _sync_condvar.signal();
+}
+
+void migration_manager::defer_schema_pull() {
+    _sync_timer.cancel();
+    _sync_timer.arm_periodic(migration_delay);
+}
+
+void migration_manager::start_schema_synchronizer() {
+    _sync_timer.arm_periodic(migration_delay);
+
+    (void)with_gate(_background_tasks, [this] {
+        return seastar::async([this] {
+            while (!_as.abort_requested()) {
+                database& db = get_local_storage_proxy().get_db().local();
+                gms::gossiper& gossiper = gms::get_local_gossiper();
+
+                _sync_condvar.wait([this] {
+                    return _sync_scheduled || _as.abort_requested();
+                }).get();
+                _sync_scheduled = false;
+
+                if (_as.abort_requested()) {
+                    break;
+                }
+
+                auto our_version = db.get_version();
+                mlogger.debug("Schema synchronization starts (version: {})", our_version);
+
+                try {
+                    std::vector<gms::inet_address> pull_from;
+
+                    // First we collect mismatching nodes and then pull from them sequentially.
+                    //
+                    // We shouldn't just pull from the first pull_from node because a single bad node
+                    // could block progress indefinitely.
+                    //
+                    // We also pull sequentially to avoid overloading the node.
+                    // Also, it's often enough to sync with one node to reach agreement.
+                    //
+                    // schedule_schema_pull() is assumed to do nothing if versions match already.
+
+                    for (const auto& [endpoint, eps] : gossiper.endpoint_state_map) {
+                        // There must be no deferring points in the loop so that endpoint_state_map remains stable.
+
+                        if (endpoint == utils::fb_utilities::get_broadcast_address()) {
+                            continue;
+                        }
+
+                        if (!eps.is_alive()) {
+                            mlogger.debug("Not alive: {}", endpoint);
+                            continue;
+                        }
+
+                        auto* schema = eps.get_application_state_ptr(gms::application_state::SCHEMA);
+                        if (!schema) {
+                            mlogger.debug("Schema state not yet available for {}", endpoint);
+                            continue;
+                        }
+
+                        utils::UUID remote_version{schema->value};
+                        if (our_version != remote_version) {
+                            mlogger.debug("Schema mismatch for {}: {}", endpoint, remote_version);
+
+                            // There is a high chance that the current pull will resolve the mismatch, don't queue another one.
+                            if (!has_active_schema_pull(endpoint)) {
+                                pull_from.push_back(endpoint);
+                            } else {
+                                mlogger.debug("Active pull request present for {}, ignoring", endpoint);
+                            }
+                        } else {
+                            mlogger.debug("In agreement: {}", endpoint);
+                        }
+                    }
+
+                    for (auto&& endpoint : pull_from) {
+                        const auto& known_endpoints = gossiper.endpoint_state_map;
+                        if (!known_endpoints.contains(endpoint)) {
+                            continue;
+                        }
+                        if (_as.abort_requested()) {
+                            break;
+                        }
+                        try {
+                            auto& state = known_endpoints.at(endpoint);
+                            schedule_schema_pull(endpoint, state).get();
+                        } catch (...) {
+                            mlogger.error("Schema pull from {} failed: {}", endpoint, std::current_exception());
+                        }
+                    }
+                } catch (...) {
+                    mlogger.error("Failed to synchronize schema: {}", std::current_exception());
+                }
+            }
+        }).finally([] {
+            mlogger.info("Schema synchronizer stopped");
+        });
+    });
 }
 
 future<> migration_manager::stop()
@@ -78,6 +214,7 @@ future<> migration_manager::stop()
 
     mlogger.info("stopping migration service");
     _as.request_abort();
+    _sync_condvar.signal();
 
   return uninit_messaging_service().then([this] {
     return parallel_for_each(_schema_pulls.begin(), _schema_pulls.end(), [] (auto&& e) {
@@ -185,11 +322,31 @@ future<> migration_notifier::unregister_listener(migration_listener* listener)
 future<> migration_manager::schedule_schema_pull(const gms::inet_address& endpoint, const gms::endpoint_state& state)
 {
     const auto* value = state.get_application_state_ptr(gms::application_state::SCHEMA);
-
-    if (endpoint != utils::fb_utilities::get_broadcast_address() && value) {
-        return maybe_schedule_schema_pull(utils::UUID{value->value}, endpoint);
+    if (!value) {
+        return make_ready_future<>();
     }
-    return make_ready_future<>();
+
+    auto& proxy = get_local_storage_proxy();
+    auto& db = proxy.get_db().local();
+
+    auto their_version = utils::UUID{value->value};
+    if (db.get_version() == their_version) {
+        mlogger.debug("Not pulling from {} because versions match", endpoint);
+        return make_ready_future<>();
+    }
+
+    if (!has_compatible_schema_tables_version(endpoint)) {
+        mlogger.debug("Not pulling from {} because of incompatible schema version", endpoint);
+        return make_ready_future<>();
+    }
+
+    if (gms::get_local_gossiper().is_gossip_only_member(endpoint)) {
+        mlogger.debug("Not pulling from {} because it's a gossip-only member", endpoint);
+        return make_ready_future<>();
+    }
+
+    mlogger.debug("Submitting migration task for {}", endpoint);
+    return submit_migration_task(endpoint);
 }
 
 bool migration_manager::have_schema_agreement() {
@@ -221,53 +378,6 @@ bool migration_manager::have_schema_agreement() {
         }
     }
     return match;
-}
-
-/**
- * If versions differ this node sends request with local migration list to the endpoint
- * and expecting to receive a list of migrations to apply locally.
- */
-future<> migration_manager::maybe_schedule_schema_pull(const utils::UUID& their_version, const gms::inet_address& endpoint)
-{
-    auto& proxy = get_local_storage_proxy();
-    auto& db = proxy.get_db().local();
-
-    if (db.get_version() == their_version || !should_pull_schema_from(endpoint)) {
-        mlogger.debug("Not pulling schema because versions match or shouldPullSchemaFrom returned false");
-        return make_ready_future<>();
-    }
-
-    if (db.get_version() == database::empty_version || runtime::get_uptime() < migration_delay) {
-        // If we think we may be bootstrapping or have recently started, submit MigrationTask immediately
-        mlogger.debug("Submitting migration task for {}", endpoint);
-        return submit_migration_task(endpoint);
-    }
-
-    return with_gate(_background_tasks, [this, &db, endpoint] {
-        // Include a delay to make sure we have a chance to apply any changes being
-        // pushed out simultaneously. See CASSANDRA-5025
-        return sleep_abortable(migration_delay, _as).then([this, &db, endpoint] {
-            // grab the latest version of the schema since it may have changed again since the initial scheduling
-            auto& gossiper = gms::get_local_gossiper();
-            auto* ep_state = gossiper.get_endpoint_state_for_endpoint_ptr(endpoint);
-            if (!ep_state) {
-                mlogger.debug("epState vanished for {}, not submitting migration task", endpoint);
-                return make_ready_future<>();
-            }
-            const auto* value = ep_state->get_application_state_ptr(gms::application_state::SCHEMA);
-            if (!value) {
-                mlogger.debug("application_state::SCHEMA does not exist for {}, not submitting migration task", endpoint);
-                return make_ready_future<>();
-            }
-            utils::UUID current_version{value->value};
-            if (db.get_version() == current_version) {
-                mlogger.debug("not submitting migration task for {} because our versions match", endpoint);
-                return make_ready_future<>();
-            }
-            mlogger.debug("submitting migration task for {}", endpoint);
-            return submit_migration_task(endpoint);
-        });
-    }).finally([me = shared_from_this()] {});
 }
 
 future<> migration_manager::submit_migration_task(const gms::inet_address& endpoint, bool can_ignore_down_node)
@@ -952,7 +1062,10 @@ future<> migration_manager::push_schema_mutation(const gms::inet_address& endpoi
 future<> migration_manager::announce(std::vector<mutation> schema) {
     auto f = db::schema_tables::merge_schema(get_storage_proxy(), _feat, schema);
 
-    return do_with(std::move(schema), [this, live_members = gms::get_local_gossiper().get_live_members()](auto && schema) {
+    return container().invoke_on(0, [] (migration_manager& mm) {
+        mm.defer_schema_pull();
+    }).then([schema = std::move(schema), this] () mutable {
+      return do_with(std::move(schema), [this, live_members = gms::get_local_gossiper().get_live_members()](auto && schema) {
         return parallel_for_each(live_members.begin(), live_members.end(), [this, &schema](auto& endpoint) {
             // only push schema to nodes with known and equal versions
             if (endpoint != utils::fb_utilities::get_broadcast_address() &&
@@ -964,6 +1077,7 @@ future<> migration_manager::announce(std::vector<mutation> schema) {
                 return make_ready_future<>();
             }
         });
+      });
     }).then([f = std::move(f)] () mutable { return std::move(f); });
 }
 
