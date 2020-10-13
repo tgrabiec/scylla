@@ -84,6 +84,10 @@ public:
         });
     }
 
+    bool active() const {
+        return _sem.available_units() < 1;
+    }
+
     // Like trigger(), but defers invocation of the action to allow for batching
     // more requests.
     future<> trigger_later() {
