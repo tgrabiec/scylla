@@ -46,6 +46,7 @@
 #include "gms/endpoint_state.hh"
 #include <seastar/core/distributed.hh>
 #include <seastar/core/abort_source.hh>
+#include <seastar/core/timer.hh>
 #include "gms/inet_address.hh"
 #include "gms/feature.hh"
 #include "message/msg_addr.hh"
@@ -76,15 +77,18 @@ private:
     gms::feature_service& _feat;
     netw::messaging_service& _messaging;
     seastar::abort_source _as;
+    seastar::timer<> _sync_timer;
+    seastar::condition_variable _sync_condvar;
+    bool _sync_scheduled = false;
 public:
     migration_manager(migration_notifier&, gms::feature_service&, netw::messaging_service& ms);
 
     migration_notifier& get_notifier() { return _notifier; }
     const migration_notifier& get_notifier() const { return _notifier; }
 
-    future<> schedule_schema_pull(const gms::inet_address& endpoint, const gms::endpoint_state& state);
-
-    future<> maybe_schedule_schema_pull(const utils::UUID& their_version, const gms::inet_address& endpoint);
+    // Signals that there may be a need to pull schema from one of the nodes.
+    // Call on shard 0 only.
+    void schedule_schema_pull();
 
     future<> submit_migration_task(const gms::inet_address& endpoint, bool can_ignore_down_node = true);
 
@@ -172,6 +176,12 @@ public:
 
     void init_messaging_service();
 private:
+    void schedule_schema_pull_now();
+    void defer_schema_pull();
+    bool has_active_schema_pull(gms::inet_address);
+    void start_schema_synchronizer();
+    future<> schedule_schema_pull(const gms::inet_address&, const gms::endpoint_state&);
+
     future<> uninit_messaging_service();
 
     static future<> include_keyspace_and_announce(
