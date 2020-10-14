@@ -173,7 +173,8 @@ class fsm {
     seastar::condition_variable _sm_events;
     // Called when one of the replicas advances its match index
     // so it may be the case that some entries are committed now.
-    // Signals _sm_events.
+    // Signals _sm_events. May resign leadership if we committed
+    // a configuration change.
     void maybe_commit();
     // Check if the randomized election timeout has expired.
     bool is_past_election_timeout() const {
