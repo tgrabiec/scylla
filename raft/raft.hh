@@ -99,6 +99,24 @@ struct configuration {
         }
     }
     configuration() = default;
+
+    // Return true if the previous configuration is still
+    // in use
+    bool is_joint() const {
+        return !previous.empty();
+    }
+    // Enter a joint configuration given a new set of servers.
+    void enter_joint(std::unordered_set<server_address> c_new) {
+        // @todo: validate that c_old & c_new are compatible.
+        assert(c_new.size());
+        previous = std::move(current);
+        current = std::move(c_new);
+    }
+    // Transition from C_old + C_new to C_new.
+    void leave_joint() {
+        assert(is_joint());
+        previous.clear();
+    }
 };
 
 struct log_entry {
