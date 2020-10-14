@@ -56,7 +56,17 @@ public:
     // server interface
     future<> add_entry(command command, wait_type type);
     future<> apply_snapshot(server_id from, install_snapshot snp) override;
+    // Adds a server to the cluster. If the server is already a member
+    // of the cluster does nothing. Can be called on a leader only
+    // otherwise throws not_a_leader.
+    // Cannot be called until previous add/remove server completes
+    // otherwise conf_change_in_progress exception is returned.
     future<> add_server(server_id id, bytes node_info, clock_type::duration timeout) override;
+    // Removes a server from the cluster. If the server is not a member
+    // of the cluster does nothing. Can be called on a leader only
+    // otherwise throws not_a_leader.
+    // Cannot be called until previous add/remove server completes
+    // otherwise conf_change_in_progress exception is returned.
     future<> remove_server(server_id id, clock_type::duration timeout) override;
     future<> start() override;
     future<> abort() override;
@@ -463,17 +473,31 @@ future<> server_impl::abort() {
             _rpc->abort(), _state_machine->abort(), _storage->abort(), std::move(snapshots)).discard_result();
 }
 
-future<> server_impl::add_server(server_id id, bytes node_info, clock_type::duration timeout) {
-    return make_ready_future<>();
+future<> server_impl::add_server(server_id id, bytes node_info, clock_type::duration /* timeout */) {
+    // 4.1 Cluster membership changes. Safety.
+    // When the leader receives a request to add or remove a server
+    // from its current configuration (C old ), it appends the new
+    // configuration (C new ) as an entry in its log and replicates
+    // that entry using the normal Raft mechanism.
+    raft::configuration c_new(_fsm->get_configuration());
+    server_address to_add{std::move(id), std::move(node_info)};
+
+    if (c_new.current.find(to_add) != c_new.current.end()) {
+        return make_ready_future<>();
+    }
+    c_new.current.emplace(std::move(to_add));
+    return add_entry_internal(std::move(c_new), wait_type::applied);
 }
 
-// Removes a server from the cluster. If the server is not a member
-// of the cluster does nothing. Can be called on a leader only
-// otherwise throws not_a_leader.
-// Cannot be called until previous add/remove server completes
-// otherwise conf_change_in_progress exception is returned.
-future<> server_impl::remove_server(server_id id, clock_type::duration timeout) {
-    return make_ready_future<>();
+future<> server_impl::remove_server(server_id id, clock_type::duration /* timeout */) {
+    raft::configuration c_new(_fsm->get_configuration());
+    server_address to_remove{std::move(id)};
+
+    if (c_new.current.find(to_remove) == c_new.current.end()) {
+        return make_ready_future<>();
+    }
+    c_new.current.erase(to_remove);
+    return add_entry_internal(std::move(c_new), wait_type::applied);
 }
 
 future<> server_impl::elect_me_leader() {
