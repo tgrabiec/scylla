@@ -286,6 +286,7 @@ scylla_tests = set([
     'test/boost/big_decimal_test',
     'test/boost/broken_sstable_test',
     'test/boost/bytes_ostream_test',
+    'test/boost/iterator_utils_test',
     'test/boost/cache_flat_mutation_reader_test',
     'test/boost/cached_file_test',
     'test/boost/caching_options_test',
@@ -1068,6 +1069,7 @@ deps['test/boost/bytes_ostream_test'] = [
     "utils/dynamic_bitset.cc",
     "test/lib/log.cc",
 ]
+deps['test/boost/iterator_utils_test'] = [ "test/boost/iterator_utils_test.cc" ]
 deps['test/boost/input_stream_test'] = ['test/boost/input_stream_test.cc']
 deps['test/boost/UUID_test'] = ['utils/UUID_gen.cc', 'test/boost/UUID_test.cc', 'utils/uuid.cc', 'utils/managed_bytes.cc', 'utils/logalloc.cc', 'utils/dynamic_bitset.cc', 'hashers.cc']
 deps['test/boost/murmur_hash_test'] = ['bytes.cc', 'utils/murmur_hash.cc', 'test/boost/murmur_hash_test.cc']

@@ -31,6 +31,7 @@
 #include <seastar/core/print.hh>
 #include "frozen_mutation.hh"
 #include "utils/UUID_gen.hh"
+#include "utils/at_most.hh"
 #include <thrift/protocol/TBinaryProtocol.h>
 #include <boost/move/iterator.hpp>
 #include "db/marshal/type_parser.hh"
