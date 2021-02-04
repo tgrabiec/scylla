@@ -479,6 +479,9 @@ public:
     // Invalidates references to objects in all compactible and evictable regions.
     void full_compaction();
 
+    // Evicts all evictable objects.
+    future<> evict_all();
+
     void reclaim_all_free_segments();
 
     // Returns aggregate statistics for all pools.

@@ -399,6 +399,8 @@ public:
     // Returns the amount by which segment_pool.total_memory_in_use() has decreased.
     size_t compact_and_evict(size_t reserve_segments, size_t bytes);
     void full_compaction();
+    // Evicts all evictable objects.
+    future<> evict_all();
     void reclaim_all_free_segments();
     occupancy_stats region_occupancy();
     occupancy_stats occupancy();
@@ -446,6 +448,10 @@ size_t tracker::non_lsa_used_space() const {
 
 void tracker::full_compaction() {
     return _impl->full_compaction();
+}
+
+future<> tracker::evict_all() {
+    return _impl->evict_all();
 }
 
 void tracker::reclaim_all_free_segments() {
@@ -1809,6 +1815,22 @@ void tracker::impl::full_compaction() {
     }
 
     llogger.debug("Compaction done, {}", region_occupancy());
+}
+
+future<> tracker::impl::evict_all() {
+    return repeat([this] {
+        for (region::impl* r : _regions) {
+            if (!r->is_evictable()) {
+                continue;
+            }
+            while (r->evict_some() == memory::reclaiming_result::reclaimed_something) {
+                if (need_preempt()) {
+                    return stop_iteration::no;
+                }
+            }
+        }
+        return stop_iteration::yes;
+    });
 }
 
 static void reclaim_from_evictable(region::impl& r, size_t target_mem_in_use) {
