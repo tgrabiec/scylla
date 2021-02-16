@@ -1624,6 +1624,12 @@ with open(buildfile_tmp, 'w') as f:
                 artifacts=str.join(' ', ('$builddir/' + mode + '/' + x for x in build_artifacts))
             )
         )
+        f.write(
+            'build {mode}-build-test: phony {artifacts}\n'.format(
+                mode=mode,
+                artifacts=str.join(' ', ('$builddir/' + mode + '/' + x for x in build_artifacts if 'test' in x))
+            )
+        )
         include_dist_target = f'dist-{mode}' if args.enable_dist is None or args.enable_dist else ''
         f.write(f'build {mode}: phony {mode}-build {include_dist_target}\n')
         compiles = {}
