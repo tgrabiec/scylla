@@ -101,20 +101,26 @@ public:
         return _sst->data_read(pos, len, default_priority_class(), tests::make_permit());
     }
 
-    future<index_list> read_indexes() {
-        auto l = make_lw_shared<index_list>();
-        return do_with(std::make_unique<index_reader>(_sst, tests::make_permit(), default_priority_class(), tracing::trace_state_ptr()),
-                [this, l] (std::unique_ptr<index_reader>& ir) {
+    std::unique_ptr<index_reader> make_index_reader() {
+        return std::make_unique<index_reader>(_sst, tests::make_permit(), default_priority_class(), tracing::trace_state_ptr());
+    }
+
+    struct index_entry {
+        partition_key key;
+        uint64_t promoted_index_size;
+    };
+
+    future<std::vector<index_entry>> read_indexes() {
+        auto l = make_lw_shared<std::vector<index_entry>>();
+        return do_with(make_index_reader(), [l] (std::unique_ptr<index_reader>& ir) {
             return ir->read_partition_data().then([&, l] {
-                l->push_back(std::move(ir->current_partition_entry()));
-            }).then([&, l] {
                 return repeat([&, l] {
+                    l->emplace_back(index_entry{ir->get_partition_key(),
+                                                ir->get_promoted_index_size()});
                     return ir->advance_to_next_partition().then([&, l] {
                         if (ir->eof()) {
                             return stop_iteration::yes;
                         }
-
-                        l->push_back(std::move(ir->current_partition_entry()));
                         return stop_iteration::no;
                     });
                 });
