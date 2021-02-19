@@ -33,6 +33,8 @@ namespace sstables {
 // Associative cache of summary index -> index_list
 // Entries stay around as long as there is any live external reference (list_ptr) to them.
 // Supports asynchronous insertion, ensures that only one entry will be loaded.
+// Entries without a live list_ptr are linked in the LRU if an LRU is attached.
+// The instance must be destroyed only after all live_ptr:s are gone.
 class shared_index_lists {
 public:
     using key_type = uint64_t;
@@ -51,13 +53,18 @@ public:
 
     using loading_shared_lists_type = utils::loading_shared_values<key_type, index_list, std::hash<key_type>, std::equal_to<key_type>, stats_updater>;
     // Pointer to index_list
+    // Never invalidated.
     using list_ptr = loading_shared_lists_type::entry_ptr;
 private:
 
     loading_shared_lists_type _lists;
 public:
 
-    shared_index_lists() = default;
+    // Create a cache with a given LRU attached.
+    shared_index_lists(lru& l) {
+        _lists.set_lru(&l);
+    }
+
     shared_index_lists(shared_index_lists&&) = delete;
     shared_index_lists(const shared_index_lists&) = delete;
 

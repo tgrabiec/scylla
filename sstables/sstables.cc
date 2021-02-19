@@ -2895,6 +2895,7 @@ sstable::sstable(schema_ptr schema,
     , _generation(generation)
     , _version(v)
     , _format(f)
+    , _index_lists(manager.get_cache_tracker().get_lru())
     , _now(now)
     , _read_error_handler(error_handler_gen(sstable_read_error))
     , _write_error_handler(error_handler_gen(sstable_write_error))
