@@ -81,6 +81,10 @@ public:
     }
 
     static const stats& shard_stats() { return _shard_stats; }
+
+    // May be called before the object is destroyed to avoid reactor stalls.
+    // No list_ptr can be alive at this point.
+    future<> destroy() { return _lists.destroy(); }
 };
 
 }
