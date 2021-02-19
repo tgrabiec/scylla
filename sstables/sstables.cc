@@ -2782,6 +2782,7 @@ thread_local shared_index_lists::stats shared_index_lists::_shard_stats;
 thread_local cached_file::metrics index_page_cache_metrics;
 thread_local mc::cached_promoted_index::metrics promoted_index_cache_metrics;
 thread_local logalloc::region cache_region;
+thread_local lru cache_lru;
 static thread_local seastar::metrics::metric_groups metrics;
 
 future<> init_metrics() {
@@ -2904,6 +2905,7 @@ sstable::sstable(schema_ptr schema,
     , _generation(generation)
     , _version(v)
     , _format(f)
+    , _index_lists(cache_lru)
     , _now(now)
     , _read_error_handler(error_handler_gen(sstable_read_error))
     , _write_error_handler(error_handler_gen(sstable_write_error))
