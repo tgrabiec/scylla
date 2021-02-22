@@ -99,6 +99,7 @@ public:
     }
 };
 
+inline
 index_list::~index_list() {
     with_allocator(cache_region.allocator(), [this] {
         _entries.clear_and_release();
