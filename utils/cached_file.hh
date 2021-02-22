@@ -24,6 +24,7 @@
 #include "reader_permit.hh"
 #include "utils/div_ceil.hh"
 #include "utils/bptree.hh"
+#include "utils/lru.hh"
 #include "tracing/trace_state.hh"
 
 #include <seastar/core/file.hh>
@@ -70,7 +71,7 @@ public:
         uint64_t cached_bytes = 0;
     };
 private:
-    class cached_page {
+    class cached_page : public evictable {
     public:
         cached_file* parent;
         page_idx_type idx;
@@ -81,6 +82,7 @@ private:
             , buf(std::move(buf))
         { }
         cached_page(cached_page&&) noexcept = default;
+        void on_evicted() noexcept override;
     };
 
     struct page_idx_less_comparator {
@@ -92,6 +94,7 @@ private:
     file _file;
     sstring _file_name; // for logging / tracing
     metrics& _metrics;
+    lru& _lru;
 
     using cache_type = bplus::tree<page_idx_type, cached_page, page_idx_less_comparator, 12, bplus::key_search::linear>;
     cache_type _cache;
@@ -109,6 +112,7 @@ private:
             ++_metrics.page_hits;
             tracing::trace(trace_state, "page cache hit: file={}, page={}", _file_name, idx);
             cached_page& cp = *i;
+            _lru.touch(cp);
             return make_ready_future<temporary_buffer<char>>(cp.buf.share());
         }
         tracing::trace(trace_state, "page cache miss: file={}, page={}", _file_name, idx);
@@ -199,10 +203,11 @@ public:
     /// \param m Metrics object which should be updated from operations on this object.
     ///          The metrics object can be shared by many cached_file instances, in which case it
     ///          will reflect the sum of operations on all cached_file instances.
-    cached_file(file f, cached_file::metrics& m, offset_type size, sstring file_name = {})
+    cached_file(file f, cached_file::metrics& m, lru& l, offset_type size, sstring file_name = {})
         : _file(std::move(f))
         , _file_name(std::move(file_name))
         , _metrics(m)
+        , _lru(l)
         , _cache(page_idx_less_comparator())
         , _size(size)
     {
@@ -284,6 +289,13 @@ public:
         return _file;
     }
 };
+
+inline
+void cached_file::cached_page::on_evicted() noexcept {
+    parent->on_evicted(*this);
+    cached_file::cache_type::iterator it(this);
+    it.erase(page_idx_less_comparator());
+}
 
 class cached_file_impl : public file_impl {
     cached_file& _cf;
