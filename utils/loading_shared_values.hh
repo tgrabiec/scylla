@@ -101,7 +101,7 @@ private:
 
         // Called by LRU when the entry is unlinked.
         // The entry doesn't have any live entry_ptr at this point, we're responsible for freeing it.
-        void on_evicted() override {
+        void on_evicted() noexcept override {
             _parent.on_evicted(this);
         }
 
