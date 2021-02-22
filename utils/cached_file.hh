@@ -344,7 +344,7 @@ public:
                         result = temporary_buffer<uint8_t>::aligned(_memory_dma_alignment, size_left);
                     }
                     size_t this_len = std::min(buf.size(), size_left);
-                    std::copy(buf.begin(), buf.end(), result.get_write() + size - size_left);
+                    std::copy(buf.begin(), buf.begin() + this_len, result.get_write() + (size - size_left));
                     size_left -= this_len;
                     return stop_iteration(size_left == 0);
                 });
