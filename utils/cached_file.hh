@@ -181,19 +181,17 @@ public:
     void on_evicted(cached_page& p) {
         _metrics.cached_bytes -= p.buf.size();
         _cached_bytes -= p.buf.size();
+        ++_metrics.page_evictions;
     }
 
     size_t evict_range(cache_type::iterator start, cache_type::iterator end) noexcept {
         size_t count = 0;
-        auto disposer = [] (auto* p) noexcept {
-            current_allocator().free(p);
-        };
+        auto disposer = [] (auto* p) noexcept {};
         while (start != end) {
             ++count;
             on_evicted(*start);
             start = start.erase_and_dispose(disposer, page_idx_less_comparator());
         }
-        _metrics.page_evictions += count;
         return count;
     }
 public:
