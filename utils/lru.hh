@@ -22,6 +22,7 @@
 #pragma once
 
 #include <boost/intrusive/list.hpp>
+#include <seastar/core/memory.hh>
 
 class evictable {
     friend class lru;
@@ -29,9 +30,9 @@ class evictable {
         boost::intrusive::link_mode<boost::intrusive::auto_unlink>>;
     lru_link_type _lru_link;
 public:
-    virtual ~evictable() {};
+    virtual ~evictable() = default;;
 
-    virtual void on_evicted() = 0;
+    virtual void on_evicted() noexcept = 0;
 
     void unlink_from_lru() {
         _lru_link.unlink();
@@ -45,20 +46,41 @@ private:
         boost::intrusive::constant_time_size<false>>; // we need this to have bi::auto_unlink on hooks.
     lru_type _list;
 public:
+    using reclaiming_result = seastar::memory::reclaiming_result;
+
     ~lru() {
         _list.clear_and_dispose([] (evictable* e) {
             e->on_evicted();
         });
     }
-    void remove(evictable& e) {
+
+    void remove(evictable& e) noexcept {
         _list.erase(_list.iterator_to(e));
     }
-    void add(evictable& e) {
+
+    void add(evictable& e) noexcept {
         _list.push_back(e);
     }
-    void evict() {
+
+    void touch(evictable& e) noexcept {
+        remove(e);
+        add(e);
+    }
+
+    // Evicts a single element from the LRU
+    reclaiming_result evict() noexcept {
+        if (_list.empty()) {
+            return reclaiming_result::reclaimed_nothing;
+        }
         evictable& e = _list.front();
         _list.pop_front();
         e.on_evicted();
+        return reclaiming_result::reclaimed_something;
+    }
+
+    // Evicts all elements.
+    // May stall the reactor, use only in tests.
+    void evict_all() {
+        while (evict() == reclaiming_result::reclaimed_something) {}
     }
 };
