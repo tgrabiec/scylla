@@ -87,6 +87,7 @@ namespace sstables {
 logging::logger sstlog("sstable");
 
 bool use_binary_search_in_promoted_index = true;
+thread_local lru cache_lru;
 
 namespace bi = boost::intrusive;
 
@@ -2782,7 +2783,6 @@ thread_local shared_index_lists::stats shared_index_lists::_shard_stats;
 thread_local cached_file::metrics index_page_cache_metrics;
 thread_local mc::cached_promoted_index::metrics promoted_index_cache_metrics;
 thread_local logalloc::region cache_region;
-thread_local lru cache_lru;
 static thread_local seastar::metrics::metric_groups metrics;
 
 future<> init_metrics() {
