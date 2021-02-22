@@ -22,6 +22,7 @@
 #include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
 #include <seastar/core/iostream.hh>
+#include <seastar/core/when_all.hh>
 #include <seastar/core/fstream.hh>
 #include <seastar/core/file.hh>
 #include <seastar/core/reactor.hh>
@@ -112,6 +113,29 @@ SEASTAR_THREAD_TEST_CASE(test_file_wrapper) {
 
     BOOST_REQUIRE_EQUAL(tf.contents.substr(0, cf.size()),
         read_to_string(f, 0, cf.size()));
+}
+
+SEASTAR_THREAD_TEST_CASE(test_concurrent_population) {
+    auto page_size = cached_file::page_size;
+    cached_file::metrics metrics;
+    test_file tf = make_test_file(page_size * 3);
+    cached_file cf(tf.f, metrics, cf_lru, page_size * 3);
+    seastar::file f = make_cached_seastar_file(cf);
+
+    seastar::when_all(
+        seastar::async([&] {
+            BOOST_REQUIRE_EQUAL(tf.contents.substr(0, 1), read_to_string(f, 0, 1));
+        }),
+        seastar::async([&] {
+            BOOST_REQUIRE_EQUAL(tf.contents.substr(0, 1), read_to_string(f, 0, 1));
+        })
+    ).get();
+
+    BOOST_REQUIRE_EQUAL(page_size, metrics.cached_bytes);
+    BOOST_REQUIRE_EQUAL(2, metrics.page_misses);
+    BOOST_REQUIRE_EQUAL(0, metrics.page_evictions);
+    BOOST_REQUIRE_EQUAL(0, metrics.page_hits);
+    BOOST_REQUIRE_EQUAL(1, metrics.page_populations);
 }
 
 SEASTAR_THREAD_TEST_CASE(test_reading_from_small_file) {

@@ -120,11 +120,13 @@ private:
         auto size = idx == _last_page ? _last_page_size : page_size;
         return _file.dma_read_exactly<char>(idx * page_size, size, pc)
             .then([this, idx] (temporary_buffer<char>&& buf) mutable {
-                ++_metrics.page_populations;
-                _metrics.cached_bytes += buf.size();
-                _cached_bytes += buf.size();
                 auto it_and_flag = _cache.emplace(idx, cached_page(this, idx, buf.share()));
-                _lru.add(*it_and_flag.first);
+                if (it_and_flag.second) {
+                    ++_metrics.page_populations;
+                    _metrics.cached_bytes += buf.size();
+                    _cached_bytes += buf.size();
+                    _lru.add(*it_and_flag.first);
+                }
                 return std::move(buf);
             });
     }
