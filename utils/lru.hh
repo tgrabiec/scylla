@@ -30,7 +30,10 @@ class evictable {
         boost::intrusive::link_mode<boost::intrusive::auto_unlink>>;
     lru_link_type _lru_link;
 public:
+    evictable() = default;
     virtual ~evictable() = default;;
+    evictable(evictable&& o) noexcept;
+    evictable& operator=(evictable&&) noexcept = default;
 
     virtual void on_evicted() noexcept = 0;
 
@@ -41,6 +44,7 @@ public:
 
 class lru {
 private:
+    friend class evictable;
     using lru_type = boost::intrusive::list<evictable,
         boost::intrusive::member_hook<evictable, evictable::lru_link_type, &evictable::_lru_link>,
         boost::intrusive::constant_time_size<false>>; // we need this to have bi::auto_unlink on hooks.
@@ -84,3 +88,12 @@ public:
         while (evict() == reclaiming_result::reclaimed_something) {}
     }
 };
+
+inline
+evictable::evictable(evictable&& o) noexcept {
+    if (o._lru_link.is_linked()) {
+        auto prev = o._lru_link.prev_;
+        o._lru_link.unlink();
+        lru::lru_type::node_algorithms::link_after(prev, _lru_link.this_ptr());
+    }
+}
