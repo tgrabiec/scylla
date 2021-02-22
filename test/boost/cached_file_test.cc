@@ -197,7 +197,7 @@ SEASTAR_THREAD_TEST_CASE(test_eviction_via_lru) {
 
         {
             // Test that the page which is touched is evicted last
-            BOOST_REQUIRE_EQUAL(tf.contents, read_to_string(cf, page, 1)); // hit page 1
+            BOOST_REQUIRE_EQUAL(tf.contents.substr(page, 1), read_to_string(cf, page, 1)); // hit page 1
 
             BOOST_REQUIRE_EQUAL(6, metrics.page_misses);
             BOOST_REQUIRE_EQUAL(3, metrics.page_evictions);
@@ -206,7 +206,7 @@ SEASTAR_THREAD_TEST_CASE(test_eviction_via_lru) {
 
             cf_lru.evict();
 
-            BOOST_REQUIRE_EQUAL(tf.contents, read_to_string(cf, page, 1)); // hit page 1
+            BOOST_REQUIRE_EQUAL(tf.contents.substr(page, 1), read_to_string(cf, page, 1)); // hit page 1
 
             BOOST_REQUIRE_EQUAL(6, metrics.page_misses);
             BOOST_REQUIRE_EQUAL(4, metrics.page_evictions); // change
@@ -215,7 +215,7 @@ SEASTAR_THREAD_TEST_CASE(test_eviction_via_lru) {
 
             cf_lru.evict();
 
-            BOOST_REQUIRE_EQUAL(tf.contents, read_to_string(cf, page, 1)); // hit page 1
+            BOOST_REQUIRE_EQUAL(tf.contents.substr(page, 1), read_to_string(cf, page, 1)); // hit page 1
 
             BOOST_REQUIRE_EQUAL(6, metrics.page_misses);
             BOOST_REQUIRE_EQUAL(5, metrics.page_evictions); // change

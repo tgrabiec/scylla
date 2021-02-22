@@ -123,7 +123,8 @@ private:
                 ++_metrics.page_populations;
                 _metrics.cached_bytes += buf.size();
                 _cached_bytes += buf.size();
-                _cache.emplace(idx, cached_page(this, idx, buf.share()));
+                auto it_and_flag = _cache.emplace(idx, cached_page(this, idx, buf.share()));
+                _lru.add(*it_and_flag.first);
                 return std::move(buf);
             });
     }
