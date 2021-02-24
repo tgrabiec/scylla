@@ -565,11 +565,17 @@ public:
     friend std::ostream& operator<<(std::ostream&, const occupancy_stats&);
 };
 
-class basic_region_impl : public allocation_strategy {
+class basic_region_impl {
 protected:
     bool _reclaiming_enabled = true;
     seastar::shard_id _cpu = this_shard_id();
+private:
+    uint64_t& _bri_invalidate_counter;
 public:
+    basic_region_impl(uint64_t& invalidate_counter)
+        : _bri_invalidate_counter(invalidate_counter)
+    { }
+
     void set_reclaiming_enabled(bool enabled) {
         assert(this_shard_id() == _cpu);
         _reclaiming_enabled = enabled;
@@ -577,6 +583,70 @@ public:
 
     bool reclaiming_enabled() const {
         return _reclaiming_enabled;
+    }
+
+    uint64_t invalidate_counter() const {
+        return _bri_invalidate_counter;
+    }
+
+    void invalidate_references() {
+        ++_bri_invalidate_counter;
+    }
+};
+
+// Basic region encapsulates concepts shared by all LSA regions.
+//
+// All basic regions can invalidate their objects, so can be used
+// as a subject of locking and allocating sections.
+//
+class basic_region {
+protected:
+    shared_ptr<basic_region_impl> _impl;
+public:
+    basic_region(shared_ptr<basic_region_impl> impl)
+        : _impl(std::move(impl))
+    { }
+
+    // Changes the reclaimability state of this region. When region is not
+    // reclaimable, it won't be considered by tracker::reclaim(). By default region is
+    // reclaimable after construction.
+    void set_reclaiming_enabled(bool e) { _impl->set_reclaiming_enabled(e); }
+
+    // Returns the reclaimability state of this region.
+    bool reclaiming_enabled() const { return _impl->reclaiming_enabled(); }
+
+    // Returns a value which is increased when this region is either compacted or
+    // evicted from, which invalidates references into the region.
+    // When the value returned by this method doesn't change, references remain valid.
+    uint64_t reclaim_counter() const {
+        return _impl->invalidate_counter();
+    }
+
+    void invalidate_references() {
+        _impl->invalidate_references();
+    }
+};
+
+class alloc_strategy_region_impl : public allocation_strategy, public basic_region_impl {
+public:
+    alloc_strategy_region_impl()
+        : basic_region_impl(_invalidate_counter)
+    { }
+};
+
+// Represents LSA regions which provide an allocating_strategy,
+// so are capable of allocating arbitrary objects.
+class alloc_strategy_region : public basic_region {
+public:
+    alloc_strategy_region(shared_ptr<alloc_strategy_region_impl> impl)
+        : basic_region(std::move(impl))
+    { }
+
+    allocation_strategy& allocator() noexcept {
+        return *static_pointer_cast<alloc_strategy_region_impl>(_impl);
+    }
+    const allocation_strategy& allocator() const noexcept {
+        return *static_pointer_cast<const alloc_strategy_region_impl>(_impl);
     }
 };
 
@@ -595,11 +665,9 @@ public:
 // Region is automatically added to the set of
 // compactible regions when constructed.
 //
-class region {
+class region : public alloc_strategy_region {
 public:
     using impl = region_impl;
-private:
-    shared_ptr<basic_region_impl> _impl;
 private:
     region_impl& get_impl();
     const region_impl& get_impl() const;
@@ -613,13 +681,6 @@ public:
 
     occupancy_stats occupancy() const;
 
-    allocation_strategy& allocator() noexcept {
-        return *_impl;
-    }
-    const allocation_strategy& allocator() const noexcept {
-        return *_impl;
-    }
-
     region_group* group();
 
     // Merges another region into this region. The other region is left empty.
@@ -632,21 +693,6 @@ public:
 
     // Runs eviction function once. Mainly for testing.
     memory::reclaiming_result evict_some();
-
-    // Changes the reclaimability state of this region. When region is not
-    // reclaimable, it won't be considered by tracker::reclaim(). By default region is
-    // reclaimable after construction.
-    void set_reclaiming_enabled(bool e) { _impl->set_reclaiming_enabled(e); }
-
-    // Returns the reclaimability state of this region.
-    bool reclaiming_enabled() const { return _impl->reclaiming_enabled(); }
-
-    // Returns a value which is increased when this region is either compacted or
-    // evicted from, which invalidates references into the region.
-    // When the value returned by this method doesn't change, references remain valid.
-    uint64_t reclaim_counter() const {
-        return allocator().invalidate_counter();
-    }
 
     // Will cause subsequent calls to evictable_occupancy() to report empty occupancy.
     void ground_evictable_occupancy();
@@ -670,9 +716,9 @@ public:
 // live by disabling compaction and eviction.
 // Can be nested.
 struct reclaim_lock {
-    region& _region;
+    basic_region& _region;
     bool _prev;
-    reclaim_lock(region& r)
+    reclaim_lock(basic_region& r)
         : _region(r)
         , _prev(r.reclaiming_enabled())
     {
@@ -705,7 +751,7 @@ private:
     };
     void reserve();
     void maybe_decay_reserve();
-    void on_alloc_failure(logalloc::region&);
+    void on_alloc_failure(logalloc::basic_region&);
 public:
 
     void set_lsa_reserve(size_t);
@@ -747,7 +793,7 @@ public:
     // Throws std::bad_alloc when reserves can't be increased to a sufficient level.
     //
     template<typename Func>
-    decltype(auto) with_reclaiming_disabled(logalloc::region& r, Func&& fn) {
+    decltype(auto) with_reclaiming_disabled(logalloc::basic_region& r, Func&& fn) {
         assert(r.reclaiming_enabled());
         maybe_decay_reserve();
         while (true) {
@@ -774,7 +820,7 @@ public:
     // Throws std::bad_alloc when reserves can't be increased to a sufficient level.
     //
     template<typename Func>
-    decltype(auto) operator()(logalloc::region& r, Func&& func) {
+    decltype(auto) operator()(logalloc::basic_region& r, Func&& func) {
         return with_reserve([this, &r, &func] {
             return with_reclaiming_disabled(r, func);
         });

@@ -1099,7 +1099,7 @@ segment::occupancy() {
 // Per-segment metadata is kept in a separate array, managed by segment_pool
 // object.
 //
-class region_impl final : public basic_region_impl {
+class region_impl final : public alloc_strategy_region_impl {
     // Serialized object descriptor format:
     //  byte0 byte1 ... byte[n-1]
     //  bit0-bit5: ULEB64 significand
@@ -1785,11 +1785,11 @@ region_group::region_evictable_occupancy_ascending_less_comparator::operator()(r
 }
 
 region::region()
-    : _impl(make_shared<impl>(this))
+    : alloc_strategy_region(make_shared<impl>(this))
 { }
 
 region::region(region_group& group)
-        : _impl(make_shared<impl>(this, &group)) {
+    : alloc_strategy_region(make_shared<impl>(this, &group)) {
 }
 
 region_impl& region::get_impl() {
@@ -1799,13 +1799,14 @@ const region_impl& region::get_impl() const {
     return *static_cast<const region_impl*>(_impl.get());
 }
 
-region::region(region&& other) {
-    this->_impl = std::move(other._impl);
+region::region(region&& other)
+    : alloc_strategy_region(std::move(other))
+{
     get_impl()._region = this;
 }
 
 region& region::operator=(region&& other) {
-    this->_impl = std::move(other._impl);
+    static_cast<alloc_strategy_region&>(*this) = std::move(other);
     get_impl()._region = this;
     return *this;
 }
@@ -2430,8 +2431,8 @@ void allocating_section::reserve() {
   }
 }
 
-void allocating_section::on_alloc_failure(logalloc::region& r) {
-    r.allocator().invalidate_references();
+void allocating_section::on_alloc_failure(logalloc::basic_region& r) {
+    r.invalidate_references();
     if (shard_segment_pool.allocation_failure_flag()) {
         _lsa_reserve *= 2;
         llogger.debug("LSA allocation failure, increasing reserve in section {} to {} segments", fmt::ptr(this), _lsa_reserve);
