@@ -39,6 +39,7 @@
 #include "partition_slice_builder.hh"
 #include "test/lib/memtable_snapshot_source.hh"
 #include "test/lib/log.hh"
+#include "test/perf/perf.hh"
 #include "test/lib/reader_permit.hh"
 #include "test/lib/random_utils.hh"
 

@@ -170,6 +170,7 @@ public:
     }
     clk::duration min() const { return _minmax.min(); }
     clk::duration max() const { return _minmax.max(); }
+    uint64_t count() const { return _hist.count(); }
 };
 
 void scheduling_latency_measurer::schedule_tick() {

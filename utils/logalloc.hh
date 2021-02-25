@@ -729,6 +729,50 @@ struct reclaim_lock {
     }
 };
 
+class lba_region_impl;
+
+class lba_unique_ptr {
+public:
+    using value_type = char;
+
+    value_type* get() {
+        return nullptr; // FIXME
+    }
+//
+//    lba_unique_ptr() noexcept {}
+//    lba_unique_ptr(std::nullptr_t) noexcept : lba_unique_ptr() {}
+//    lba_unique_ptr(lba_unique_ptr&& o) noexcept
+//        : _ptr(o._ptr)
+//    {
+//        _hook.swap_nodes(o._hook);
+//        o._ptr = nullptr;
+//    }
+//    lba_unique_ptr& operator=(lba_unique_ptr&& o) noexcept {
+//        if (this != &o) {
+//            this->~lba_unique_ptr();
+//            new (this) lba_unique_ptr(std::move(o));
+//        }
+//        return *this;
+//    }
+//    explicit operator bool() const noexcept { return _ptr != nullptr; }
+//    T* operator->() const noexcept { return _ptr; }
+//    T& operator*() const noexcept { return *_ptr; }
+//    T* get() const noexcept { return _ptr; }
+//    bool operator==(const lba_unique_ptr& o) const noexcept { return _ptr == o._ptr; }
+//    bool operator!=(const lba_unique_ptr& o) const noexcept { return _ptr != o._ptr; }
+};
+
+class lba_region : public basic_region {
+private:
+    shared_ptr<lba_region_impl> _impl;
+public:
+    lba_region();
+    lba_unique_ptr alloc();
+};
+
+// Creates a new LBA region which manages blocks of a given size.
+std::unique_ptr<lba_region> make_lba_region(size_t block_size);
+
 // Utility for running critical sections which need to lock some region and
 // also allocate LSA memory. The object learns from failures how much it
 // should reserve up front in order to not cause allocation failures.

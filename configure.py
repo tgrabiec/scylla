@@ -1150,8 +1150,11 @@ deps['test/boost/linearizing_input_stream_test'] = [
     "test/lib/log.cc",
 ]
 
+lsa_deps = ['utils/logalloc.cc', 'utils/dynamic_bitset.cc']
+
 deps['test/boost/duration_test'] += ['test/lib/exception_utils.cc']
 deps['test/boost/alternator_base64_test'] += ['alternator/base64.cc']
+# deps['test/boost/cached_file_test'] = ['test/boost/cached_file_test.cc'] + lsa_deps
 
 deps['test/raft/replication_test'] = ['test/raft/replication_test.cc'] + scylla_raft_dependencies
 deps['test/raft/fsm_test'] =  ['test/raft/fsm_test.cc', 'test/lib/log.cc'] + scylla_raft_dependencies

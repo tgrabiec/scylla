@@ -37,6 +37,7 @@
 #include <seastar/core/coroutine.hh>
 #include <seastar/util/alloc_failure_injector.hh>
 #include <seastar/util/backtrace.hh>
+#include <seastar/util/defer.hh>
 
 #include "utils/logalloc.hh"
 #include "log.hh"
@@ -1518,6 +1519,21 @@ public:
         }
     }
 
+    seastar::temporary_buffer<char> allocate_slab() override {
+        static_assert(segment_size % 4096 == 0);
+        seastar::memory::on_alloc_point();
+        segment* seg = new_segment();
+        seg->record_alloc(segment_size);
+        // Don't put into _segment_descs so that it's not picked up by compaction
+        _closed_occupancy += seg->occupancy();
+        auto buf = seg->at<char>(0);
+        assert(uintptr_t(buf) % 4096 == 0);
+        return seastar::temporary_buffer<char>(buf, segment_size, seastar::make_deleter([this, seg] {
+            _closed_occupancy -= seg->occupancy();
+            segment_descriptor& seg_desc = shard_segment_pool.descriptor(seg);
+            free_segment(seg, seg_desc);
+        }));
+    }
 private:
     void on_non_lsa_free(void* obj) noexcept {
         auto allocated_size = malloc_usable_size(obj);
@@ -2471,6 +2487,10 @@ uint64_t memory_compacted() {
 
 occupancy_stats lsa_global_occupancy_stats() {
     return occupancy_stats(shard_segment_pool.total_free_memory(), shard_segment_pool.total_memory_in_use());
+}
+
+std::unique_ptr<lba_region> make_lba_region(size_t block_size) {
+    return nullptr;
 }
 
 }

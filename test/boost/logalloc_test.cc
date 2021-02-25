@@ -44,6 +44,7 @@
 #include "test/lib/log.hh"
 #include "log.hh"
 #include "test/lib/random_utils.hh"
+#include "test/lib/make_random_string.hh"
 
 [[gnu::unused]]
 static auto x = [] {
@@ -1609,6 +1610,59 @@ SEASTAR_THREAD_TEST_CASE(test_weak_ptr) {
 
     BOOST_REQUIRE(obj_wptr.get() == nullptr);
     BOOST_REQUIRE(!obj_wptr);
+}
+//
+//SEASTAR_THREAD_TEST_CASE(test_slab_allocation) {
+//    logalloc::region region;
+//
+//    auto buf = region.allocator().allocate_slab();
+//    BOOST_REQUIRE_EQUAL(uintptr_t(buf.get()) % 4096, 0);
+//    BOOST_REQUIRE_EQUAL(buf.size() % 4096, 0);
+//    BOOST_REQUIRE_EQUAL(region.occupancy().total_space(), buf.size());
+//    BOOST_REQUIRE_EQUAL(region.occupancy().used_space(), buf.size());
+//    BOOST_REQUIRE_EQUAL(shard_tracker().occupancy().total_space(), buf.size());
+//    BOOST_REQUIRE_EQUAL(shard_tracker().occupancy().used_space(), buf.size());
+//
+//    auto old_ptr = buf.get();
+//
+//    region.full_compaction();
+//
+//    {
+//        buf.release();
+//    }
+//
+//    BOOST_REQUIRE_EQUAL(region.occupancy().total_space(), 0);
+//    BOOST_REQUIRE_EQUAL(shard_tracker().occupancy().total_space(), 0);
+//    BOOST_REQUIRE_EQUAL(region.occupancy().used_space(), 0);
+//    BOOST_REQUIRE_EQUAL(shard_tracker().occupancy().used_space(), 0);
+//}
+
+inline
+bool is_aligned(void* ptr, size_t alignment) {
+    return uintptr_t(ptr) % alignment == 0;
+}
+
+SEASTAR_THREAD_TEST_CASE(test_lba_allocation) {
+    logalloc::region region;
+
+    auto reg = make_lba_region(4096);
+
+    lba_unique_ptr buf = reg->alloc();
+
+    auto ptr1 = buf.get();
+
+    auto cookie = make_random_string(4096);
+    std::copy(cookie.begin(), cookie.end(), ptr1);
+    BOOST_REQUIRE_EQUAL(sstring(buf.get(), 4096), cookie);
+
+    BOOST_REQUIRE(is_aligned(ptr1, 4096));
+
+    region.full_compaction();
+
+    // check that the segment was moved by full_compaction() to exercise lba_unique_ptr tracking.
+    BOOST_REQUIRE(buf.get() != ptr1);
+
+    BOOST_REQUIRE_EQUAL(sstring(buf.get(), 4096), cookie);
 }
 
 #endif

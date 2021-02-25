@@ -24,6 +24,7 @@
 #include <any>
 #include <cstdlib>
 #include <seastar/core/memory.hh>
+#include <seastar/core/temporary_buffer.hh>
 #include <seastar/util/alloc_failure_injector.hh>
 #include <malloc.h>
 
@@ -166,6 +167,12 @@ public:
         free(obj, size);
     }
 
+    // Allocates a contiguous chunk of memory of unspecified size, as preferred by the allocator.
+    // The allocated size is greater than 0 and a multiple of 4KB.
+    // The buffer is aligned to 4KB.
+    // The buffer remains stable, it is not moved.
+    virtual seastar::temporary_buffer<char> allocate_slab() = 0;
+
     size_t preferred_max_contiguous_allocation() const noexcept {
         return _preferred_max_contiguous_allocation;
     }
@@ -213,6 +220,16 @@ public:
 
     virtual size_t object_memory_size_in_allocator(const void* obj) const noexcept {
         return ::malloc_usable_size(const_cast<void *>(obj));
+    }
+
+    seastar::temporary_buffer<char> allocate_slab() override {
+        seastar::memory::on_alloc_point();
+        void* ret;
+        // ASAN doesn't intercept aligned_alloc() and complains on free().
+        if (posix_memalign(&ret, 4096, 4096) != 0) {
+            throw std::bad_alloc();
+        }
+        return seastar::temporary_buffer<char>(reinterpret_cast<char*>(ret), 4096, seastar::make_free_deleter(ret));
     }
 };
 

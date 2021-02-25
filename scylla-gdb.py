@@ -3139,16 +3139,19 @@ class scylla_cache(gdb.Command):
             # Compatibility, the row-cache was switched to B+ tree at some point
             return intrusive_set(table['_cache']['_partitions'])
 
+    def __partitions_in_cache(self, cache):
+        try:
+            return double_decker(cache['_partitions'])
+        except gdb.error:
+            # Compatibility, the row-cache was switched to B+ tree at some point
+            return intrusive_set(cache['_partitions'])
+
     def invoke(self, arg, from_tty):
-        schema_ptr_type = gdb.lookup_type('schema').pointer()
-        for table in for_each_table():
-            schema = table['_schema']['_p'].reinterpret_cast(schema_ptr_type)
-            name = '%s.%s' % (schema['_raw']['_ks_name'], schema['_raw']['_cf_name'])
-            gdb.write("%s:\n" % (name))
-            for e in self.__partitions(table):
-                gdb.write('  (cache_entry*) 0x%x {_key=%s, _flags=%s, _pe=%s}\n' % (
-                    int(e.address), e['_key'], e['_flags'], e['_pe']))
-            gdb.write("\n")
+        ptr = gdb.parse_and_eval(arg).cast(gdb.lookup_type('row_cache').pointer())
+        for e in self.__partitions_in_cache(ptr):
+            gdb.write('  (cache_entry*) 0x%x {_key=%s, _flags=%s, _pe=%s}\n' % (
+                int(e.address), e['_key'], e['_flags'], e['_pe']))
+        gdb.write("\n")
 
 
 def find_sstables_attached_to_tables():
