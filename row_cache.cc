@@ -55,6 +55,8 @@ cache_tracker::cache_tracker()
     : cache_tracker(dummy_app_stats)
 {}
 
+static thread_local cache_tracker* current_tracker;
+
 cache_tracker::cache_tracker(mutation_application_stats& app_stats)
     : _garbage(_region, this, app_stats)
     , _memtable_cleaner(_region, nullptr, app_stats)
@@ -74,11 +76,8 @@ cache_tracker::cache_tracker(mutation_application_stats& app_stats)
                 _memtable_cleaner.clear_some();
                 return memory::reclaiming_result::reclaimed_something;
             }
-            if (_lru.empty()) {
-                return memory::reclaiming_result::reclaimed_nothing;
-            }
-            _lru.back().on_evicted(*this);
-            return memory::reclaiming_result::reclaimed_something;
+            current_tracker = this;
+            return _lru.evict();
            } catch (std::bad_alloc&) {
             // Bad luck, linearization during partition removal caused us to
             // fail.  Drop the entire cache so we can make forward progress.
@@ -145,9 +144,8 @@ void cache_tracker::clear() {
     with_allocator(_region.allocator(), [this] {
         _garbage.clear();
         _memtable_cleaner.clear();
-        while (!_lru.empty()) {
-            _lru.back().on_evicted(*this);
-        }
+        current_tracker = this;
+        _lru.evict_all();
     });
     _stats.partition_removals += partitions_before;
     _stats.row_removals += rows_before;
@@ -158,7 +156,7 @@ void cache_tracker::touch(rows_entry& e) {
     // last dummy may not be linked if evicted, but
     // the unlink_from_lru() handles it
     e.unlink_from_lru();
-    _lru.push_front(e);
+    _lru.add(e);
 }
 
 void cache_tracker::insert(cache_entry& entry) {
@@ -1233,6 +1231,10 @@ void rows_entry::on_evicted(cache_tracker& tracker) noexcept {
             }
         }
     }
+}
+
+void rows_entry::on_evicted() noexcept {
+    on_evicted(*current_tracker);
 }
 
 flat_mutation_reader cache_entry::read(row_cache& rc, read_context& reader) {
