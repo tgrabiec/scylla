@@ -63,6 +63,12 @@ public:
     shared_index_lists(shared_index_lists&&) = delete;
     shared_index_lists(const shared_index_lists&) = delete;
 
+    // Set allocator which is used by the loader to construct the entry.
+    // Objects will be destroyed in the context of this allocator.
+    void set_allocator(allocation_strategy& as) {
+        _lists.set_allocator(as);
+    }
+
     // Returns a future which resolves with a shared pointer to index_list for given key.
     // Always returns a valid pointer if succeeds. The pointer is never invalidated externally.
     //
