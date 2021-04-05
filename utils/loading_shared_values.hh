@@ -34,6 +34,8 @@
 #include <boost/lambda/bind.hpp>
 #include "seastarx.hh"
 
+#include "utils/allocation_strategy.hh"
+
 namespace bi = boost::intrusive;
 
 namespace utils {
@@ -219,7 +221,7 @@ private:
     set_type _set;
     lru* _lru = nullptr;
     value_extractor_fn _value_extractor_fn;
-
+    allocation_strategy* _allocator = &standard_allocator();
 public:
     static const key_type& to_key(const entry_ptr& e_ptr) noexcept {
         return e_ptr._e->key();
@@ -227,6 +229,12 @@ public:
 
     void set_lru(lru* an_lru) {
         _lru = an_lru;
+    }
+
+    // Set allocator which is used by the loader to construct the entry.
+    // Objects will be destroyed in the context of this allocator.
+    void set_allocator(allocation_strategy& as) {
+        _allocator = &as;
     }
 
     /// \throw std::invalid_argument if InitialBucketsCount is zero
@@ -392,7 +400,9 @@ private:
     }
 private:
     void on_evicted(entry* e) {
-        lw_shared_ptr<entry>::dispose(e);
+        with_allocator(*_allocator, [e] {
+            lw_shared_ptr<entry>::dispose(e);
+        });
     }
 
     // Called when the last entry_ptr dies
