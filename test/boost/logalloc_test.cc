@@ -70,7 +70,7 @@ SEASTAR_TEST_CASE(test_compaction) {
 
             auto reclaim_counter_1 = reg.reclaim_counter();
 
-            for (int i = 0; i < 32 * 1024 * 4; i++) {
+            for (int i = 0; i < 32 * 1024 * 8; i++) {
                 _allocated.push_back(make_managed<int>());
             }
 
@@ -1611,58 +1611,279 @@ SEASTAR_THREAD_TEST_CASE(test_weak_ptr) {
     BOOST_REQUIRE(obj_wptr.get() == nullptr);
     BOOST_REQUIRE(!obj_wptr);
 }
-//
-//SEASTAR_THREAD_TEST_CASE(test_slab_allocation) {
-//    logalloc::region region;
-//
-//    auto buf = region.allocator().allocate_slab();
-//    BOOST_REQUIRE_EQUAL(uintptr_t(buf.get()) % 4096, 0);
-//    BOOST_REQUIRE_EQUAL(buf.size() % 4096, 0);
-//    BOOST_REQUIRE_EQUAL(region.occupancy().total_space(), buf.size());
-//    BOOST_REQUIRE_EQUAL(region.occupancy().used_space(), buf.size());
-//    BOOST_REQUIRE_EQUAL(shard_tracker().occupancy().total_space(), buf.size());
-//    BOOST_REQUIRE_EQUAL(shard_tracker().occupancy().used_space(), buf.size());
-//
-//    auto old_ptr = buf.get();
-//
-//    region.full_compaction();
-//
-//    {
-//        buf.release();
-//    }
-//
-//    BOOST_REQUIRE_EQUAL(region.occupancy().total_space(), 0);
-//    BOOST_REQUIRE_EQUAL(shard_tracker().occupancy().total_space(), 0);
-//    BOOST_REQUIRE_EQUAL(region.occupancy().used_space(), 0);
-//    BOOST_REQUIRE_EQUAL(shard_tracker().occupancy().used_space(), 0);
-//}
 
 inline
 bool is_aligned(void* ptr, size_t alignment) {
     return uintptr_t(ptr) % alignment == 0;
 }
 
-SEASTAR_THREAD_TEST_CASE(test_lba_allocation) {
+static sstring to_sstring(const lsa_buffer& buf) {
+    sstring result(sstring::initialized_later(), buf.size());
+    std::copy(buf.get(), buf.get() + buf.size(), result.begin());
+    return result;
+}
+
+SEASTAR_THREAD_TEST_CASE(test_buf_allocation) {
     logalloc::region region;
+    size_t buf_size = 4096;
+    auto cookie = make_random_string(buf_size);
 
-    auto reg = make_lba_region(4096);
+    lsa_buffer buf = region.alloc_buf(buf_size);
+    std::copy(cookie.begin(), cookie.end(), buf.get());
 
-    lba_unique_ptr buf = reg->alloc();
+    BOOST_REQUIRE_EQUAL(to_sstring(buf), cookie);
+    BOOST_REQUIRE(is_aligned(buf.get(), buf_size));
 
-    auto ptr1 = buf.get();
+    {
+        auto ptr1 = buf.get();
+        region.full_compaction();
 
-    auto cookie = make_random_string(4096);
-    std::copy(cookie.begin(), cookie.end(), ptr1);
-    BOOST_REQUIRE_EQUAL(sstring(buf.get(), 4096), cookie);
+        // check that the segment was moved by full_compaction() to exercise the tracking code.
+        BOOST_REQUIRE(buf.get() != ptr1);
+        BOOST_REQUIRE_EQUAL(to_sstring(buf), cookie);
+    }
 
-    BOOST_REQUIRE(is_aligned(ptr1, 4096));
+    lsa_buffer buf2;
+    {
+        auto ptr1 = buf.get();
+        buf2 = std::move(buf);
+        BOOST_REQUIRE(!buf);
+        BOOST_REQUIRE_EQUAL(buf2.get(), ptr1);
+        BOOST_REQUIRE_EQUAL(buf2.size(), buf_size);
+    }
 
     region.full_compaction();
 
-    // check that the segment was moved by full_compaction() to exercise lba_unique_ptr tracking.
-    BOOST_REQUIRE(buf.get() != ptr1);
+    BOOST_REQUIRE_EQUAL(to_sstring(buf2), cookie);
+    BOOST_REQUIRE_EQUAL(buf2.size(), buf_size);
 
-    BOOST_REQUIRE_EQUAL(sstring(buf.get(), 4096), cookie);
+    buf2 = nullptr;
+    BOOST_REQUIRE(!buf2);
+
+    region.full_compaction();
+
+    lsa_buffer buf3;
+    {
+        buf3 = std::move(buf2);
+        BOOST_REQUIRE(!buf2);
+        BOOST_REQUIRE(!buf3);
+    }
+
+    region.full_compaction();
+
+    auto cookie2 = make_random_string(buf_size);
+    auto buf4 = region.alloc_buf(buf_size);
+    std::copy(cookie2.begin(), cookie2.end(), buf4.get());
+    BOOST_REQUIRE(is_aligned(buf4.get(), buf_size));
+
+    buf3 = std::move(buf4);
+
+    region.full_compaction();
+
+    BOOST_REQUIRE(buf3);
+    BOOST_REQUIRE_EQUAL(to_sstring(buf3), cookie2);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_lsa_buffer_alloc_dealloc_patterns) {
+    logalloc::region region;
+    size_t buf_size = 128*1024;
+
+    std::vector<sstring> cookies;
+    for (int i = 0; i < 7; ++i) {
+        cookies.push_back(make_random_string(buf_size));
+    }
+
+    auto make_buf = [&] (int idx, size_t size) {
+        lsa_buffer buf = region.alloc_buf(size);
+        std::copy(cookies[idx].begin(), cookies[idx].begin() + size, buf.get());
+        return buf;
+    };
+
+    auto chk_buf = [&] (int idx, const lsa_buffer& buf) {
+        if (buf) {
+            BOOST_REQUIRE_EQUAL(to_sstring(buf), cookies[idx].substr(0, buf.size()));
+        }
+    };
+
+    {
+        lsa_buffer buf1 = make_buf(1, 1);
+        lsa_buffer buf2 = make_buf(2, 1);
+        lsa_buffer buf3 = make_buf(3, 1);
+        lsa_buffer buf4 = make_buf(4, 128*1024);
+
+        region.full_compaction();
+
+        chk_buf(1, buf1);
+        chk_buf(2, buf2);
+        chk_buf(3, buf3);
+        chk_buf(4, buf4);
+    }
+
+    {
+        lsa_buffer buf1 = make_buf(1, 1);
+        lsa_buffer buf2 = make_buf(2, 1);
+        lsa_buffer buf3 = make_buf(3, 1);
+        buf1 = nullptr;
+        lsa_buffer buf4 = make_buf(4, 128*1024);
+
+        region.full_compaction();
+
+        chk_buf(1, buf1);
+        chk_buf(2, buf2);
+        chk_buf(3, buf3);
+        chk_buf(4, buf4);
+    }
+
+    {
+        lsa_buffer buf1 = make_buf(1, 1);
+        lsa_buffer buf2 = make_buf(2, 1);
+        lsa_buffer buf3 = make_buf(3, 1);
+        buf2 = nullptr;
+        lsa_buffer buf4 = make_buf(4, 128*1024);
+
+        region.full_compaction();
+
+        chk_buf(1, buf1);
+        chk_buf(2, buf2);
+        chk_buf(3, buf3);
+        chk_buf(4, buf4);
+    }
+
+    {
+        lsa_buffer buf1 = make_buf(1, 1);
+        lsa_buffer buf2 = make_buf(2, 1);
+        lsa_buffer buf3 = make_buf(3, 1);
+        buf3 = nullptr;
+        lsa_buffer buf4 = make_buf(4, 128*1024);
+
+        region.full_compaction();
+
+        chk_buf(1, buf1);
+        chk_buf(2, buf2);
+        chk_buf(3, buf3);
+        chk_buf(4, buf4);
+    }
+
+    {
+        lsa_buffer buf1 = make_buf(1, 1);
+        lsa_buffer buf2 = make_buf(2, 1);
+        lsa_buffer buf3 = make_buf(3, 1);
+        buf1 = nullptr;
+        buf3 = nullptr;
+        lsa_buffer buf4 = make_buf(4, 128*1024);
+
+        region.full_compaction();
+
+        chk_buf(1, buf1);
+        chk_buf(2, buf2);
+        chk_buf(3, buf3);
+        chk_buf(4, buf4);
+    }
+
+    {
+        lsa_buffer buf1 = make_buf(1, 1);
+        lsa_buffer buf2 = make_buf(2, 1);
+        lsa_buffer buf3 = make_buf(3, 1);
+        buf1 = nullptr;
+        buf2 = nullptr;
+        lsa_buffer buf4 = make_buf(4, 128*1024);
+
+        region.full_compaction();
+
+        chk_buf(1, buf1);
+        chk_buf(2, buf2);
+        chk_buf(3, buf3);
+        chk_buf(4, buf4);
+    }
+
+    {
+        lsa_buffer buf1 = make_buf(1, 1);
+        lsa_buffer buf2 = make_buf(2, 1);
+        lsa_buffer buf3 = make_buf(3, 1);
+        buf2 = nullptr;
+        buf3 = nullptr;
+        lsa_buffer buf4 = make_buf(4, 128*1024);
+
+        region.full_compaction();
+
+        chk_buf(1, buf1);
+        chk_buf(2, buf2);
+        chk_buf(3, buf3);
+        chk_buf(4, buf4);
+
+    }
+
+    {
+        lsa_buffer buf1 = make_buf(1, 1);
+        lsa_buffer buf2 = make_buf(2, 1);
+        lsa_buffer buf3 = make_buf(3, 1);
+        buf2 = nullptr;
+        buf3 = nullptr;
+        buf1 = nullptr;
+        lsa_buffer buf4 = make_buf(4, 128*1024);
+
+        region.full_compaction();
+
+        chk_buf(1, buf1);
+        chk_buf(2, buf2);
+        chk_buf(3, buf3);
+        chk_buf(4, buf4);
+    }
+
+    {
+        lsa_buffer buf1 = make_buf(1, 1);
+        lsa_buffer buf2 = make_buf(2, 1);
+        lsa_buffer buf3 = make_buf(3, 1);
+        buf3 = nullptr;
+        buf2 = nullptr;
+        buf1 = nullptr;
+        lsa_buffer buf4 = make_buf(4, 128*1024);
+
+        region.full_compaction();
+
+        chk_buf(1, buf1);
+        chk_buf(2, buf2);
+        chk_buf(3, buf3);
+        chk_buf(4, buf4);
+    }
+
+    {
+        lsa_buffer buf1 = make_buf(1, 1);
+        lsa_buffer buf2 = make_buf(2, 1);
+        lsa_buffer buf3 = make_buf(3, 1);
+        buf1 = nullptr;
+        buf2 = nullptr;
+        buf3 = nullptr;
+        lsa_buffer buf4 = make_buf(4, 128*1024);
+
+        region.full_compaction();
+
+        chk_buf(1, buf1);
+        chk_buf(2, buf2);
+        chk_buf(3, buf3);
+        chk_buf(4, buf4);
+    }
+
+    {
+        lsa_buffer buf1 = make_buf(1, 128*1024);
+        lsa_buffer buf2 = make_buf(2, 128*1024);
+        lsa_buffer buf3 = make_buf(3, 128*1024);
+        buf2 = nullptr;
+        lsa_buffer buf4 = make_buf(4, 128*1024);
+        buf1 = nullptr;
+        lsa_buffer buf5 = make_buf(5, 128*1024);
+        buf5 = nullptr;
+        lsa_buffer buf6 = make_buf(6, 128*1024);
+
+        region.full_compaction();
+
+        chk_buf(1, buf1);
+        chk_buf(2, buf2);
+        chk_buf(3, buf3);
+        chk_buf(4, buf4);
+        chk_buf(5, buf5);
+        chk_buf(6, buf6);
+    }
 }
 
 #endif

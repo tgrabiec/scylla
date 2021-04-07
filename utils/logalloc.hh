@@ -36,6 +36,7 @@
 #include <boost/heap/binomial_heap.hpp>
 #include "seastarx.hh"
 #include "db/timeout_clock.hh"
+#include "utils/entangled.hh"
 
 namespace logalloc {
 
@@ -502,6 +503,68 @@ public:
 
 tracker& shard_tracker();
 
+class segment_descriptor;
+
+/// A unique pointer to a chunk of memory allocated inside an LSA region.
+///
+/// The pointer can be in disengaged state in which case it doesn't point at any buffer (nullptr state).
+/// When the pointer points at some buffer, it is said to be engaged.
+///
+/// The pointer owns the object.
+/// When the pointer is destroyed or it transitions from engaged to disengaged state, the buffer is freed.
+/// The buffer is never leaked when operating by the API of lsa_buffer.
+/// The pointer object can be safely destroyed in any allocator context.
+///
+/// The pointer object is never invalidated.
+/// The pointed-to buffer can be moved around by LSA, so the pointer returned by get() can be
+/// invalidated, but the pointer object itself is updated automatically and get() always returns
+/// a pointer which is valid at the time of the call.
+///
+/// Must not outlive the region.
+class lsa_buffer {
+    friend class region_impl;
+    entangled _link;           // Paired with segment_descriptor::_buf_pointers[...]
+    segment_descriptor* _desc; // Valid only when engaged
+    char* _buf = nullptr;      // Valid only when engaged
+    size_t _size = 0;
+public:
+    using char_type = char;
+
+    lsa_buffer() = default;
+    lsa_buffer(lsa_buffer&&) noexcept = default;
+    ~lsa_buffer();
+
+    /// Makes this instance point to the buffer pointed to by the other pointer.
+    /// If this pointer was engaged before, the owned buffer is freed.
+    /// The other pointer will be in disengaged state after this.
+    lsa_buffer& operator=(lsa_buffer&& other) noexcept {
+        if (this != &other) {
+            this->~lsa_buffer();
+            new (this) lsa_buffer(std::move(other));
+        }
+        return *this;
+    }
+
+    /// Disengages the pointer.
+    /// If the pointer was engaged before, the owned buffer is freed.
+    /// Postcondition: !bool(*this)
+    lsa_buffer& operator=(std::nullptr_t) noexcept {
+        this->~lsa_buffer();
+        return *this;
+    }
+
+    /// Returns a pointer to the first element of the buffer.
+    /// Valid only when engaged.
+    char_type* get() { return _buf; }
+    const char_type* get() const { return _buf; }
+
+    /// Returns the number of bytes in the buffer.
+    size_t size() const { return _size; }
+
+    /// Returns true iff the pointer is engaged.
+    explicit operator bool() const noexcept { return bool(_link); }
+};
+
 // Monoid representing pool occupancy statistics.
 // Naturally ordered so that sparser pools come fist.
 // All sizes in bytes.
@@ -683,6 +746,11 @@ public:
 
     region_group* group();
 
+    // Allocates a buffer of a given size.
+    // The buffer's pointer will be aligned to 4KB.
+    // Note: it is wasteful to allocate buffers of sizes which are not a multiple of the alignment.
+    lsa_buffer alloc_buf(size_t buffer_size);
+
     // Merges another region into this region. The other region is left empty.
     // Doesn't invalidate references to allocated objects.
     void merge(region& other) noexcept;
@@ -728,50 +796,6 @@ struct reclaim_lock {
         _region.set_reclaiming_enabled(_prev);
     }
 };
-
-class lba_region_impl;
-
-class lba_unique_ptr {
-public:
-    using value_type = char;
-
-    value_type* get() {
-        return nullptr; // FIXME
-    }
-//
-//    lba_unique_ptr() noexcept {}
-//    lba_unique_ptr(std::nullptr_t) noexcept : lba_unique_ptr() {}
-//    lba_unique_ptr(lba_unique_ptr&& o) noexcept
-//        : _ptr(o._ptr)
-//    {
-//        _hook.swap_nodes(o._hook);
-//        o._ptr = nullptr;
-//    }
-//    lba_unique_ptr& operator=(lba_unique_ptr&& o) noexcept {
-//        if (this != &o) {
-//            this->~lba_unique_ptr();
-//            new (this) lba_unique_ptr(std::move(o));
-//        }
-//        return *this;
-//    }
-//    explicit operator bool() const noexcept { return _ptr != nullptr; }
-//    T* operator->() const noexcept { return _ptr; }
-//    T& operator*() const noexcept { return *_ptr; }
-//    T* get() const noexcept { return _ptr; }
-//    bool operator==(const lba_unique_ptr& o) const noexcept { return _ptr == o._ptr; }
-//    bool operator!=(const lba_unique_ptr& o) const noexcept { return _ptr != o._ptr; }
-};
-
-class lba_region : public basic_region {
-private:
-    shared_ptr<lba_region_impl> _impl;
-public:
-    lba_region();
-    lba_unique_ptr alloc();
-};
-
-// Creates a new LBA region which manages blocks of a given size.
-std::unique_ptr<lba_region> make_lba_region(size_t block_size);
 
 // Utility for running critical sections which need to lock some region and
 // also allocate LSA memory. The object learns from failures how much it
