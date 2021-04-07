@@ -42,20 +42,24 @@
 //
 class entangled final {
     entangled* _ref = nullptr;
-public:
-    // Creates an unpaired object.
-    entangled() = default;
-
-    entangled(const entangled&) = delete;
-
-    // Initializes this object to be paired with a given "other".
-    // The other is also paired with this object afterwards.
-    // The other must not be paired before the call.
-    entangled(entangled& other) {
+private:
+    struct init_tag {};
+    entangled(init_tag, entangled& other) {
         assert(!other._ref);
         _ref = &other;
         other._ref = this;
     }
+public:
+    // Creates a new object which is paired with a given "other".
+    // The other is also paired with this object afterwards.
+    // The other must not be paired before the call.
+    static entangled make_paired_with(entangled& other) {
+        return entangled(init_tag(), other);
+    }
+
+    // Creates an unpaired object.
+    entangled() = default;
+    entangled(const entangled&) = delete;
 
     entangled(entangled&& other) noexcept
         : _ref(other._ref)
