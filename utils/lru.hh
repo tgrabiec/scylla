@@ -37,6 +37,10 @@ public:
 
     virtual void on_evicted() noexcept = 0;
 
+    bool is_linked() const {
+        return _lru_link.is_linked();
+    }
+
     void unlink_from_lru() {
         _lru_link.unlink();
     }
