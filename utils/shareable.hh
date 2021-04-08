@@ -135,7 +135,7 @@ public:
             // make_lw_shared() because the latter may allocate memory and trigger
             // reclamation and thus invalidate "this" and so this->_ref.
             // References on stack are not invalidated.
-            entangled r(_ref);
+            auto r = entangled::make_paired_with(_ref);
             return weak_ptr<T>(seastar::make_lw_shared<sharing_guard<T>>(std::move(r)));
         }
     }
