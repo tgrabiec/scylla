@@ -69,20 +69,78 @@ public:
         uint64_t page_evictions = 0;
         uint64_t page_populations = 0;
         uint64_t cached_bytes = 0;
+        uint64_t bytes_in_std = 0; // memory used by active temporary_buffer:s
     };
 private:
     class cached_page : public evictable {
     public:
         cached_file* parent;
         page_idx_type idx;
-        temporary_buffer<char> buf;
+        logalloc::lsa_buffer _lsa_buf;
+        temporary_buffer<char> _buf; // Empty when not shared. May mirror _lsa_buf when shared.
+        size_t _use_count = 0;
+    public:
+        struct cached_page_del {
+            void operator()(cached_page* cp) {
+                if (--cp->_use_count == 0) {
+                    cp->parent->_metrics.bytes_in_std -= cp->_buf.size();
+                    cp->_buf = {};
+                    cp->parent->_lru.add(*cp);
+                }
+            }
+        };
+
+        using ptr_type = std::unique_ptr<cached_page, cached_page_del>;
+
+        // As long as any ptr_type is alive, this cached_page will not be destroyed
+        // because it will not be linked in the LRU.
+        ptr_type share() noexcept {
+            if (_use_count++ == 0) {
+                unlink_from_lru();
+            }
+            return std::unique_ptr<cached_page, cached_page_del>(this);
+        }
+    public:
         explicit cached_page(cached_file* parent, page_idx_type idx, temporary_buffer<char> buf)
             : parent(parent)
             , idx(idx)
-            , buf(std::move(buf))
-        { }
-        cached_page(cached_page&&) noexcept = default;
+            , _buf(std::move(buf))
+        {
+            _lsa_buf = parent->_region.alloc_buf(_buf.size());
+            parent->_metrics.bytes_in_std += _buf.size();
+            std::copy(_buf.begin(), _buf.end(), _lsa_buf.get());
+        }
+
+        cached_page(cached_page&&) noexcept {
+            // The move constructor is required by allocation_strategy::construct() due to generic bplus::tree,
+            // but the object is always allocated in the standard allocator context so never actually moved.
+            // We cannot properly implement the move constructor because "this" is captured in various places.
+            abort();
+        }
+
+        ~cached_page() {
+            assert(!_use_count);
+        }
+
         void on_evicted() noexcept override;
+
+        temporary_buffer<char> get_buf() {
+            auto self = share();
+            if (!_buf) {
+                _buf = temporary_buffer<char>(_lsa_buf.size());
+                parent->_metrics.bytes_in_std += _lsa_buf.size();
+                std::copy(_lsa_buf.get(), _lsa_buf.get() + _lsa_buf.size(), _buf.get_write());
+            }
+            // Holding to a temporary buffer holds the cached page so that the buffer can be reused by concurrent hits.
+            // Also, sharing cached_page keeps the temporary_buffer's storage alive.
+            return temporary_buffer<char>(_buf.get_write(), _buf.size(), make_deleter([self = std::move(self)] {}));
+        }
+
+        size_t size_in_allocator() {
+            // lsa_buf occupies 4K in LSA even if the buf size is smaller.
+            // _buf is transient and not accounted here.
+            return page_size;
+        }
     };
 
     struct page_idx_less_comparator {
@@ -95,6 +153,7 @@ private:
     sstring _file_name; // for logging / tracing
     metrics& _metrics;
     lru& _lru;
+    logalloc::region& _region;
 
     using cache_type = bplus::tree<page_idx_type, cached_page, page_idx_less_comparator, 12, bplus::key_search::linear>;
     cache_type _cache;
@@ -106,30 +165,36 @@ private:
     offset_type _last_page_size; // Ignores _start in case the start lies on the same page.
     page_idx_type _last_page;
 private:
-    future<temporary_buffer<char>> get_page(page_idx_type idx, const io_priority_class& pc,
+    future<cached_page::ptr_type> get_page_ptr(page_idx_type idx, const io_priority_class& pc,
             tracing::trace_state_ptr trace_state) {
         auto i = _cache.lower_bound(idx);
         if (i != _cache.end() && i->idx == idx) {
             ++_metrics.page_hits;
             tracing::trace(trace_state, "page cache hit: file={}, page={}", _file_name, idx);
             cached_page& cp = *i;
-            _lru.touch(cp);
-            return make_ready_future<temporary_buffer<char>>(cp.buf.share());
+            return make_ready_future<cached_page::ptr_type>(cp.share());
         }
         tracing::trace(trace_state, "page cache miss: file={}, page={}", _file_name, idx);
         ++_metrics.page_misses;
         auto size = idx == _last_page ? _last_page_size : page_size;
         return _file.dma_read_exactly<char>(idx * page_size, size, pc)
             .then([this, idx] (temporary_buffer<char>&& buf) mutable {
-                auto it_and_flag = _cache.emplace(idx, cached_page(this, idx, buf.share()));
+                auto it_and_flag = _cache.emplace(idx, this, idx, std::move(buf));
+                cached_page& cp = *it_and_flag.first;
                 if (it_and_flag.second) {
                     ++_metrics.page_populations;
-                    _metrics.cached_bytes += buf.size();
-                    _cached_bytes += buf.size();
-                    _lru.add(*it_and_flag.first);
+                    _metrics.cached_bytes += cp.size_in_allocator();
+                    _cached_bytes += cp.size_in_allocator();
                 }
-                return std::move(buf);
+                return cp.share();
             });
+    }
+    future<temporary_buffer<char>> get_page(page_idx_type idx,
+                                            const io_priority_class& pc,
+                                            tracing::trace_state_ptr trace_state) {
+        return get_page_ptr(idx, pc, std::move(trace_state)).then([] (cached_page::ptr_type cp) {
+            return cp->get_buf();
+        });
     }
 public:
     // Generator of subsequent pages of data reflecting the contents of the file.
@@ -182,8 +247,8 @@ public:
     };
 
     void on_evicted(cached_page& p) {
-        _metrics.cached_bytes -= p.buf.size();
-        _cached_bytes -= p.buf.size();
+        _metrics.cached_bytes -= p.size_in_allocator();
+        _cached_bytes -= p.size_in_allocator();
         ++_metrics.page_evictions;
     }
 
@@ -191,9 +256,13 @@ public:
         size_t count = 0;
         auto disposer = [] (auto* p) noexcept {};
         while (start != end) {
-            ++count;
-            on_evicted(*start);
-            start = start.erase_and_dispose(disposer, page_idx_less_comparator());
+            if (start->is_linked()) {
+                ++count;
+                on_evicted(*start);
+                start = start.erase_and_dispose(disposer, page_idx_less_comparator());
+            } else {
+                ++start;
+            }
         }
         return count;
     }
@@ -205,11 +274,12 @@ public:
     /// \param m Metrics object which should be updated from operations on this object.
     ///          The metrics object can be shared by many cached_file instances, in which case it
     ///          will reflect the sum of operations on all cached_file instances.
-    cached_file(file f, cached_file::metrics& m, offset_type start, lru& l, offset_type size, sstring file_name = {})
+    cached_file(file f, cached_file::metrics& m, offset_type start, lru& l, logalloc::region& reg, offset_type size, sstring file_name = {})
         : _file(std::move(f))
         , _file_name(std::move(file_name))
         , _metrics(m)
         , _lru(l)
+        , _region(reg)
         , _cache(page_idx_less_comparator())
         , _start(start)
         , _size(size)
@@ -287,7 +357,7 @@ public:
     /// \brief Read from the file
     ///
     /// Returns a stream with data which starts at position pos in the area managed by this instance.
-    /// This cached_file instance must outlive the returned stream.
+    /// This cached_file instance must outlive the returned stream and buffers returned by the stream.
     /// The stream does not do any read-ahead.
     ///
     /// \param pos The offset of the first byte to read, relative to the cached file area.
