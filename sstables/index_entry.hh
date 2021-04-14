@@ -290,19 +290,21 @@ public:
 //
 // Allocated in the standard allocator space but with an LSA allocator as the current allocator.
 // So the shallow part is in the standard allocator but all indirect objects are inside LSA.
-class index_list {
+class partition_index_page {
 public:
     // The indirection of managed_ref is needed to keep the contiguous allocation of the vector small.
     // We don't have chunked_managed_vector yet.
     managed_vector<managed_ref<index_entry>> _entries;
 public:
-    index_list() = default;
-    index_list(index_list&&) noexcept = default;
-    index_list& operator=(index_list&&) noexcept = default;
+    partition_index_page() = default;
+    partition_index_page(partition_index_page&&) noexcept = default;
+    partition_index_page& operator=(partition_index_page&&) noexcept = default;
 
     bool empty() const { return _entries.empty(); }
     size_t size() const { return _entries.size(); }
 };
+
+using index_list = partition_index_page;
 
 }
 
