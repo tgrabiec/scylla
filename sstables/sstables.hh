@@ -24,7 +24,6 @@
 
 #include "version.hh"
 #include "shared_sstable.hh"
-#include "partition_index_cache.hh"
 #include <seastar/core/file.hh>
 #include <seastar/core/fstream.hh>
 #include <seastar/core/future.hh>
@@ -103,6 +102,7 @@ requires ConsumeRowsContext<DataConsumeRowsContext>
 class data_consume_context;
 
 class index_reader;
+class partition_index_cache;
 class sstables_manager;
 
 extern bool use_binary_search_in_promoted_index;
@@ -492,7 +492,7 @@ private:
     format_types _format;
 
     filter_tracker _filter_tracker;
-    partition_index_cache _index_cache;
+    std::unique_ptr<partition_index_cache> _index_cache;
 
     enum class mark_for_deletion {
         implicit = -1,
