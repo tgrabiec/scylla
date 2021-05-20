@@ -21,6 +21,7 @@
 
 #include "range_tombstone.hh"
 #include "mutation_fragment.hh"
+#include "mutation_fragment_v2.hh"
 
 std::ostream& operator<<(std::ostream& out, const range_tombstone& rt) {
     if (rt) {
@@ -28,6 +29,10 @@ std::ostream& operator<<(std::ostream& out, const range_tombstone& rt) {
     } else {
         return out << "{range_tombstone: none}";
     }
+}
+
+std::ostream& operator<<(std::ostream& out, const range_tombstone_change& rt) {
+    return out << "{range_tombstone_change: pos=" << rt.position() << ", " << rt.tombstone() << "}";
 }
 
 std::optional<range_tombstone> range_tombstone::apply(const schema& s, range_tombstone&& src)
