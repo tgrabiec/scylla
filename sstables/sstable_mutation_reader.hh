@@ -46,9 +46,7 @@ namespace mx {
     class mp_row_consumer_m;
 }
 
-class mp_row_consumer_reader : public flat_mutation_reader::impl {
-    friend class sstables::kl::mp_row_consumer_k_l;
-    friend class sstables::mx::mp_row_consumer_m;
+class mp_row_consumer_reader_base {
 protected:
     shared_sstable _sst;
 
@@ -67,9 +65,8 @@ protected:
 
     std::optional<dht::decorated_key> _current_partition_key;
 public:
-    mp_row_consumer_reader(schema_ptr s, reader_permit permit, shared_sstable sst)
-        : impl(std::move(s), std::move(permit))
-        , _sst(std::move(sst))
+    mp_row_consumer_reader_base(shared_sstable sst)
+        : _sst(std::move(sst))
     { }
 
     // Called when all fragments relevant to the query range or fast forwarding window
@@ -77,8 +74,17 @@ public:
     // If no skipping is required, this method may not be called before transitioning
     // to the next partition.
     virtual void on_out_of_clustering_range() = 0;
+};
 
-    void on_next_partition(dht::decorated_key key, tombstone tomb);
+class mp_row_consumer_reader_k_l : public mp_row_consumer_reader_base, public flat_mutation_reader::impl {
+    friend class sstables::kl::mp_row_consumer_k_l;
+public:
+    mp_row_consumer_reader_k_l(schema_ptr s, reader_permit permit, shared_sstable sst)
+        : mp_row_consumer_reader_base(std::move(sst))
+        , impl(std::move(s), std::move(permit))
+    {}
+
+    void on_next_partition(dht::decorated_key, tombstone);
 };
 
 inline atomic_cell make_atomic_cell(const abstract_type& type,
@@ -204,7 +210,7 @@ void set_range_tombstone_start_from_end_open_marker(Consumer& c, const schema& s
 
 template <typename DataConsumeRowsContext, typename Consumer>
 requires RowConsumer<Consumer>
-class sstable_mutation_reader : public mp_row_consumer_reader {
+class sstable_mutation_reader : public mp_row_consumer_reader_k_l {
     Consumer _consumer;
     bool _will_likely_slice = false;
     bool _read_enabled = true;
@@ -229,7 +235,7 @@ public:
          streamed_mutation::forwarding fwd,
          mutation_reader::forwarding fwd_mr,
          read_monitor& mon)
-        : mp_row_consumer_reader(std::move(schema), permit, std::move(sst))
+        : mp_row_consumer_reader_k_l(std::move(schema), permit, std::move(sst))
         , _consumer(this, _schema, std::move(permit), slice, pc, std::move(trace_state), fwd, _sst)
         // FIXME: I want to add `&& fwd_mr == mutation_reader::forwarding::no` below
         // but can't because many call sites use the default value for
@@ -377,7 +383,6 @@ private:
                 }
                 return skip_to(idx.element_kind(), index_position.start).then([this, &idx] {
                     _sst->get_stats().on_partition_seek();
-                    set_range_tombstone_start_from_end_open_marker(_consumer, *_schema, idx);
                 });
             });
         });

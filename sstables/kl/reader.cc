@@ -35,7 +35,7 @@ static inline bytes_view pop_back(std::vector<bytes_view>& vec) {
 
 class mp_row_consumer_k_l : public row_consumer {
 private:
-    mp_row_consumer_reader* _reader;
+    mp_row_consumer_reader_k_l* _reader;
     schema_ptr _schema;
     const query::partition_slice& _slice;
     bool _out_of_range = false;
@@ -312,7 +312,7 @@ private:
 public:
     mutation_opt mut;
 
-    mp_row_consumer_k_l(mp_row_consumer_reader* reader,
+    mp_row_consumer_k_l(mp_row_consumer_reader_k_l* reader,
                         const schema_ptr schema,
                         reader_permit permit,
                         const query::partition_slice& slice,
@@ -329,7 +329,7 @@ public:
         , _treat_non_compound_rt_as_compound(!sst->has_correct_non_compound_range_tombstones())
     { }
 
-    mp_row_consumer_k_l(mp_row_consumer_reader* reader,
+    mp_row_consumer_k_l(mp_row_consumer_reader_k_l* reader,
                         const schema_ptr schema,
                         reader_permit permit,
                         const io_priority_class& pc,
