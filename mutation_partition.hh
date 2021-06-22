@@ -892,7 +892,7 @@ public:
 
 class cache_tracker;
 
-class rows_entry : public evictable {
+class rows_entry final : public evictable {
     friend class size_calculator;
     intrusive_b::member_hook _link;
     clustering_key _key;
