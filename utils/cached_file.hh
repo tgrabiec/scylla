@@ -466,13 +466,10 @@ private:
     }
 public:
     cached_file_impl(cached_file& cf, tracing::trace_state_ptr trace_state = {})
-        : _cf(cf)
+        : file_impl(*get_file_impl(cf.get_file()))
+        , _cf(cf)
         , _trace_state(std::move(trace_state))
-    {
-        _memory_dma_alignment = _cf.get_file().memory_dma_alignment();
-        _disk_read_dma_alignment = _cf.get_file().disk_read_dma_alignment();
-        _disk_write_dma_alignment = _cf.get_file().disk_write_dma_alignment();
-    }
+    { }
 
     // unsupported
     virtual future<size_t> write_dma(uint64_t pos, const void* buffer, size_t len, const io_priority_class& pc) override { unsupported(); }
@@ -492,10 +489,13 @@ public:
     virtual future<temporary_buffer<uint8_t>> dma_read_bulk(uint64_t offset, size_t size, const io_priority_class& pc) override {
         return do_with(_cf.read(offset, pc, std::nullopt, _trace_state), size, temporary_buffer<uint8_t>(),
                 [this, size] (cached_file::stream& s, size_t& size_left, temporary_buffer<uint8_t>& result) {
+            if (size_left == 0) {
+                return make_ready_future<temporary_buffer<uint8_t>>(std::move(result));
+            }
             return repeat([this, &s, &size_left, &result, size] {
                 return s.next().then([this, &size_left, &result, size] (temporary_buffer<char> buf) {
                     if (!buf) {
-                        return stop_iteration::yes;
+                        throw seastar::file::eof_error();
                     }
                     if (!result) {
                         if (buf.size() >= size_left) {
