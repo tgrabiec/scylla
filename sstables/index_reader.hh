@@ -339,7 +339,7 @@ std::unique_ptr<clustered_index_cursor> promoted_index::make_cursor(shared_sstab
             *ck_values_fixed_lengths, *sst->_cached_index_file, options.io_priority_class, _num_blocks, trace_state);
     }
 
-    auto file = make_tracked_index_file(*sst, std::move(permit), std::move(trace_state));
+    auto file = make_tracked_index_file(*sst, permit, std::move(trace_state));
     auto promoted_index_stream = make_file_input_stream(std::move(file), _promoted_index_start, _promoted_index_size,options);
     return std::make_unique<scanning_clustered_index_cursor>(*sst->get_schema(), permit,
         std::move(promoted_index_stream), _promoted_index_size, _num_blocks, ck_values_fixed_lengths);
