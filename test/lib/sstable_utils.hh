@@ -116,11 +116,12 @@ public:
 
     future<std::vector<index_entry>> read_indexes() {
         std::vector<index_entry> entries;
+        auto s = _sst->get_schema();
         auto ir = make_index_reader();
         while (!ir->eof()) {
             co_await ir->read_partition_data();
             auto pk = ir->get_partition_key();
-            entries.emplace_back(index_entry{sstables::key::from_partition_key(*_sst->get_schema(), pk),
+            entries.emplace_back(index_entry{sstables::key::from_partition_key(*s, pk),
                                        pk, ir->get_promoted_index_size()});
             co_await ir->advance_to_next_partition();
         }
