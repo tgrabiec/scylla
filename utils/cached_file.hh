@@ -465,14 +465,12 @@ public:
     future<> evict_gently() {
         auto i = _cache.begin();
         while (i != _cache.end()) {
-            with_allocator(_region.allocator(), [&] {
-                if (i->is_linked()) {
-                    on_evicted(*i);
-                    i = i.erase(page_idx_less_comparator());
-                } else {
-                    ++i;
-                }
-            });
+            if (i->is_linked()) {
+                on_evicted(*i);
+                i = i.erase(page_idx_less_comparator());
+            } else {
+                ++i;
+            }
             if (need_preempt() && i != _cache.end()) {
                 auto key = i->idx;
                 co_await make_ready_future<>();
