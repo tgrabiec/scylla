@@ -24,6 +24,7 @@
 #include <variant>
 #include "position_in_partition.hh"
 #include "utils/overloaded_functor.hh"
+#include "utils/lsa/chunked_managed_vector.hh"
 #include "reader_permit.hh"
 #include "sstables/types.hh"
 #include "sstables/shared_sstable.hh"
@@ -296,9 +297,7 @@ public:
 // So the shallow part is in the standard allocator but all indirect objects are inside LSA.
 class partition_index_page {
 public:
-    // The indirection of managed_ref is needed to keep the contiguous allocation of the vector small.
-    // We don't have chunked_managed_vector yet.
-    managed_vector<managed_ref<index_entry>> _entries;
+    lsa::chunked_managed_vector<managed_ref<index_entry>> _entries;
 public:
     partition_index_page() = default;
     partition_index_page(partition_index_page&&) noexcept = default;
