@@ -83,8 +83,9 @@ public:
             return reads - reads_done;
         }
     };
-private:
+public:
     stats _stats{};
+private:
     seastar::metrics::metric_groups _metrics;
     logalloc::region _region;
     lru _lru;

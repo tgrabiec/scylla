@@ -428,7 +428,7 @@ private:
     // This semaphore ensures that off-strategy compaction will be serialized and also
     // protects against candidates being picked more than once.
     seastar::named_semaphore _off_strategy_sem = {1, named_semaphore_exception_factory{"off-strategy compaction"}};
-    mutable row_cache _cache; // Cache covers only sstables.
+    mutable std::unique_ptr<row_cache_ifce> _cache; // Cache covers only sstables.
     std::optional<int64_t> _sstable_generation = {};
 
     db::replay_position _highest_rp;
@@ -710,12 +710,12 @@ public:
     using const_mutation_partition_ptr = std::unique_ptr<const mutation_partition>;
     using const_row_ptr = std::unique_ptr<const row>;
     memtable& active_memtable() { return _memtables->active_memtable(); }
-    const row_cache& get_row_cache() const {
-        return _cache;
+    const row_cache_ifce& get_row_cache() const {
+        return *_cache;
     }
 
-    row_cache& get_row_cache() {
-        return _cache;
+    row_cache_ifce& get_row_cache() {
+        return *_cache;
     }
 
     future<std::vector<locked_cell>> lock_counter_cells(const mutation& m, db::timeout_clock::time_point timeout);

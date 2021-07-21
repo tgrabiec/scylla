@@ -153,33 +153,23 @@ public:
     friend std::ostream& operator<<(std::ostream&, cache_entry&);
 };
 
-//
-// A data source which wraps another data source such that data obtained from the underlying data source
-// is cached in-memory in order to serve queries faster.
-//
-// Cache populates itself automatically during misses.
-//
-// All updates to the underlying mutation source must be performed through one of the synchronizing methods.
-// Those are the methods which accept external_updater, e.g. update(), invalidate().
-// All synchronizers have strong exception guarantees. If they fail, the set of writes represented by
-// cache didn't change.
-// Synchronizers can be invoked concurrently with each other and other operations on cache.
-//
-class row_cache final {
+class row_cache_ifce {
 public:
-    using phase_type = utils::phased_barrier::phase_type;
-    using partitions_type = double_decker<int64_t, cache_entry,
-                            dht::raw_token_less_comparator, dht::ring_position_comparator,
-                            16, bplus::key_search::linear>;
-    static_assert(bplus::SimpleLessCompare<int64_t, dht::raw_token_less_comparator>);
-    friend class cache::autoupdating_underlying_reader;
-    friend class single_partition_populating_reader;
-    friend class cache_entry;
-    friend class cache::cache_flat_mutation_reader;
-    friend class cache::lsa_manager;
-    friend class cache::read_context;
-    friend class partition_range_cursor;
-    friend class cache_tester;
+    struct stats {
+        utils::timed_rate_moving_average hits;
+        utils::timed_rate_moving_average misses;
+        utils::timed_rate_moving_average reads_with_misses;
+        utils::timed_rate_moving_average reads_with_no_misses;
+    };
+protected:
+    schema_ptr _schema;
+    cache_tracker& _tracker;
+    stats _stats{};
+public:
+    const stats& stats() const { return _stats; }
+
+    row_cache_ifce(schema_ptr s, cache_tracker& tracker) : _schema(s), _tracker(tracker) {}
+    virtual ~row_cache_ifce() = default;
 
     // A function which adds new writes to the underlying mutation source.
     // All invocations of external_updater on given cache instance are serialized internally.
@@ -212,17 +202,93 @@ public:
         future<> prepare() { return _impl->prepare(); }
         void execute() { _impl->execute(); }
     };
+
+    virtual flat_mutation_reader make_reader(schema_ptr,
+                                     reader_permit permit,
+                                     const dht::partition_range&,
+                                     const query::partition_slice&,
+                                     const io_priority_class&,
+                                     tracing::trace_state_ptr,
+                                     streamed_mutation::forwarding,
+                                     mutation_reader::forwarding) = 0;
+
+    // Synchronizes cache with the underlying data source from a memtable which
+    // has just been flushed to the underlying data source.
+    // The memtable can be queried during the process, but must not be written.
+    // After the update is complete, memtable is empty.
+    virtual future<> update(external_updater, memtable&) = 0;
+
+    // Like update(), synchronizes cache with an incremental change to the underlying
+    // mutation source, but instead of inserting and merging data, invalidates affected ranges.
+    // Can be thought of as a more fine-grained version of invalidate(), which invalidates
+    // as few elements as possible.
+    virtual future<> update_invalidating(external_updater, memtable&) = 0;
+
+    // Refreshes snapshot. Must only be used if logical state in the underlying data
+    // source hasn't changed.
+    virtual void refresh_snapshot() = 0;
+
+    // Synchronizes cache with the underlying mutation source
+    // by invalidating ranges which were modified. This will force
+    // them to be re-read from the underlying mutation source
+    // during next read overlapping with the invalidated ranges.
+    //
+    // The ranges passed to invalidate() must include all
+    // data which changed since last synchronization. Failure
+    // to do so may result in reads seeing partial writes,
+    // which would violate write atomicity.
+    //
+    // Guarantees that readers created after invalidate()
+    // completes will see all writes from the underlying
+    // mutation source made prior to the call to invalidate().
+    virtual future<> invalidate(external_updater, const dht::decorated_key&) = 0;
+    virtual future<> invalidate(external_updater, const dht::partition_range& = query::full_partition_range) = 0;
+    virtual future<> invalidate(external_updater, dht::partition_range_vector&&) = 0;
+
+    // Evicts entries from cache.
+    //
+    // Note that this does not synchronize with the underlying source,
+    // it is assumed that the underlying source didn't change.
+    // If it did, use invalidate() instead.
+    virtual void evict() = 0;
+
+    const cache_tracker& get_cache_tracker() const { return _tracker; }
+    cache_tracker& get_cache_tracker() {return _tracker; }
+
+    virtual void set_schema(schema_ptr) noexcept = 0;
+    const schema_ptr& schema() const { return _schema; }
+};
+
+std::unique_ptr<row_cache_ifce> make_fast_cache(schema_ptr, snapshot_source, cache_tracker&, is_continuous);
+
+//
+// A data source which wraps another data source such that data obtained from the underlying data source
+// is cached in-memory in order to serve queries faster.
+//
+// Cache populates itself automatically during misses.
+//
+// All updates to the underlying mutation source must be performed through one of the synchronizing methods.
+// Those are the methods which accept external_updater, e.g. update(), invalidate().
+// All synchronizers have strong exception guarantees. If they fail, the set of writes represented by
+// cache didn't change.
+// Synchronizers can be invoked concurrently with each other and other operations on cache.
+//
+class row_cache final : public row_cache_ifce {
 public:
-    struct stats {
-        utils::timed_rate_moving_average hits;
-        utils::timed_rate_moving_average misses;
-        utils::timed_rate_moving_average reads_with_misses;
-        utils::timed_rate_moving_average reads_with_no_misses;
-    };
+    using phase_type = utils::phased_barrier::phase_type;
+    using partitions_type = double_decker<int64_t, cache_entry,
+                            dht::raw_token_less_comparator, dht::ring_position_comparator,
+                            16, bplus::key_search::linear>;
+    static_assert(bplus::SimpleLessCompare<int64_t, dht::raw_token_less_comparator>);
+    friend class cache::autoupdating_underlying_reader;
+    friend class single_partition_populating_reader;
+    friend class cache_entry;
+    friend class cache::cache_flat_mutation_reader;
+    friend class cache::lsa_manager;
+    friend class cache::read_context;
+    friend class partition_range_cursor;
+    friend class cache_tester;
 private:
-    cache_tracker& _tracker;
-    stats _stats{};
-    schema_ptr _schema;
     partitions_type _partitions; // Cached partitions are complete.
 
     // The snapshots used by cache are versioned. The version number of a snapshot is
@@ -362,9 +428,8 @@ private:
 public:
     ~row_cache();
     row_cache(schema_ptr, snapshot_source, cache_tracker&, is_continuous = is_continuous::no);
-    row_cache(row_cache&&) = default;
+    row_cache(row_cache&&) = delete;
     row_cache(const row_cache&) = delete;
-    row_cache& operator=(row_cache&&) = default;
 public:
     // Implements mutation_source for this cache, see mutation_reader.hh
     // User needs to ensure that the row_cache object stays alive
@@ -383,8 +448,6 @@ public:
         auto& full_slice = s->full_slice();
         return make_reader(std::move(s), std::move(permit), range, full_slice);
     }
-
-    const stats& stats() const { return _stats; }
 public:
     // Populate cache from given mutation, which must be fully continuous.
     // Intended to be used only in tests.

@@ -1177,8 +1177,7 @@ void row_cache::evict() {
 }
 
 row_cache::row_cache(schema_ptr s, snapshot_source src, cache_tracker& tracker, is_continuous cont)
-    : _tracker(tracker)
-    , _schema(std::move(s))
+    : row_cache_ifce(s, tracker)
     , _partitions(dht::raw_token_less_comparator{})
     , _underlying(src())
     , _snapshot_source(std::move(src))

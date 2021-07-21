@@ -178,7 +178,7 @@ table::make_reader(schema_ptr s,
     }
 
     if (cache_enabled() && !slice.options.contains(query::partition_slice::option::bypass_cache)) {
-        readers.emplace_back(_cache.make_reader(s, permit, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
+        readers.emplace_back(_cache->make_reader(s, permit, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     } else {
         readers.emplace_back(make_sstable_reader(s, permit, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     }
@@ -432,9 +432,9 @@ table::update_cache(lw_shared_ptr<memtable> m, std::vector<sstables::shared_ssta
         try_trigger_compaction();
     });
     if (cache_enabled()) {
-        return _cache.update(std::move(adder), *m);
+        return _cache->update(std::move(adder), *m);
     } else {
-        return _cache.invalidate(std::move(adder)).then([m] { return m->clear_gently(); });
+        return _cache->invalidate(std::move(adder)).then([m] { return m->clear_gently(); });
     }
 }
 
@@ -669,7 +669,7 @@ table::stop() {
                             _sstables = make_compound_sstable_set();
                             _sstables_staging.clear();
                         })).then([this] {
-                            _cache.refresh_snapshot();
+                            _cache->refresh_snapshot();
                         });
                     });
                 });
@@ -799,8 +799,8 @@ table::update_sstable_lists_on_off_strategy_completion(const std::vector<sstable
     // row_cache::invalidate() is only used to synchronize sstable list updates, to prevent race conditions from occurring,
     // meaning nothing is actually invalidated.
     dht::partition_range_vector empty_ranges = {};
-    co_await _cache.invalidate(std::move(updater), std::move(empty_ranges));
-    _cache.refresh_snapshot();
+    co_await _cache->invalidate(std::move(updater), std::move(empty_ranges));
+    _cache->refresh_snapshot();
     rebuild_statistics();
 }
 
@@ -866,11 +866,11 @@ table::on_compaction_completion(sstables::compaction_completion_desc& desc) {
     auto updater = row_cache::external_updater(sstable_list_updater::make(*this, desc));
 
     // row_cache's invalidate() guarantees that updates are serialized, so concurrent updates will work as intended.
-    _cache.invalidate(std::move(updater), std::move(desc.ranges_for_cache_invalidation)).get();
+    _cache->invalidate(std::move(updater), std::move(desc.ranges_for_cache_invalidation)).get();
 
     // refresh underlying data source in row cache to prevent it from holding reference
     // to sstables files that are about to be deleted.
-    _cache.refresh_snapshot();
+    _cache->refresh_snapshot();
 
     rebuild_statistics();
 
@@ -1172,7 +1172,7 @@ table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_man
     , _main_sstables(make_lw_shared<sstables::sstable_set>(_compaction_strategy.make_sstable_set(_schema)))
     , _maintenance_sstables(make_maintenance_sstable_set())
     , _sstables(make_compound_sstable_set())
-    , _cache(_schema, sstables_as_snapshot_source(), row_cache_tracker, is_continuous::yes)
+    , _cache(std::make_unique<row_cache>(_schema, sstables_as_snapshot_source(), row_cache_tracker, is_continuous::yes))
     , _commitlog(cl)
     , _durable_writes(true)
     , _compaction_manager(compaction_manager)
@@ -1477,7 +1477,7 @@ future<> table::clear() {
         }
     }
     _memtables->clear_and_add();
-    return _cache.invalidate(row_cache::external_updater([] { /* There is no underlying mutation source */ }));
+    return _cache->invalidate(row_cache::external_updater([] { /* There is no underlying mutation source */ }));
 }
 
 // NOTE: does not need to be futurized, but might eventually, depending on
@@ -1524,7 +1524,7 @@ future<db::replay_position> table::discard_sstables(db_clock::time_point truncat
         }
     };
     auto p = make_lw_shared<pruner>(*this);
-    return _cache.invalidate(row_cache::external_updater([p, truncated_at] {
+    return _cache->invalidate(row_cache::external_updater([p, truncated_at] {
         p->prune(truncated_at);
         tlogger.debug("cleaning out row cache");
     })).then([this, p]() mutable {
@@ -1550,7 +1550,7 @@ void table::set_schema(schema_ptr s) {
         m->set_schema(s);
     }
 
-    _cache.set_schema(s);
+    _cache->set_schema(s);
     if (_counter_cell_locks) {
         _counter_cell_locks->set_schema(s);
     }
