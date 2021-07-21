@@ -32,6 +32,7 @@
 #include "read_context.hh"
 #include "dirty_memory_manager.hh"
 #include "cache_flat_mutation_reader.hh"
+#include "db/chained_delegating_reader.hh"
 #include "real_dirty_memory_accounter.hh"
 
 namespace cache {
@@ -1174,6 +1175,224 @@ future<> row_cache::invalidate(external_updater eu, dht::partition_range_vector&
 
 void row_cache::evict() {
     while (_tracker.region().evict_some() == memory::reclaiming_result::reclaimed_something) {}
+}
+
+class fast_cache_entry final : public evictable {
+    dht::decorated_key _dk;
+    mutation_partition _p;
+    bool _head;
+    bool _tail;
+    bool _train;
+public:
+    fast_cache_entry(dht::decorated_key dk, mutation_partition p) : _dk(dk), _p(std::move(p)) {}
+    fast_cache_entry(fast_cache_entry&&) noexcept = default;
+    fast_cache_entry& operator=(fast_cache_entry&&) noexcept = default;
+
+    const mutation_partition& p() const { return _p; }
+    const dht::decorated_key& key() const { return _dk; }
+
+    void on_evicted() noexcept override;
+
+public:
+    bool is_head() const noexcept { return _head; }
+    void set_head(bool v) noexcept { _head = v; }
+    bool is_tail() const noexcept { return _tail; }
+    void set_tail(bool v) noexcept { _tail = v; }
+    bool with_train() const noexcept { return _train; }
+    void set_train(bool v) noexcept { _train = v; }
+    dht::ring_position_view position() const { return dht::ring_position_view(_dk); }
+    friend dht::ring_position_view ring_position_view_to_compare(const fast_cache_entry& ce) noexcept { return ce.position(); }
+};
+
+flat_mutation_reader make_reader_from_mutation(schema_ptr s, reader_permit permit, const dht::decorated_key& dk, const mutation_partition& m) {
+    class reader : public flat_mutation_reader::impl {
+    public:
+        reader(schema_ptr s, reader_permit permit, const dht::decorated_key& dk, const mutation_partition& m)
+            : flat_mutation_reader::impl(s, permit)
+        {
+            push_mutation_fragment(*s, permit, partition_start(dk, m.partition_tombstone()));
+            // FIXME: static row
+            // FIXME: range tombstone
+            for (const rows_entry& row : m.clustered_rows()) {
+                push_mutation_fragment(*s, permit, clustering_row(*s, row));
+            }
+            push_mutation_fragment(*s, permit, partition_end());
+            _end_of_stream = true;
+        }
+
+        future<> fill_buffer(db::timeout_clock::time_point point) override {
+            return make_ready_future<>();
+        }
+
+        future<> next_partition() override {
+            clear_buffer();
+            return make_ready_future<>();
+        }
+
+        future<> fast_forward_to(const dht::partition_range& partitionRange, db::timeout_clock::time_point timeout) override {
+            throw std::runtime_error("unsupported");
+        }
+
+        future<> fast_forward_to(position_range positionRange, db::timeout_clock::time_point timeout) override {
+            throw std::runtime_error("unsupported");
+        }
+
+        future<> close() noexcept override {
+            return make_ready_future<>();
+        }
+    };
+    return make_flat_mutation_reader<reader>(std::move(s), permit, dk, m);
+}
+
+// No MVCC
+// No partial partition population
+// No clustering slicing
+// No preemptible reader
+class fast_row_cache : public row_cache_ifce {
+    using partitions_type = double_decker<int64_t, fast_cache_entry,
+            dht::raw_token_less_comparator, dht::ring_position_comparator,
+            16, bplus::key_search::linear>;
+
+    partitions_type _partitions;
+    mutation_source _underlying;
+    snapshot_source _snapshot_source;
+    logalloc::allocating_section _as;
+
+    friend class fast_cache_entry;
+public:
+    fast_row_cache(schema_ptr s, snapshot_source src, cache_tracker& tracker, is_continuous cont)
+            : row_cache_ifce(s, tracker)
+            , _partitions(dht::raw_token_less_comparator{})
+            , _underlying(src())
+            , _snapshot_source(std::move(src))
+    { }
+
+    ~fast_row_cache() {
+        with_allocator(_tracker.region().allocator(), [&] {
+            _partitions.clear();
+        });
+    }
+
+    flat_mutation_reader make_populating_reader(schema_ptr s,
+                                          reader_permit permit,
+                                          const dht::partition_range& pr,
+                                          const query::partition_slice& slice,
+                                          const io_priority_class& pc,
+                                          tracing::trace_state_ptr trace_state) {
+        // FIXME: metrics
+        auto rd = _underlying.make_reader(_schema, permit, pr, slice, pc, trace_state, streamed_mutation::forwarding::no);
+        return make_flat_mutation_reader<chained_delegating_reader>(s, [rd = make_lw_shared<flat_mutation_reader>(std::move(rd)), &pr, permit, s, this] (db::timeout_clock::time_point timeout) mutable -> future<flat_mutation_reader> {
+            return read_mutation_from_flat_mutation_reader(*rd, timeout).then([this, rd, s, &pr, permit] (mutation_opt&& mo) {
+                return rd->close().then([this, rd, s, &pr, permit, mo = std::move(mo)] {
+                    // FIXME: concurrent snapshot change
+                    if (!mo) {
+                        return make_empty_flat_reader(s, permit);
+                    }
+                    return _as(_tracker.region(), [&] {
+                        // FIXME: metrics
+                        dht::ring_position_comparator cmp(*_schema);
+                        auto&& pos = pr.start()->value();
+                        partitions_type::bound_hint hint;
+                        auto i = _partitions.lower_bound(pos, cmp, hint);
+                        if (hint.match) {
+                            fast_cache_entry& e = *i;
+                            return make_reader_from_mutation(_schema, permit, e.key(), e.p());
+                        } else {
+                            const fast_cache_entry& e = with_allocator(_tracker.region().allocator(), [&] () -> const fast_cache_entry&{
+                                partitions_type::iterator e = _partitions.emplace_before(i, pos.token().raw(), hint,
+                                                                                         mo->decorated_key(), mutation_partition(*_schema, mo->partition()));
+                                _tracker.get_lru().add(*e);
+                                return *e;
+                            });
+                            return make_reader_from_mutation(_schema, permit, e.key(), e.p());
+                        }
+                    });
+                });
+            });
+        }, std::move(permit));
+    }
+
+    flat_mutation_reader make_reader(schema_ptr s,
+                                     reader_permit permit,
+                                     const dht::partition_range& pr,
+                                     const query::partition_slice& slice,
+                                     const io_priority_class& pc,
+                                     tracing::trace_state_ptr trace_state,
+                                     streamed_mutation::forwarding fwd,
+                                     mutation_reader::forwarding fwd_mr) override {
+        if (!query::is_single_partition(pr)) {
+            throw std::runtime_error("unimpl");
+        }
+
+        dht::ring_position_comparator cmp(*_schema);
+        auto&& pos = pr.start()->value();
+        partitions_type::bound_hint hint;
+        return _as(_tracker.region(), [&] {
+            auto i = _partitions.lower_bound(pos, cmp, hint);
+            if (hint.match) [[likely]] {
+                fast_cache_entry& e = *i;
+                // FIXME: schema change
+                // FIXME: metrics
+                _tracker.get_lru().touch(e);
+                return make_reader_from_mutation(_schema, permit, e.key(), e.p());
+            } else {
+                return make_populating_reader(s, permit, pr, slice, pc, trace_state);
+            }
+        });
+    }
+
+    future<> update(external_updater updater, memtable& memtable) override {
+        return update_invalidating(std::move(updater), memtable);
+    }
+
+    future<> update_invalidating(external_updater updater, memtable& memtable) override {
+        return invalidate(std::move(updater));
+    }
+
+    void refresh_snapshot() override {
+        _underlying = _snapshot_source();
+    }
+
+    future<> invalidate(external_updater updater, const dht::decorated_key& key) override {
+        return invalidate(std::move(updater));
+    }
+
+    future<> invalidate(external_updater updater, const dht::partition_range& pr) override {
+        return invalidate(std::move(updater));
+    }
+
+    future<> invalidate(external_updater updater, dht::partition_range_vector&& pr_vec) override {
+        return invalidate(std::move(updater));
+    }
+
+    future<> invalidate(external_updater eu) {
+        return do_with(std::move(eu), [this] (external_updater& eu) {
+            return eu.prepare().then([&eu, this] () mutable {
+                eu.execute();
+                with_allocator(_tracker.region().allocator(), [&] {
+                    _partitions.clear();
+                });
+                refresh_snapshot();
+            });
+        });
+    }
+
+    void evict() override {
+        throw std::runtime_error("unimpl");
+    }
+
+    void set_schema(schema_ptr s) noexcept override {
+        _schema = s;
+    }
+};
+
+void fast_cache_entry::on_evicted() noexcept {
+    fast_row_cache::partitions_type::iterator it(this);
+    it.erase(dht::raw_token_less_comparator{});
+}
+
+std::unique_ptr<row_cache_ifce> make_fast_cache(schema_ptr s, snapshot_source ss, cache_tracker& tracker, is_continuous cont) {
+    return std::make_unique<fast_row_cache>(s, std::move(ss), tracker, cont);
 }
 
 row_cache::row_cache(schema_ptr s, snapshot_source src, cache_tracker& tracker, is_continuous cont)

@@ -1172,7 +1172,9 @@ table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_man
     , _main_sstables(make_lw_shared<sstables::sstable_set>(_compaction_strategy.make_sstable_set(_schema)))
     , _maintenance_sstables(make_maintenance_sstable_set())
     , _sstables(make_compound_sstable_set())
-    , _cache(std::make_unique<row_cache>(_schema, sstables_as_snapshot_source(), row_cache_tracker, is_continuous::yes))
+    , _cache(_schema->cf_name() == "cf"
+        ? make_fast_cache(_schema, sstables_as_snapshot_source(), row_cache_tracker, is_continuous::yes)
+        : std::make_unique<row_cache>(_schema, sstables_as_snapshot_source(), row_cache_tracker, is_continuous::yes))
     , _commitlog(cl)
     , _durable_writes(true)
     , _compaction_manager(compaction_manager)
