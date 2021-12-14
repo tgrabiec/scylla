@@ -28,6 +28,12 @@
 class mutation_partition_assertion {
     schema_ptr _schema;
     const mutation_partition& _m;
+private:
+    static mutation_partition compacted(const schema& s, const mutation_partition& m) {
+        mutation_partition res(s, m);
+        res.compact_for_compaction(s, always_gc, gc_clock::time_point::min());
+        return res;
+    }
 public:
     mutation_partition_assertion(schema_ptr s, const mutation_partition& m)
         : _schema(s)
@@ -57,6 +63,19 @@ public:
                               mutation_partition::printer(s, other), mutation_partition::printer(*_schema, _m)));
         }
         return *this;
+    }
+
+    mutation_partition_assertion& is_equal_to_compacted(const schema& s,
+                                                        const mutation_partition& other,
+                                                        const std::optional<query::clustering_row_ranges>& ck_ranges = {}) {
+        mutation_partition_assertion(s.shared_from_this(), compacted(s, _m))
+            .is_equal_to(compacted(s, other), ck_ranges);
+        return *this;
+    }
+
+    mutation_partition_assertion& is_equal_to_compacted(const mutation_partition& other,
+                                                        const std::optional<query::clustering_row_ranges>& ck_ranges = {}) {
+        return is_equal_to_compacted(*_schema, other, ck_ranges);
     }
 
     mutation_partition_assertion& is_not_equal_to(const mutation_partition& other) {
@@ -110,6 +129,11 @@ public:
         if (other != _m) {
             BOOST_FAIL(format("Mutation inequality is not symmetric for {}\n ...and: {}", other, _m));
         }
+        return *this;
+    }
+
+    mutation_assertion& is_equal_to_compacted(const mutation& other, const std::optional<query::clustering_row_ranges>& ck_ranges = {}) {
+        mutation_assertion(_m.compacted()).is_equal_to(other.compacted(), ck_ranges);
         return *this;
     }
 
