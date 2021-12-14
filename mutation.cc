@@ -173,6 +173,12 @@ mutation mutation::sliced(const query::clustering_row_ranges& ranges) const {
     return mutation(schema(), decorated_key(), partition().sliced(*schema(), ranges));
 }
 
+mutation mutation::compacted() const {
+    auto m = *this;
+    m.partition().compact_for_compaction(*schema(), always_gc, m.decorated_key(), gc_clock::time_point::min());
+    return m;
+}
+
 future<mutation_opt> read_mutation_from_flat_mutation_reader(flat_mutation_reader& r) {
     if (r.is_buffer_empty()) {
         if (r.is_end_of_stream()) {
