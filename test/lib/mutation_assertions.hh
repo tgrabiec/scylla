@@ -18,7 +18,8 @@ class mutation_partition_assertion {
 private:
     static mutation_partition compacted(const schema& s, const mutation_partition& m) {
         mutation_partition res(s, m);
-        res.compact_for_compaction(s, always_gc, gc_clock::time_point::min());
+        auto key = dht::decorate_key(s, partition_key::make_empty());
+        res.compact_for_compaction(s, always_gc, key, gc_clock::time_point::min());
         return res;
     }
 public:

@@ -3414,6 +3414,7 @@ SEASTAR_TEST_CASE(test_concurrent_reads_and_eviction) {
                         if (reversed) {
                             m2 = reverse(std::move(m2));
                         }
+                        m2 = std::move(m2).compacted();
                         if (n_to_consider == 1) {
                             assert_that(actual).is_equal_to(m2);
                         }
