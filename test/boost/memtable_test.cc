@@ -597,6 +597,97 @@ SEASTAR_THREAD_TEST_CASE(test_range_tombstones_are_compacted_with_data) {
             .produces_end_of_stream();
 }
 
+SEASTAR_THREAD_TEST_CASE(test_random_mutation_merging) {
+    random_mutation_generator gen(random_mutation_generator::generate_counters::no);
+    simple_schema ss;
+
+    tests::reader_concurrency_semaphore_wrapper semaphore;
+    auto mt = make_lw_shared<memtable>(ss.schema());
+//    auto mt = make_lw_shared<memtable>(gen.schema());
+
+    auto m1 = gen();
+    auto m2 = mutation(m1.schema(), m1.decorated_key(), gen().partition());
+    auto m3 = mutation(m1.schema(), m1.decorated_key(), gen().partition());
+
+    auto pk = ss.make_pkey(0);
+
+    auto old_tombstone = ss.new_tombstone();
+
+    {
+        mutation m(ss.schema(), pk);
+        ss.add_row(m, ss.make_ckey(1), "v1");
+        ss.add_row(m, ss.make_ckey(3), "v2");
+        ss.add_row(m, ss.make_ckey(5), "v3");
+//        for (int i = 10; i < 1000; ++i) {
+//            ss.add_row(m, ss.make_ckey(i), "landfill");
+//        }
+        m1 = m;
+    }
+
+    {
+        mutation m(ss.schema(), pk);
+        m.partition().apply(old_tombstone);
+        ss.add_row(m, ss.make_ckey(2), "v4");
+        ss.add_row(m, ss.make_ckey(4), "v5");
+        ss.add_row(m, ss.make_ckey(5), "v6");
+//        for (int i = 10; i < 1000; ++i) {
+//            ss.add_row(m, ss.make_ckey(i), "landfill");
+//        }
+        m2 = m;
+    }
+
+    {
+        mutation m(ss.schema(), pk);
+        auto rt = ss.delete_range(m, ss.make_ckey_range(0,3));
+        ss.add_row(m, ss.make_ckey(1), "v7");
+        ss.add_row(m, ss.make_ckey(3), "v8");
+        ss.add_row(m, ss.make_ckey(4), "v9");
+//        for (int i = 10; i < 1000; ++i) {
+//            ss.add_row(m, ss.make_ckey(i), "landfill");
+//        }
+        m3 = m;
+    }
+
+    auto pr = dht::partition_range::make_singular(pk);
+
+    // Create 3 MVCC versions
+    // then drop readers to trigger background merging
+    mt->apply(m1);
+    auto rd1 = upgrade_to_v2(mt->make_flat_reader(mt->schema(), semaphore.make_permit(), pr));
+    auto close_rd1 = deferred_close(rd1);
+    rd1.set_max_buffer_size(1);
+    rd1.fill_buffer().get();
+
+    mt->apply(m2);
+    auto rd2 = upgrade_to_v2(mt->make_flat_reader(mt->schema(), semaphore.make_permit(), pr));
+    auto close_rd2 = deferred_close(rd2);
+    rd2.set_max_buffer_size(1);
+    rd2.fill_buffer().get();
+
+    mt->apply(m3);
+    auto rd3 = upgrade_to_v2(mt->make_flat_reader(mt->schema(), semaphore.make_permit(), pr));
+    auto close_rd3 = deferred_close(rd3);
+    rd3.set_max_buffer_size(1);
+    rd3.fill_buffer().get();
+
+    mt->cleaner().drain().get();
+
+    assert_that(std::move(rd2))
+            .produces(m1 + m2);
+
+    mt->cleaner().drain().get();
+
+    assert_that(std::move(rd1))
+            .produces(m1);
+
+    mt->cleaner().drain().get();
+
+    assert_that(std::move(rd3))
+            .produces(m1 + m2 + m3);
+
+    mt->cleaner().drain().get();
+}
+
 SEASTAR_TEST_CASE(test_hash_is_cached) {
     return seastar::async([] {
         auto s = schema_builder("ks", "cf")

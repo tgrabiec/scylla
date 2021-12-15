@@ -175,7 +175,7 @@ public:
         bool is_end_of_stream() const { return _end_of_stream; }
         bool is_buffer_empty() const { return _buffer.empty(); }
         bool is_buffer_full() const { return _buffer_size >= max_buffer_size_in_bytes; }
-        static constexpr size_t default_max_buffer_size_in_bytes() { return 8 * 1024; }
+        static constexpr size_t default_max_buffer_size_in_bytes() { return 1; }
 
         mutation_fragment pop_mutation_fragment() {
             auto mf = std::move(_buffer.front());

@@ -27,6 +27,8 @@
 #include "utils/coroutine.hh"
 #include "real_dirty_memory_accounter.hh"
 
+seastar::logger mvcc_logger("mvcc");
+
 static void remove_or_mark_as_unique_owner(partition_version* current, mutation_cleaner* cleaner)
 {
     while (current && !current->is_referenced()) {
@@ -206,12 +208,20 @@ stop_iteration partition_snapshot::merge_partition_versions(mutation_application
             if (!_version_merging_state || version_no != _version_merging_state->first) {
                 _version_merging_state = std::make_pair(version_no, apply_resume());
             }
+            apply_resume res;
+            mvcc_logger.trace("Merging versions: {} into {}",
+                              mutation_partition::printer(*schema(), prev->partition()),
+                              mutation_partition::printer(*schema(), current->partition()));
             const auto do_stop_iteration = current->partition().apply_monotonically(*schema(),
-                std::move(prev->partition()), _tracker, local_app_stats, is_preemptible::yes, _version_merging_state->second);
+                std::move(prev->partition()), _tracker, local_app_stats, is_preemptible::yes, res);
+            //            const auto do_stop_iteration = current->partition().apply_monotonically(*schema(),
+//                std::move(prev->partition()), _tracker, local_app_stats, is_preemptible::yes, _version_merging_state->second);
             app_stats.row_hits += local_app_stats.row_hits;
             if (do_stop_iteration == stop_iteration::no) {
+                mvcc_logger.trace("Preempted");
                 return stop_iteration::no;
             }
+            mvcc_logger.trace("Done");
             _version_merging_state.reset();
             if (prev->is_referenced()) {
                 _version.release();
@@ -357,6 +367,7 @@ void partition_entry::apply(logalloc::region& r, mutation_cleaner& cleaner, cons
 
 void partition_entry::apply(logalloc::region& r, mutation_cleaner& cleaner, const schema& s, mutation_partition&& mp, const schema& mp_schema,
         mutation_application_stats& app_stats) {
+    mvcc_logger.trace("apply({}), entry={}", mutation_partition::printer(mp_schema, mp), printer(s, *this));
     // A note about app_stats: it may happen that mp has rows that overwrite other rows
     // in older partition_version. Those overwrites will be counted when their versions get merged.
     if (s.version() != mp_schema.version()) {
@@ -376,14 +387,19 @@ void partition_entry::apply(logalloc::region& r, mutation_cleaner& cleaner, cons
                 current_allocator().destroy(new_version);
                 return;
             } else {
+                mvcc_logger.trace("Deferring apply to background");
                 // Apply was preempted. Let the cleaner finish the job when snapshot dies
                 snp = read(r, cleaner, s.shared_from_this(), no_cache_tracker);
                 // FIXME: Store res in the snapshot as an optimization to resume from where we left off.
             }
         } catch (...) {
+            mvcc_logger.debug("Failed to apply: {}", std::current_exception());
             // fall through
         }
+    } else {
+        mvcc_logger.trace("snapshot");
     }
+    mvcc_logger.trace("insert_before");
     new_version->insert_before(*_version);
     set_version(new_version);
     app_stats.row_writes += new_version->partition().row_count();
@@ -686,6 +702,7 @@ partition_snapshot_ptr::~partition_snapshot_ptr() {
         auto&& cleaner = _snp->cleaner();
         auto snp = _snp.release();
         if (snp) {
+            mvcc_logger.trace("Destroying snapshot {}", fmt::ptr(snp.get()));
             cleaner.merge_and_destroy(*snp.release());
         }
     }
