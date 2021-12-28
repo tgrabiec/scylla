@@ -610,15 +610,21 @@ enum segment_kind : int {
     bufs = 1     // Holds objects allocated with region_impl::alloc_buf()
 };
 
-struct segment_descriptor : public log_heap_hook<segment_descriptor_hist_options> {
+struct x {
+    long xxx = 0xcafebabe;
+};
+
+struct segment_descriptor : public x, public log_heap_hook<segment_descriptor_hist_options> {
     static constexpr segment::size_type free_space_mask = segment::size_mask;
     static constexpr unsigned bits_for_free_space = segment::size_shift + 1;
-    static constexpr segment::size_type segment_kind_mask = 1 << bits_for_free_space;
+    static constexpr segment::size_type segment_kind_mask = 1u << bits_for_free_space;
     static constexpr unsigned bits_for_segment_kind = 1;
     static constexpr unsigned shift_for_segment_kind = bits_for_free_space;
     static_assert(sizeof(segment::size_type) * 8 >= bits_for_free_space + bits_for_segment_kind);
 
     segment::size_type _free_space;
+    segment::size_type push_buf_ptrs_size;
+    segment::size_type push_free_size;
     region::impl* _region;
 
     segment::size_type free_space() const {
@@ -997,6 +1003,7 @@ void segment_pool::refill_emergency_reserve() {
 segment_descriptor&
 segment_pool::descriptor(segment* seg) {
     uintptr_t index = idx_from_segment(seg);
+    assert(index < _segments.size());
     return _segments[index];
 }
 
@@ -1263,6 +1270,7 @@ private:
     segment_descriptor_hist _segment_descs; // Contains only closed segments
     occupancy_stats _closed_occupancy;
     occupancy_stats _non_lsa_occupancy;
+    segment* _buf_active_bk;
     // This helps us keeping track of the region_group* heap. That's because we call update before
     // we have a chance to update the occupancy stats - mainly because at this point we don't know
     // what will we do with the new segment. Also, because we are not ever interested in the
@@ -1359,14 +1367,21 @@ private:
     }
 
     void close_buf_active() {
+        assert(this_shard_id() == _cpu);
+
         if (!_buf_active) {
             return;
         }
         llogger.trace("Closing buf segment {}, used={}, waste={} [B]", fmt::ptr(_buf_active), _buf_active->occupancy(), segment::size - _buf_active_offset);
         _closed_occupancy += _buf_active->occupancy();
 
-        _segment_descs.push(shard_segment_pool.descriptor(_buf_active));
+        segment_descriptor& desc = shard_segment_pool.descriptor(_buf_active);
+        desc.push_free_size = desc.free_space();
+        desc.push_buf_ptrs_size = desc._buf_pointers.size();
+        desc._buf_pointers.shrink_to_fit();
+        _segment_descs.push(desc);
         _buf_active = nullptr;
+        _buf_active_bk = nullptr;
     }
 
     void free_segment(segment_descriptor& desc) noexcept {
@@ -1378,6 +1393,9 @@ private:
     }
 
     void free_segment(segment* seg, segment_descriptor& desc) noexcept {
+        assert(this_shard_id() == _cpu);
+        assert(desc._buf_pointers.empty());
+        desc.cached_bucket = 0xcc;
         shard_segment_pool.free_segment(seg, desc);
         if (_group) {
             _evictable_space -= segment_size;
@@ -1386,6 +1404,7 @@ private:
     }
 
     segment* new_segment() {
+        assert(this_shard_id() == _cpu);
         segment* seg = shard_segment_pool.new_segment(this);
         if (_group) {
             _evictable_space += segment_size;
@@ -1395,6 +1414,7 @@ private:
     }
 
     lsa_buffer alloc_buf(size_t buf_size) {
+        assert(this_shard_id() == _cpu);
         static_assert(segment::size % buf_align == 0);
         if (buf_size > segment::size) {
             throw_with_backtrace<std::runtime_error>(format("Buffer size {} too large", buf_size));
@@ -1415,7 +1435,11 @@ private:
 
         segment_descriptor& desc = shard_segment_pool.descriptor(_buf_active);
         ptr._desc = &desc;
-        desc._buf_pointers.emplace_back(entangled::make_paired_with(ptr._link));
+        try {
+            desc._buf_pointers.emplace_back(entangled::make_paired_with(ptr._link));
+        } catch (...) {
+            abort();
+        }
         auto alloc_size = align_up(buf_size, buf_align);
         desc.record_alloc(alloc_size);
         _buf_active_offset += alloc_size;
@@ -1424,6 +1448,7 @@ private:
     }
 
     void free_buf(lsa_buffer& buf) noexcept {
+        assert(this_shard_id() == _cpu);
         segment_descriptor &desc = *buf._desc;
         segment *seg = shard_segment_pool.segment_from(desc);
 
@@ -1506,10 +1531,16 @@ private:
         segment* new_active = new_segment();
         assert((uintptr_t)new_active->at(0) % buf_align == 0);
         segment_descriptor& desc = shard_segment_pool.descriptor(new_active);
+        desc.cached_bucket = 0xaa;
         desc._buf_pointers = std::move(ptrs);
+        desc.push_buf_ptrs_size = -1;
         desc.set_kind(segment_kind::bufs);
+        assert(!_buf_active);
+        assert(!_buf_active_bk);
         _buf_active = new_active;
+        _buf_active_bk = new_active;
         _buf_active_offset = 0;
+        desc.cached_bucket = 0xbb;
     }
 
     static uint64_t next_id() {
@@ -1570,6 +1601,7 @@ public:
             assert(_buf_active->is_empty());
             free_segment(_buf_active);
             _buf_active = nullptr;
+            _buf_active_bk = nullptr;
         }
         if (_group) {
             _group->del(this);
@@ -1714,6 +1746,7 @@ public:
         if (seg != _active) {
             if (seg_desc.is_empty()) {
                 _segment_descs.erase(seg_desc);
+                assert(seg_desc._buf_pointers.empty());
                 free_segment(seg, seg_desc);
             } else {
                 _segment_descs.adjust_up(seg_desc);
@@ -1818,7 +1851,7 @@ public:
         llogger.debug("Done, {}", occupancy());
     }
 
-    void compact_segment(segment* seg, segment_descriptor& desc) {
+    void compact_segment(segment* seg, segment_descriptor& desc) noexcept {
         compaction_lock _(*this);
         if (_active == seg) {
             close_active();
@@ -1826,6 +1859,7 @@ public:
             close_buf_active();
         }
         _segment_descs.erase(desc);
+        desc.cached_bucket = 0xdd;
         _closed_occupancy -= desc.occupancy();
         compact_segment_locked(seg, desc);
     }

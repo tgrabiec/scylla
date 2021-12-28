@@ -95,6 +95,8 @@ struct log_heap_bucket_index {
 template<const log_heap_options& opts>
 struct log_heap_hook : public bi::list_base_hook<> {
     typename log_heap_bucket_index<opts>::type cached_bucket;
+    mutable size_t last_key;
+    mutable int reason = 0;
 };
 
 template<typename T>
@@ -110,7 +112,7 @@ struct log_heap_element_traits {
         return v.cached_bucket;
     }
     static size_t hist_key(const T& v) {
-        return ::hist_key<T>(v);
+        return v.last_key = ::hist_key<T>(v);
     }
 };
 
@@ -224,6 +226,8 @@ public:
     }
     // Pops one of the largest elements in the histogram.
     void pop_one_of_largest() {
+        assert(!_buckets[_watermark].empty());
+        one_of_largest().reason = 1;
         _buckets[_watermark].pop_front();
         maybe_adjust_watermark();
     }
@@ -239,7 +243,9 @@ public:
     void push(T& v) {
         auto b = opts.bucket_of(traits::hist_key(v));
         traits::cache_bucket(v, b);
+        v.reason = 2;
         _buckets[b].push_front(v);
+        assert(v.next_); assert(v.prev_);
         _watermark = std::max(ssize_t(b), _watermark);
     }
     // Adjusts the histogram when the specified element becomes larger.
@@ -248,19 +254,26 @@ public:
         auto nb = opts.bucket_of(traits::hist_key(v));
         if (nb != b) {
             traits::cache_bucket(v, nb);
+            assert(nb < opts.number_of_buckets());
+            v.reason = 3;
             _buckets[nb].splice(_buckets[nb].begin(), _buckets[b], _buckets[b].iterator_to(v));
+            assert(v.next_); assert(v.prev_);
             _watermark = std::max(ssize_t(nb), _watermark);
         }
     }
     // Removes the specified element from the histogram.
     void erase(T& v) {
         auto& b = _buckets[traits::cached_bucket(v)];
+        v.reason = 4;
         b.erase(b.iterator_to(v));
         maybe_adjust_watermark();
     }
     // Merges the specified histogram, moving all elements from it into this.
     void merge(log_heap& other) {
         for (size_t i = 0; i < opts.number_of_buckets(); ++i) {
+            for (auto&& v : other._buckets[i]) {
+                v.reason = 5;
+            }
             _buckets[i].splice(_buckets[i].begin(), other._buckets[i]);
         }
         _watermark = std::max(_watermark, other._watermark);

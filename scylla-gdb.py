@@ -2387,9 +2387,16 @@ class scylla_lsa_check(gdb.Command):
                         gdb.write('ERROR: Stray segment: (logalloc::segment*)0x%x, (logalloc::segment_descriptor*)0x%x, free_space=%d\n'
                               % (base, int(desc.address), desc.free_space()))
                 else:
+                    if desc.free_space() == segment_size:
+                        gdb.write('ERROR: Empty segment: (logalloc::segment*)0x%x, (logalloc::segment_descriptor*)0x%x, free_space=%d\n'
+                                  % (base, int(desc.address), desc.free_space()))
+                    in_buckets.remove(int(desc.address))
                     desc_free_space += desc.free_space()
                     desc_total_space += segment_size
             base += segment_size
+
+        for desc in in_buckets:
+            gdb.write('ERROR: Not in descs: (logalloc::segment_descriptor*)0x%x\n' % (desc))
 
         region_free_space = int(cache_region.impl()['_closed_occupancy']['_free_space'])
         if region_free_space != desc_free_space:
