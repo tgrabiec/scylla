@@ -399,7 +399,7 @@ class ReplicateTokenMetadata(RpcMessage):
 def replicate_token_metadata(m: Mutation):
     # TODO: check coordinator_id as part of the transaction so that we don't rely on the timestamp
     # trick to make this command noop on failover
-    this_node.raft_gr0.add(MutationCommand(m))
+    this_node.raft_gr0.add(TokenMetadataUpdateCommand(m))
     this_node.raft_gr0.global_read_barrier()
 
 
@@ -445,6 +445,20 @@ class MutationCommand(RaftCommand):
 
     def execute(self):
         self.m.apply()
+
+
+class TokenMetadataUpdateCommand(MutationCommand):
+    """Updated token metadata and waits for local coordinator to synchronize with it"""
+
+    def __init__(self, m: Mutation):
+        super().__init__(m)
+
+    def wait_for_sync(self):
+        """Wait until all requests start using the new topology"""
+
+    def execute(self):
+        super().execute()
+        self.wait_for_sync()
 
 
 def make_create_topology_change_command(tx: TransactionId, action: TopologyChangeAction, targets: List[Host]) -> RaftCommand:
@@ -819,7 +833,7 @@ class BootstrapTransaction(RaftTransaction):
         ring_diff.set_stage(ReplicationStage.write_both_read_old)
 
         return [
-            MutationCommand(as_mutation(ring_diff, t)),
+            TokenMetadataUpdateCommand(as_mutation(ring_diff, t)),
             make_create_topology_change_command(self.tx, TopologyChangeAction.Add, [self.n])
         ] + lock_cmd
 
