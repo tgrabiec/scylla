@@ -9,6 +9,7 @@
 #include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
 #include "test/lib/cql_test_env.hh"
+#include "test/lib/reader_concurrency_semaphore.hh"
 #include "test/lib/cql_assertions.hh"
 
 #include "types/user.hh"
@@ -201,8 +202,19 @@ static future<> test_alter_user_type(bool frozen) {
                 {{utf8_type->decompose(val1)}},
         });
 
+        schema_ptr s1 = e.local_db().find_schema("ks", "cf");
+
         e.execute_cql("alter type ut add a int").discard_result().get();
         e.execute_cql("insert into cf (a, b) values (2, {a:2,b:'22'})").discard_result().get();
+
+        schema_ptr s2 = e.local_db().find_schema("ks", "cf");
+        tests::reader_concurrency_semaphore_wrapper semaphore;
+        flat_mutation_reader_v2 rd = e.local_db().find_column_family(s2->id()).make_reader_v2(s1,
+            semaphore.make_permit(), query::full_partition_range, s1->full_slice());
+        auto close_rd = deferred_close(rd);
+        while (!rd.is_end_of_stream()) {
+            rd().get();
+        }
 
         auto ut = user_type_impl::get_instance("ks", to_bytes("ut"),
                     {to_bytes("b"), to_bytes("a")}, {utf8_type, int32_type}, !frozen);

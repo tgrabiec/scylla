@@ -1068,6 +1068,60 @@ static utils::UUID generate_group0_state_id(utils::UUID prev_state_id) {
     return utils::UUID_gen::get_random_time_UUID_from_micros(std::chrono::microseconds{ts});
 }
 
+
+// Obtaining this object means that all previously finished operations on group 0 are visible on this node.
+// It is also required in order to perform group 0 changes (through `announce`).
+// See `group0_guard::impl` for more detailed explanations.
+class group0_guard {
+    friend class raft_group_transactions;
+    struct impl;
+    std::unique_ptr<impl> _impl;
+
+    group0_guard(std::unique_ptr<impl>);
+
+public:
+    ~group0_guard();
+    group0_guard(group0_guard&&) noexcept;
+
+    utils::UUID observed_group0_state_id() const;
+    utils::UUID new_group0_state_id() const;
+
+    // Use this timestamp when creating group 0 mutations.
+    api::timestamp_type write_timestamp() const;
+};
+
+class group0_concurrent_modification : public std::runtime_error {
+public:
+    group0_concurrent_modification()
+            : std::runtime_error("Failed to apply group 0 change due to concurrent modification")
+    {}
+};
+
+class raft_transaction {
+public:
+    virtual std::vector<raft::command> execute() = 0;
+};
+
+class raft_group0_server {
+    friend class group0_state_machine;
+    raft::server& _raft_group;
+
+    // See `group0_guard::impl` for explanation of the purpose of these locks.
+    semaphore _group0_read_apply_mutex;
+    semaphore _group0_operation_mutex;
+
+    gc_clock::duration _group0_history_gc_duration;
+private:
+    future<group0_guard> migration_manager::start_group0_operation() {
+
+public:
+    raft_group0_server(raft::server& raft_group)
+        : _raft_group(raft_group)
+    {}
+
+    future<> execute(raft_transaction&);
+};
+
 future<group0_guard> migration_manager::start_group0_operation() {
     if (_raft_gr.is_enabled()) {
         if (this_shard_id() != 0) {
