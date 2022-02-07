@@ -557,6 +557,12 @@ def run_state_machine(txid: TransactionId,
 # Step definitions for topology change transactions
 #
 
+def check_preempted(tx, coid):
+    result = cql_local("select coordinator_id as t from system.topology_changes where id = {}", tx)
+    if result['coordinator_id'] != coid:
+        raise Exception('Coordinator preempted')
+
+
 class SetStep(RaftTransaction):
     def __init__(self, tx: TransactionId, coid: CoordinatorId, step: StepName):
         self.coid = coid
@@ -567,9 +573,7 @@ class SetStep(RaftTransaction):
         # coordinator_id comparison is needed so that failover() always preempts the previous coordinator.
         # Comparing just the previous step is not enough, since the old coordinator could still win the race
         # and take down the new coordinator.
-        result = cql_local("select coordinator_id from system.topology_changes where id = {}", self.tx)
-        if result['coordinator_id'] != self.coid:
-            raise Exception('Preempted, another coordinator took over')
+        check_preempted(self.tx, self.coid)
         print("[%s]: SET step=%s, tx=%s, coid=%s" % (current_node(), self.step, self.tx, self.coid))
         return [CqlCommand("update system.topology_changes set step = {} where id = {}", self.step, self.tx)]
 
@@ -674,7 +678,7 @@ def step_only_new_ring(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
 
 
 def step_unlock(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
-    this_node.raft_gr0.add(UnlockRingTransaction())
+    this_node.raft_gr0.add(UnlockRingTransaction(tx, coid))
     return 'done'
 
 
@@ -795,13 +799,18 @@ class LockRingTransaction(RaftTransaction):
     def execute(self, t: Timestamp) -> List[RaftCommand]:
         lock_name = "ring"
         result = cql_local("select owner from system.global_locks where key = {}", lock_name)
-        if "owner" in result["owner"] and result["owner"]:
+        if "owner" in result and result["owner"]:
             raise Exception("Ring already locked by transaction %s" % (result["owner"]))
         return [CqlCommand("update system.global_locks set owner = {} where key = {}", self.owner, lock_name)]
 
 
 class UnlockRingTransaction(RaftTransaction):
+    def __init__(self, tx, coid):
+        self.tx = tx
+        self.coid = coid
+
     def execute(self, t: Timestamp) -> List[RaftCommand]:
+        check_preempted(self.tx, self.coid)
         lock_name = "ring"
         return [CqlCommand("update system.global_locks set owner = null where key = {}", lock_name)]
 
