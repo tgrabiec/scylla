@@ -455,7 +455,7 @@ class MutationCommand(RaftCommand):
 
 
 class TokenMetadataUpdateCommand(MutationCommand):
-    """Updated token metadata and waits for local coordinator to synchronize with it"""
+    """Updates token metadata and waits for local coordinator to synchronize with it"""
 
     def __init__(self, m: Mutation):
         super().__init__(m)
