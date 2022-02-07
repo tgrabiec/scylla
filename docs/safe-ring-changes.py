@@ -765,6 +765,7 @@ def abort_topology_change(tx: TransactionId):
         'after_streaming': 'abort_after_streaming',
         'streaming': 'abort_streaming',
         'advertise_ring': 'abort_advertise_ring',
+        'update_raft_group': 'abort_update_raft_group',
     }
 
     coid = failover(tx)
