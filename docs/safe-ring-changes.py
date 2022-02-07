@@ -51,7 +51,6 @@ create table system.topology_changes (
 
    state int,
    action int,
-   participants list<UUID>,
    failed bool,
    result text,
    primary key (id)
@@ -321,6 +320,10 @@ class TokenMetadata:
         """Returns nodes absent in the old ring but present in the new ring"""
         return set(h for h, tokens in self.tokens if any(s == TokenStatus.PENDING for t, s in tokens))
 
+    def members_in_new_ring(self) -> Set[Host]:
+        """Returns nodes present in the new ring"""
+        return set(h for h, tokens in self.tokens if any(s != TokenStatus.LEAVING for t, s in tokens))
+
     def set_stage(self, s: ReplicationStage):
         self.replication_stage = s
 
@@ -461,11 +464,11 @@ class TokenMetadataUpdateCommand(MutationCommand):
         self.wait_for_sync()
 
 
-def make_create_topology_change_command(tx: TransactionId, action: TopologyChangeAction, targets: List[Host]) -> RaftCommand:
+def make_create_topology_change_command(tx: TransactionId, action: TopologyChangeAction) -> RaftCommand:
     """Returns a command which creates a new topology change transaction record in system.topology_changes.
     """
-    return CqlCommand("insert into system.topology_changes (id, state, action, participants, failed)"
-                      " values ({}, 'update_raft_group', {}, [{}], false)", tx, action, ','.join(str(h) for h in targets))
+    return CqlCommand("insert into system.topology_changes (id, state, action, failed)"
+                      " values ({}, 'update_raft_group', {}, [{}], false)", tx, action)
 
 
 def get_topology_change_action(tx: TransactionId) -> TopologyChangeAction:
@@ -512,19 +515,6 @@ def stop_streaming(tx: TransactionId):
 	so that it doesn't interfere with cleanup or user reads.
 	"""
     pass
-
-
-def read_participants(tx: TransactionId) -> Set[Host]:
-    """Returns the set of participants associated with the transaction."""
-    pass
-
-
-def participants(tx: TransactionId) -> Set[Host]:
-    """Returns the set of active participants of the transaction.
-    It's not enough to look at the local ring because it may have some participants
-    already removed in the middle of final steps, which may need to be replayed.
-    """
-    return read_participants(tx) - get_dead_nodes()
 
 
 def set_stage(tx: TransactionId, stage: ReplicationStage, t: Timestamp):
@@ -646,7 +636,7 @@ class RunCleanup(RpcMessage):
 
 
 def step_cleanup(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
-    for n in participants(tx):
+    for n in local_ring().members_in_new_ring():
         send(n, RunCleanup())
     return 'only_new_ring'
 
@@ -721,8 +711,8 @@ topology_change_state_machine = {
     'streaming': step_streaming,
     'after_streaming': step_after_streaming,
     'use_only_new': step_use_only_new,
-    'cleanup': step_cleanup,
     'mark_dead': step_mark_dead,
+    'cleanup': step_cleanup,
     'only_new_ring': step_only_new_ring,
     'unlock': step_unlock,
     'done': step_done,
@@ -835,7 +825,7 @@ class BootstrapTransaction(RaftTransaction):
 
         return [
             TokenMetadataUpdateCommand(as_mutation(ring_diff, t)),
-            make_create_topology_change_command(self.tx, TopologyChangeAction.Add, [self.n])
+            make_create_topology_change_command(self.tx, TopologyChangeAction.Add)
         ] + lock_cmd
 
 
