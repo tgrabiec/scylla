@@ -260,7 +260,7 @@ class RaftGroup(object):
             [RaftCommandFromLambda(lambda: (self.do_remove_node(n)))]
         ))
 
-    def add(self, m: RpcMessage):
+    def add(self, m: RaftCommand):
         assert current_node() == self.leader
         self.log.append(m)
         for h in self.nodes:
