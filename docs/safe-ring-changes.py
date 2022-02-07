@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import queue
+import random
 import threading
 import uuid
 from uuid import UUID
@@ -12,13 +13,10 @@ import time
 # Schema
 #
 
-
-# cluster = Cluster(['127.0.0.1'])
-# session = cluster.connect()
-
 """
 
-/* local table */
+/* All tables are local tables managed by raft_group0 */
+
 create table system.token_metadata (
    pk int,
    
@@ -36,7 +34,6 @@ create table system.token_metadata (
    primary key (pk, node, "token")
 );
 
-/* distributed, LWT-managed table */
 create table system.topology_changes (
    id UUID,
    
@@ -54,23 +51,12 @@ create table system.topology_changes (
 
    state int,
    action int,
-   action_targets list<UUID>,
    participants list<UUID>,
-   intent UUID,
    failed bool,
    result text,
    primary key (id)
 );
 
-/* distributed, LWT-managed table */
-create table system.topology_change_intents (
-   intent_id UUID,
-   tx_id UUID,
-   mutation blob,
-   primary key (intent_id)
-);
-
-/* distributed, LWT-managed table */
 create table system.global_locks (
     name text primary key,
     owner UUID,
@@ -81,12 +67,17 @@ create table system.global_locks (
 
 
 class Timestamp:
-    def __int__(self, s: str):
-        self.t = int(s)
+    def __init__(self, t):
+        if t is str:
+            self.t = int(t)
+        else:
+            self.t = t
 
 
 class Mutation:
-    pass
+    def apply(self):
+        """Apply on local node"""
+        pass
 
 
 def new_uuid() -> UUID:
@@ -115,13 +106,32 @@ class HostThread(threading.Thread):
         self.queue = queue.Queue()
 
     def run(self):
+        this_node.rafts = dict()
+        this_node.raft_gr0 = RaftGroup(0)
+        this_node.rafts[0] = this_node.raft_gr0
+
         this_node.host_id = self.host_id
+        this_node.dead_nodes = set()
         while True:
             func = self.queue.get()
             func()
 
 
 host_threads: MutableMapping[Host, HostThread] = dict()
+
+
+class WaitableFunc(object):
+    """Allows waiting for func to complete"""
+
+    def __init__(self, func):
+        self.queue = queue.Queue()
+        self.func = func
+
+    def __call__(self):
+        self.queue.put(self.func())
+
+    def get(self):
+        return self.queue.get()
 
 
 def run_on_host(h: Host, func: Callable):
@@ -132,13 +142,19 @@ def run_on_host(h: Host, func: Callable):
     host_threads[h].queue.put(func)
 
 
+def run_on_host_sync(h: Host, func: Callable):
+    cmd = WaitableFunc(func)
+    run_on_host(h, cmd)
+    return cmd.get()
+
+
 def send(h: Host, m: RpcMessage):
     """
     Sends a given message to host h for execution.
     Returns when the host received and executed the message.
     May fail even though the message was or will be eventually executed by the host.
     """
-    run_on_host(h, lambda: m.execute())
+    run_on_host_sync(h, lambda: m.execute())
 
 
 def current_node() -> Host:
@@ -154,6 +170,110 @@ def seed() -> Host:
     """Returns one of the configured seed nodes."""
     return this_node.seed
 
+
+#
+# Raft
+#
+
+RaftCommand = RpcMessage
+
+
+class RaftCommandFromLambda(RaftCommand):
+    def __init__(self, fun):
+        self.fun = fun
+
+    def execute(self):
+        self.fun()
+
+
+class RaftTransaction(object):
+    """
+    execute() can access local state machine and return its modifications via RaftCommand.
+    The transaction will execute (in terms of reads and writes of the state machine)
+    atomically and will be linearized with other transactions in the same raft group
+    when executed via RaftGroup.execute_linearized().
+    """
+    def execute(self, t: Timestamp) -> List[RaftCommand]:
+        pass
+
+
+class RaftTransactionFromLambda(RaftTransaction):
+    def __init__(self, fun):
+        self.fun = fun
+
+    def execute(self, t) -> List[RaftCommand]:
+        return self.fun(t)
+
+
+RaftGroupId = int
+
+now = 0
+
+
+def new_time():
+    global now
+    now += 1
+    return Timestamp(now)
+
+
+class RaftGroup(object):
+    """Mock implementation. No leader failover"""
+
+    def __init__(self, gr_id: RaftGroupId):
+        self.id = gr_id
+        self.log = list()
+        self.nodes: List[Host] = list()
+        self.leader: Host = None
+
+    def execute_linearized(self, t: RaftTransaction):
+        """
+        Atomically executes a given transaction assuming that all side effects of the transaction
+        are in the form of the commands returned by t.execute().
+        The transaction observes the state machine state at the point in time in the history
+        when its result is going to be placed. Can be used to implement atomic CAS.
+        """
+        return run_on_host_sync(self.leader, lambda:
+            (this_node.rafts[self.id].add(c) for c in t.execute(new_time())))
+
+    def do_add_node(self, h: Host):
+        self.nodes.append(h)
+        if not self.leader:
+            self.leader = h
+        for m in self.log:
+            run_on_host(h, lambda: m.execute())
+
+    def add_node(self, n):
+        self.execute_linearized(RaftTransactionFromLambda(lambda:
+            [RaftCommandFromLambda(lambda: (self.do_add_node(n)))]
+        ))
+
+    def do_remove_node(self, n):
+        self.nodes.remove(n)
+        if self.leader == n:
+            self.leader = self.nodes[0]
+
+    def remove_node(self, n):
+        self.execute_linearized(RaftTransactionFromLambda(lambda:
+            [RaftCommandFromLambda(lambda: (self.do_remove_node(n)))]
+        ))
+
+    def add(self, m: RpcMessage):
+        assert current_node() == self.leader
+        self.log.append(m)
+        for h in self.nodes:
+            run_on_host_sync(h, lambda: m.execute())
+
+    def global_read_barrier(self):
+        """
+        Waits for all nodes to apply commands committed prior to this call
+        """
+        pass
+
+    def read_barrier(self):
+        """
+        Waits for current node to apply commands committed prior to this call
+        """
+        pass
 
 #
 # Token metadata
@@ -176,6 +296,8 @@ class ReplicationStage(Enum):
 
 
 Token = int
+min_token = 0
+max_token = 100
 
 
 class TokenMetadata:
@@ -194,6 +316,10 @@ class TokenMetadata:
     def leaving_members(self) -> Set[Host]:
         """Returns nodes present in the old ring but not in the new ring"""
         return set(h for h, tokens in self.tokens if any(s == TokenStatus.LEAVING for t, s in tokens))
+
+    def joining_members(self) -> Set[Host]:
+        """Returns nodes absent in the old ring but present in the new ring"""
+        return set(h for h, tokens in self.tokens if any(s == TokenStatus.PENDING for t, s in tokens))
 
     def set_stage(self, s: ReplicationStage):
         self.replication_stage = s
@@ -254,11 +380,11 @@ def get_dead_nodes() -> Set[Host]:
     """Returns nodes marked as permanently dead.
     Messages received from dead nodes will be ignored.
     """
-    pass
+    return this_node.dead_nodes
 
 
 def add_to_dead(nodes: Set[Host]):
-    pass
+    this_node.dead_nodes.extend(nodes)
 
 
 class ReplicateTokenMetadata(RpcMessage):
@@ -270,16 +396,20 @@ class ReplicateTokenMetadata(RpcMessage):
         pass
 
 
-def replicate_token_metadata(nodes: Set[Host], m: Mutation):
-    for node in nodes:
-        send(node, ReplicateTokenMetadata(m))
+def replicate_token_metadata(m: Mutation):
+    # TODO: check coordinator_id as part of the transaction so that we don't rely on the timestamp
+    # trick to make this command noop on failover
+    this_node.raft_gr0.add(MutationCommand(m))
+    this_node.raft_gr0.global_read_barrier()
 
 
 def get_stage_set_mutation(s: ReplicationStage, timestamp: Timestamp) -> Mutation:
     """Makes a mutation of system.token_metadata which changes the current ReplicationStage
 	for all token ranges for all tables.
 	"""
-    pass
+    t = TokenMetadata()
+    t.set_stage(s)
+    return as_mutation(t, timestamp)
 
 
 #
@@ -299,13 +429,29 @@ class TopologyChangeAction(Enum):
     Replace = 3
 
 
-def create_topology_change(action: TopologyChangeAction, targets: List[Host]) -> TransactionId:
-    """Creates a new topology change transaction record in system.topology_changes.
+class CqlCommand(RaftCommand):
+    def __init__(self, cql: str, *args):
+        self.cql = cql
+        self.args = args
+
+    def execute(self):
+        cql_local(self.cql, *self.args)
+
+
+class MutationCommand(RaftCommand):
+    """Applies a given mutation on current node"""
+    def __init__(self, m: Mutation):
+        self.m = m
+
+    def execute(self):
+        self.m.apply()
+
+
+def make_create_topology_change_command(tx: TransactionId, action: TopologyChangeAction, targets: List[Host]) -> RaftCommand:
+    """Returns a command which creates a new topology change transaction record in system.topology_changes.
     """
-    tx = new_uuid()
-    cql_serial("insert into system.topology_changes (id, state, action, action_targets, failed)"
-               " values ({}, 'lock', {}, [{}], false)", tx, action, ','.join(str(h) for h in targets))
-    return tx
+    return CqlCommand("insert into system.topology_changes (id, state, action, participants, failed)"
+                      " values ({}, 'update_raft_group', {}, [{}], false)", tx, action, ','.join(str(h) for h in targets))
 
 
 def get_topology_change_action(tx: TransactionId) -> TopologyChangeAction:
@@ -319,72 +465,12 @@ def get_topology_change_targets(tx: TransactionId) -> List[Host]:
 
 
 def choose_new_tokens(r: TokenMetadata) -> Set[Token]:
+    return {random.randint(min_token, max_token)}
+
+
+def cql_local(query: str, *args) -> Mapping[str, object]:
+    """Executes a CQL query with CL=1 on local node"""
     pass
-
-
-def make_new_ring(tx: TransactionId) -> TokenMetadata:
-    """Creates a transitional ring according to the intent of the transaction
-    """
-
-    ring = local_ring()
-    op = get_topology_change_action(tx)
-    nodes = get_topology_change_targets(tx)
-
-    if op == TopologyChangeAction.Add:
-        for node in nodes:
-            if node in ring.members():
-                raise Exception("Node is already a member")
-            tokens = choose_new_tokens(ring)
-            ring.set_tokens(node, tokens, TokenStatus.PENDING)
-
-    elif op == TopologyChangeAction.Decommission:
-        for node in nodes:
-            if not node in ring.members():
-                raise Exception("Node is not a member")
-            ring.set_tokens(node, ring.get_tokens(node), TokenStatus.LEAVING)
-
-    elif op == TopologyChangeAction.Replace:
-        ...
-
-    return ring
-
-
-def cql_serial(query: str, *args) -> Mapping[str, object]:
-    """Executes a CQL query with SERIAL consistency level"""
-    pass
-
-
-#
-# Distributed locking
-#
-
-
-def try_lock(lock_name: str, owner: UUID) -> bool:
-    """Acquires a mutually-exclusive lock if not already locked by someone else.
-    If already locked by the one who attempts to lock, does nothing.
-    Will not succeed unless prepare_for_locking() was called earlier.
-    Returns true if and only if a given owner has the lock after the call.
-    """
-    result = cql_serial("update system.global_locks set owner = {} where key = {} if owner is null and candidate = {}",
-                        owner, lock_name, owner)
-    return result['applied'] or result['owner'] == owner
-
-
-def prepare_for_locking(lock_name: str, owner: UUID):
-    cql_serial("update system.global_locks set candidate = {} where key = {}", owner, lock_name)
-
-
-def interrupt_lock_attempt(lock_name: str):
-    """Invalidates prepare_for_locking().
-    Subsequent try_lock_ring() will fail unless prepare_for_locking() is called again.
-    """
-    cql_serial("update system.global_locks set candidate = null where key = {}", lock_name)
-
-
-def unlock(lock_name: str, owner: UUID):
-    """Unlocks the lock if a given owner still owns it. Otherwise has no effect.
-    """
-    cql_serial("update system.global_locks set owner = null where key = {} if owner = {}", lock_name, owner)
 
 
 #
@@ -414,19 +500,8 @@ def stop_streaming(tx: TransactionId):
     pass
 
 
-def save_intent(tx: TransactionId, coid: CoordinatorId, participants: Set[Host], token_metadata_mutation: Mutation):
-    """Associates given mutation and a set of participants with a given transaction id if coid is still the coordinator.
-     The association is global and access to it is linearizable."""
-    pass
-
-
 def read_participants(tx: TransactionId) -> Set[Host]:
-    """Returns the set of participants associated with the transaction using save_intent()."""
-    pass
-
-
-def read_intent(tx: TransactionId) -> Mutation:
-    """Returns token_metadata mutation associated with the transaction using save_intent()."""
+    """Returns the set of participants associated with the transaction."""
     pass
 
 
@@ -439,7 +514,7 @@ def participants(tx: TransactionId) -> Set[Host]:
 
 
 def set_stage(tx: TransactionId, stage: ReplicationStage, t: Timestamp):
-    replicate_token_metadata(participants(tx), get_stage_set_mutation(stage, t))
+    replicate_token_metadata(get_stage_set_mutation(stage, t))
 
 
 #
@@ -461,7 +536,7 @@ def run_state_machine(txid: TransactionId,
                       coid: CoordinatorId,
                       steps: Mapping[StepName, StepAction],
                       get_current_step: Callable[[TransactionId, CoordinatorId], Tuple[StepName, Timestamp]],
-                      set_current_step: Callable[[TransactionId, CoordinatorId, StepName]]):
+                      set_current_step: Callable[[TransactionId, CoordinatorId, StepName], None]):
     while True:
         step, t = get_current_step(txid, coid)
         new_step = steps[step](txid, coid, t)
@@ -474,19 +549,30 @@ def run_state_machine(txid: TransactionId,
 # Step definitions for topology change transactions
 #
 
+class SetStep(RaftTransaction):
+    def __init__(self, tx: TransactionId, coid: CoordinatorId, step: StepName):
+        self.coid = coid
+        self.step = step
+        self.tx = tx
+
+    def execute(self, t: Timestamp) -> List[RaftCommand]:
+        # coordinator_id comparison is needed so that failover() always preempts the previous coordinator.
+        # Comparing just the previous step is not enough, since the old coordinator could still win the race
+        # and take down the new coordinator.
+        result = cql_local("select coordinator_id from system.topology_changes where id = {}", self.tx)
+        if result['coordinator_id'] != self.coid:
+            raise Exception('Preempted, another coordinator took over')
+        print("[%s]: SET step=%s, tx=%s, coid=%s" % (current_node(), self.step, self.tx, self.coid))
+        return [CqlCommand("update system.topology_changes set step = {} where id = {}", self.step, self.tx)]
+
 
 def set_step(tx: TransactionId, coid: CoordinatorId, step: StepName):
-    # coordinator_id comparison is needed so that failover() always preempts the previous coordinator.
-    # Comparing just the previous step is not enough, since the old coordinator could still win the race
-    # and take down the new coordinator.
-    result = cql_serial("update system.topology_changes set step = {} where id = {} if coordinator_id = {}", step, tx, coid)
-    if not result['applied']:
-        raise Exception('Preempted, another coordinator took over')
-    print("[%s]: SET step=%s, tx=%s, coid=%s" % (current_node(), step, tx, coid))
+    this_node.raft_gr0.execute_linearized(SetStep(tx, coid, step))
 
 
 def read_step(tx: TransactionId, coid: CoordinatorId) -> Tuple[StepName, Timestamp]:
-    result = cql_serial("select coordinator_id, step, timestamp(step) as t from system.topology_changes where id = {}", tx)
+    this_node.raft_gr0.read_barrier()
+    result = cql_local("select coordinator_id, step, timestamp(step) as t from system.topology_changes where id = {}", tx)
     if not result:
         raise Exception('Transaction no longer exists')
     if result['coordinator_id'] != coid:
@@ -495,67 +581,15 @@ def read_step(tx: TransactionId, coid: CoordinatorId) -> Tuple[StepName, Timesta
     return StepName(result['step']), Timestamp(result['t'])
 
 
-def step_lock(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
-    # We need three steps for taking the lock so that locking can be reliably aborted.
-    # Without this two-step algorithm, there can be a race between the old coordinator
-    # executing the 'lock' step and the new coordinator executing the 'abort' step
-    # which can leave the lock (incorrectly) taken after abort.
-    #
-    # We have 2 linearizable registers:
-    #    - step
-    #    - lock, which is a tuple of (owner, candidate)
-    #
-    # The locking process loops over 3 steps:
-    #   1) lock.candidate = id
-    #   2) if step != 'lock': break
-    #   3) lock.owner = id if lock.owner == null and lock.candidate = id
-    #
-    # The aborting process executes 3 steps:
-    #   1a) step = 'abort'
-    #   2a) lock.candidate = null
-    #   3a) lock.owner = null if lock.owner == id
-    #
-    # We want to prove that when the abort sequence is done, the lock will not be held by this transaction.
-    # After 2a is executed, the locking process will not acquire the lock unless it already managed to do so.
-    # That's because:
-    #   - if the locking process is before step 2 or after step 3, it will exit in step 2, because of 1a
-    #   - if it's before step 3, the lock will fail because lock.candidate is nulled.
-    #
-    # If the locking process acquired the lock before 2a, 3a will release it.
-    #
-    while True:
-        prepare_for_locking('ring', tx)
-        if not read_step(tx, coid)[0] == 'lock':
-            raise Exception('Preempted')
-        if try_lock('ring', tx):
-            break
-        time.sleep(10)
-    return 'make_ring'
 
-
-def set_result(tx: TransactionId, coid: CoordinatorId, failed: bool, reason: str):
-    cql_serial("update system.topology_changes set failed = {}, result = {} where id = {} if coordiantor_id = {}",
-               failed, reason, tx, coid)
-
-
-def step_make_ring(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
-    try:
-        new_ring = make_new_ring(tx)
-    except Exception as e:
-        # Fail the transaction if make_new_ring() fails.
-        set_result(tx, coid, True, str(e))
-        return 'unlock'
-    save_intent(tx, coid, new_ring.members(), as_mutation(new_ring, t))
+def step_update_raft_group(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
+    for n in local_ring().joining_members():
+        this_node.raft_gr0.add_node(n)
     return 'advertise_ring'
 
 
 def step_advertise_ring(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
-    replicate_token_metadata(participants(tx), read_intent(tx))
-    return 'before_streaming'
-
-
-def step_before_streaming(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
-    set_stage(tx, ReplicationStage.write_both_read_old, t)
+    this_node.raft_gr0.global_read_barrier()
     return 'streaming'
 
 
@@ -580,21 +614,31 @@ def step_streaming(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
 
 
 def step_after_streaming(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
+    # XXX: We don't have to check if coid is still active because set_stage() uses t
+    # in its commands and will not have any effect if we were preempted and another
+    # coordinator took over either by replaying the step or aborting it.
     set_stage(tx, ReplicationStage.write_both_read_new, t)
     return 'use_only_new'
 
 
 def step_use_only_new(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
     set_stage(tx, ReplicationStage.use_only_new, t)
-    return 'cleanup'
-
-
-def step_cleanup(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
-    set_stage(tx, ReplicationStage.cleanup, t)
     return 'mark_dead'
 
 
-class MarkDead(RpcMessage):
+class RunCleanup(RpcMessage):
+    def execute(self):
+        """Runs nodetool cleanup on current node"""
+        pass
+
+
+def step_cleanup(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
+    for n in participants(tx):
+        send(n, RunCleanup())
+    return 'only_new_ring'
+
+
+class MarkDead(RaftCommand):
     def __init__(self, nodes):
         self.nodes = nodes
 
@@ -603,29 +647,32 @@ class MarkDead(RpcMessage):
 
 
 def step_mark_dead(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
+    for n in local_ring().leaving_members():
+        this_node.raft_gr0.remove_node(n)
+
     # We must not let decommissioned nodes issue calls to the cluster because
     # they will not receive topology updates after they are removed from
     # membership and otherwise could corrupt global registers by using stale topology.
     # This must be done before next changes are made, so before unlocking the ring.
-    # FIXME: We could combine this with the next step by having get_new_ring() encode this in TokenMetadata
-    nodes = local_ring().leaving_members()
-    add_to_dead(nodes)
-    for node in participants(tx):
-        send(node, MarkDead(nodes))
-    return 'only_new_ring'
+
+    this_node.raft_gr0.execute_linearized(RaftTransactionFromLambda(lambda:
+        [MarkDead(local_ring().leaving_members())]))
+    this_node.raft_gr0.global_read_barrier()
+    return 'cleanup'
 
 
 def step_only_new_ring(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
-    replicate_token_metadata(participants(tx), as_mutation(get_new_ring(local_ring()), t))
+    replicate_token_metadata(as_mutation(get_new_ring(local_ring()), t))
     return 'unlock'
 
 
 def step_unlock(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
-    unlock('ring', tx)
+    this_node.raft_gr0.add(UnlockRingTransaction())
     return 'done'
 
 
 def step_done(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
+    # Delete the transaction here, or keep the record for audit
     return None
 
 
@@ -634,41 +681,30 @@ def step_done(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
 #
 
 
-def step_abort_lock(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
-    interrupt_lock_attempt('ring')
-    return 'unlock'
-
-
-def step_1a(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
+def abort_after_streaming(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
     set_stage(tx, ReplicationStage.write_both_read_old, t)
-    return '2a'
+    return 'abort_streaming'
 
 
-def step_2a(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
+def abort_streaming(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
     stop_streaming(tx)
-    return '3a'
+    return 'abort_advertise_ring'
 
 
-def step_3a(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
-    set_stage(tx, ReplicationStage.use_only_old, t)
-    return '4a'
+def abort_advertise_ring(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
+    replicate_token_metadata(as_mutation(get_old_ring(local_ring()), t))
+    return 'abort_update_raft_group'
 
 
-def step_4a(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
-    set_stage(tx, ReplicationStage.cleanup_on_abort, t)
-    return '5a'
-
-
-def step_5a(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
-    replicate_token_metadata(participants(tx), as_mutation(get_old_ring(local_ring()), t))
+def abort_update_raft_group(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
+    for n in local_ring().joining_members():
+        this_node.raft_gr0.remove_node(n)
     return 'unlock'
 
 
 topology_change_state_machine = {
-    'lock': step_lock,
-    'make_ring': step_make_ring,
+    'update_raft_group': step_update_raft_group,
     'advertise_ring': step_advertise_ring,
-    'before_streaming': step_before_streaming,
     'streaming': step_streaming,
     'after_streaming': step_after_streaming,
     'use_only_new': step_use_only_new,
@@ -676,13 +712,13 @@ topology_change_state_machine = {
     'mark_dead': step_mark_dead,
     'only_new_ring': step_only_new_ring,
     'unlock': step_unlock,
-    'abort_lock': step_abort_lock,
     'done': step_done,
-    '1a': step_1a,
-    '2a': step_2a,
-    '3a': step_3a,
-    '4a': step_4a,
-    '5a': step_5a,
+
+    # Abort steps
+    'abort_after_streaming': abort_after_streaming,
+    'abort_streaming': abort_streaming,
+    'abort_advertise_ring': abort_advertise_ring,
+    'abort_update_raft_group': abort_update_raft_group,
 }
 
 
@@ -700,8 +736,10 @@ def failover(tx: TransactionId) -> CoordinatorId:
     coordinator_id = new_uuid()
     print("[%s]: Failover: tx=%s, coid=%s" % (current_node(), tx, coordinator_id))
 
-    cql_serial('update system.topology_changes set coordinator_id = {}, coordinator_host = {} where id = {}',
-               coordinator_id, current_node(), tx)
+    this_node.raft_gr0.execute_linearized(RaftTransactionFromLambda(lambda:
+        [CqlCommand('update system.topology_changes set coordinator_id = {}, coordinator_host = {} where id = {}',
+                    coordinator_id, current_node(), tx)]))
+
     # TODO: Interrupt existing coordinator (old coordinator_host) using RPC in the background as an optimization.
     return coordinator_id
 
@@ -721,12 +759,9 @@ def abort_topology_change(tx: TransactionId):
     Returns when topology change is undone."""
 
     abort_steps = {
-        'after_streaming': '1a',
-        'streaming': '2a',
-        'before_streaming': '4a',
-        'advertise_ring': '5a',
-        'make_ring': 'unlock',
-        'lock': 'abort_lock'
+        'after_streaming': 'abort_after_streaming',
+        'streaming': 'abort_streaming',
+        'advertise_ring': 'abort_advertise_ring',
     }
 
     coid = failover(tx)
@@ -741,30 +776,52 @@ def abort_topology_change(tx: TransactionId):
 # Nodetool actions.
 #
 
+class LockRingTransaction(RaftTransaction):
+    """
+    There is a single global lock for the ring.
+    This transaction takes this lock or throws if already taken.
+    """
+    def __init__(self, owner: str):
+        self.owner = owner
 
-def add_nodes(nodes: Set[Host]):
-    assert not current_node() in nodes
-    tx = create_topology_change(TopologyChangeAction.Add, list(nodes))
-    run_topology_change(tx)
-
-
-def decommission_nodes(nodes: Set[Host]):
-    tx = create_topology_change(TopologyChangeAction.Decommission, list(nodes))
-    run_topology_change(tx)
-
-
-class Replace(RpcMessage):
-    def __init__(self, old: Host, new: Host):
-        self.old = old
-        self.new = new
-
-    def execute(self):
-        tx = create_topology_change(TopologyChangeAction.Replace, [self.old, self.new])
-        run_topology_change(tx)
+    def execute(self, t: Timestamp) -> List[RaftCommand]:
+        lock_name = "ring"
+        result = cql_local("select owner from system.global_locks where key = {}", lock_name)
+        if "owner" in result["owner"] and result["owner"]:
+            raise Exception("Ring already locked by transaction %s" % (result["owner"]))
+        return [CqlCommand("update system.global_locks set owner = {} where key = {}", self.owner, lock_name)]
 
 
-def replace_node(old: Host):
-    send(seed(), Replace(old, current_node()))
+class UnlockRingTransaction(RaftTransaction):
+    def execute(self, t: Timestamp) -> List[RaftCommand]:
+        lock_name = "ring"
+        return [CqlCommand("update system.global_locks set owner = null where key = {}", lock_name)]
+
+
+class BootstrapTransaction(RaftTransaction):
+    """
+    Creates a new topology change transaction which adds a single node to the cluster
+    """
+    def __init__(self, tx: TransactionId, n: Host):
+        self.tx = tx
+        self.n = n
+
+    def execute(self, t: Timestamp) -> List[RaftCommand]:
+        lock = LockRingTransaction(str(self.tx))
+        lock_cmd = lock.execute(t)
+
+        if self.n in local_ring().members():
+            raise Exception("Node is already a member")
+
+        tokens = choose_new_tokens(local_ring())
+        ring_diff = TokenMetadata()
+        ring_diff.set_tokens(self.n, tokens, TokenStatus.PENDING)
+        ring_diff.set_stage(ReplicationStage.write_both_read_old)
+
+        return [
+            MutationCommand(as_mutation(ring_diff, t)),
+            make_create_topology_change_command(self.tx, TopologyChangeAction.Add, [self.n])
+        ] + lock_cmd
 
 
 class Bootstrap(RpcMessage):
@@ -773,7 +830,8 @@ class Bootstrap(RpcMessage):
 
     def execute(self):
         print("[%s]: Bootstrap %s" % (current_node(), self.node))
-        tx = create_topology_change(TopologyChangeAction.Add, [self.node])
+        tx = new_uuid()
+        this_node.raft_gr0.execute_linearized(BootstrapTransaction(tx, self.node))
         run_topology_change(tx)
 
 
