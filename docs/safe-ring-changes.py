@@ -37,16 +37,20 @@ create table system.token_metadata (
 create table system.topology_changes (
    id UUID,
    
-   // coordinator_id is set when there is an active coordinator for the topology change
-   // which drives it forward.
-   // We need to track it to implement failover. Old coordinators will stop when
-   // they observe they are no longer set as active here.
-   // Whenever the state of transaction is changed by the coordinator it should
-   // atomically check if it's still active by consulting this column.
+   /* 
+    coordinator_id is set when there is an active coordinator for the topology change
+    which drives it forward.
+    We need to track it to implement failover. Old coordinators will stop when
+    they observe they are no longer set as active here.
+    Whenever the state of transaction is changed by the coordinator it should
+    atomically check if it's still active by consulting this column.
+   */
    coordinator_id UUID,
 
-   // Used for routing messages to the active coordinator (e.g. cancel it).
-   // Set when coordinator_id is set.
+   /*
+    Used for routing messages to the active coordinator (e.g. cancel it).
+    Set when coordinator_id is set.
+   */
    coordinator_host UUID,
 
    state int,
