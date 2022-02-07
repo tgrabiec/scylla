@@ -434,6 +434,7 @@ class TopologyChangeAction(Enum):
     Add = 1
     Decommission = 2
     Replace = 3
+    Remove = 4
 
 
 class CqlCommand(RaftCommand):
@@ -466,13 +467,6 @@ class TokenMetadataUpdateCommand(MutationCommand):
     def execute(self):
         super().execute()
         self.wait_for_sync()
-
-
-def make_create_topology_change_command(tx: TransactionId, action: TopologyChangeAction) -> RaftCommand:
-    """Returns a command which creates a new topology change transaction record in system.topology_changes.
-    """
-    return CqlCommand("insert into system.topology_changes (id, state, action, failed)"
-                      " values ({}, 'update_raft_group', {}, [{}], false)", tx, action)
 
 
 def get_topology_change_action(tx: TransactionId) -> TopologyChangeAction:
@@ -594,9 +588,21 @@ def read_step(tx: TransactionId, coid: CoordinatorId) -> Tuple[StepName, Timesta
 
 
 def step_update_raft_group(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
+    if get_topology_change_action(tx) == TopologyChangeAction.Remove:
+        # Mark as dead early so that global_read_barrier() doesn't wait for removed node
+        step_mark_dead(tx, coid, t)
+
     for n in local_ring().joining_members():
         this_node.raft_gr0.add_node(n)
+
     return 'advertise_ring'
+
+
+def make_create_topology_change_command(tx: TransactionId, action: TopologyChangeAction, initial_step: StepName) -> RaftCommand:
+    """Returns a command which creates a new topology change transaction record in system.topology_changes.
+    """
+    return CqlCommand("insert into system.topology_changes (id, state, action, failed)"
+                      " values ({}, {}, {}, [{}], false)", tx, initial_step, action)
 
 
 def step_advertise_ring(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
@@ -713,6 +719,7 @@ def abort_update_raft_group(tx: TransactionId, coid: CoordinatorId, t: Timestamp
     return 'unlock'
 
 
+# Each step should be idempotent and have no effect on end result in case of preemption and failover.
 topology_change_state_machine = {
     'update_raft_group': step_update_raft_group,
     'advertise_ring': step_advertise_ring,
@@ -815,32 +822,60 @@ class UnlockRingTransaction(RaftTransaction):
         return [CqlCommand("update system.global_locks set owner = null where key = {}", lock_name)]
 
 
-class BootstrapTransaction(RaftTransaction):
-    """
-    Creates a new topology change transaction which adds a single node to the cluster
-    """
-    def __init__(self, tx: TransactionId, n: Host):
+class RingChangeTransaction(RaftTransaction):
+    def __init__(self, tx: TransactionId, action: TopologyChangeAction):
         self.tx = tx
-        self.n = n
+        self.action = action
+
+    def make_ring_diff(self) -> TokenMetadata:
+        return TokenMetadata()
 
     def execute(self, t: Timestamp) -> List[RaftCommand]:
         lock = LockRingTransaction(str(self.tx))
         lock_cmd = lock.execute(t)
 
-        if self.n in local_ring().members():
-            raise Exception("Node is already a member")
-
-        tokens = choose_new_tokens(local_ring())
-        ring_diff = TokenMetadata()
-        ring_diff.set_tokens(self.n, tokens, TokenStatus.PENDING)
+        ring_diff = self.make_ring_diff()
 
         # use_only_old because the new nodes are not added to raft_gr0 yet.
         ring_diff.set_stage(ReplicationStage.use_only_old)
 
         return [
-            TokenMetadataUpdateCommand(as_mutation(ring_diff, t)),
-            make_create_topology_change_command(self.tx, TopologyChangeAction.Add)
-        ] + lock_cmd
+                   TokenMetadataUpdateCommand(as_mutation(ring_diff, t)),
+                   make_create_topology_change_command(self.tx, self.action, 'update_raft_group')
+               ] + lock_cmd
+
+
+class StartBootstrapTransaction(RingChangeTransaction):
+    """
+    Creates a new topology change transaction which adds a single node to the cluster
+    """
+    def __init__(self, tx: TransactionId, n: Host):
+        super().__init__(tx, TopologyChangeAction.Add)
+        self.n = n
+
+    def make_ring_diff(self) -> TokenMetadata:
+        if self.n in local_ring().members():
+            raise Exception("Node is already a member")
+        tokens = choose_new_tokens(local_ring())
+        ring_diff = TokenMetadata()
+        ring_diff.set_tokens(self.n, tokens, TokenStatus.PENDING)
+        return ring_diff
+
+
+class StartRemoveNodeTransaction(RingChangeTransaction):
+    """
+    Creates a new topology change transaction which removes a single node from the cluster
+    """
+    def __init__(self, tx: TransactionId, n: Host):
+        super().__init__(tx, TopologyChangeAction.Remove)
+        self.n = n
+
+    def make_ring_diff(self) -> TokenMetadata:
+        if self.n not in local_ring().members():
+            raise Exception("Node is not a member")
+        ring_diff = TokenMetadata()
+        ring_diff.set_tokens(self.n, local_ring().get_tokens(self.n), TokenStatus.LEAVING)
+        return ring_diff
 
 
 class Bootstrap(RpcMessage):
@@ -850,13 +885,19 @@ class Bootstrap(RpcMessage):
     def execute(self):
         print("[%s]: Bootstrap %s" % (current_node(), self.node))
         tx = new_uuid()
-        this_node.raft_gr0.execute_linearized(BootstrapTransaction(tx, self.node))
+        this_node.raft_gr0.execute_linearized(StartBootstrapTransaction(tx, self.node))
         run_topology_change(tx)
 
 
 def bootstrap():
     """Executed by the bootstrapping node, when bootstrapped the old auto-bootstrap way"""
     send(seed(), Bootstrap(current_node()))
+
+
+def remove_node(node: Host):
+    tx = new_uuid()
+    this_node.raft_gr0.execute_linearized(StartRemoveNodeTransaction(tx, node))
+    run_topology_change(tx)
 
 
 def resume(tx: TransactionId):
@@ -878,3 +919,5 @@ if __name__ == "__main__":
         set_seed(node1),
         bootstrap()
     ))
+
+    remove_node(node3)
