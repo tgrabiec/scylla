@@ -595,7 +595,6 @@ def read_step(tx: TransactionId, coid: CoordinatorId) -> Tuple[StepName, Timesta
     return StepName(result['step']), Timestamp(result['t'])
 
 
-
 def step_update_raft_group(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
     for n in local_ring().joining_members():
         this_node.raft_gr0.add_node(n)
@@ -603,7 +602,7 @@ def step_update_raft_group(tx: TransactionId, coid: CoordinatorId, t: Timestamp)
 
 
 def step_advertise_ring(tx: TransactionId, coid: CoordinatorId, t: Timestamp):
-    this_node.raft_gr0.global_read_barrier()
+    set_stage(tx, ReplicationStage.write_both_read_old, t)
     return 'streaming'
 
 
@@ -830,7 +829,9 @@ class BootstrapTransaction(RaftTransaction):
         tokens = choose_new_tokens(local_ring())
         ring_diff = TokenMetadata()
         ring_diff.set_tokens(self.n, tokens, TokenStatus.PENDING)
-        ring_diff.set_stage(ReplicationStage.write_both_read_old)
+
+        # use_only_old because the new nodes are not added to raft_gr0 yet.
+        ring_diff.set_stage(ReplicationStage.use_only_old)
 
         return [
             TokenMetadataUpdateCommand(as_mutation(ring_diff, t)),
