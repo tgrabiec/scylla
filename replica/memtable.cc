@@ -545,7 +545,7 @@ public:
         : _mt(mt)
 	{}
     ~flush_memory_accounter() {
-        assert(_mt._flushed_memory <= _mt.occupancy().used_space());
+        assert(_mt._flushed_memory <= _mt.occupancy().total_space());
     }
     uint64_t compute_size(memtable_entry& e, partition_snapshot& snp) {
         return e.size_in_allocator_without_rows(_mt.allocator())
