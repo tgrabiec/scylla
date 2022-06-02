@@ -979,8 +979,7 @@ static void get_compacted_row_slice(const schema& s,
     }
 }
 
-bool has_any_live_data(const schema& s, column_kind kind, const row& cells, tombstone tomb = tombstone(),
-                       gc_clock::time_point now = gc_clock::time_point::min()) {
+bool has_any_live_data(const schema& s, column_kind kind, const row& cells, tombstone tomb, gc_clock::time_point now) {
     bool any_live = false;
     cells.for_each_cell_until([&] (column_id id, const atomic_cell_or_collection& cell_or_collection) {
         const column_definition& def = s.column_at(kind, id);
