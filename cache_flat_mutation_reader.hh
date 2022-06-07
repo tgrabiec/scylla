@@ -56,42 +56,6 @@ class cache_flat_mutation_reader final : public flat_mutation_reader_v2::impl {
         cache = 0,
         underlying = 1,
     };
-    // Merges range tombstone change streams coming from underlying and the cache.
-    // Ensures no range tombstone change fragment is emitted when there is no
-    // actual change in the effective tombstone.
-    class range_tombstone_change_merger {
-        const schema& _schema;
-        position_in_partition _pos;
-        tombstone _current_tombstone;
-        std::array<tombstone, 2> _tombstones;
-    private:
-        std::optional<range_tombstone_change> do_flush(position_in_partition pos, bool end_of_range) {
-            std::optional<range_tombstone_change> ret;
-            position_in_partition::tri_compare cmp(_schema);
-            const auto res = cmp(_pos, pos);
-            const auto should_flush = end_of_range ? res <= 0 : res < 0;
-            if (should_flush) {
-                auto merged_tomb = std::max(_tombstones.front(), _tombstones.back());
-                if (merged_tomb != _current_tombstone) {
-                    _current_tombstone = merged_tomb;
-                    ret.emplace(_pos, _current_tombstone);
-                }
-                _pos = std::move(pos);
-            }
-            return ret;
-        }
-    public:
-        range_tombstone_change_merger(const schema& s) : _schema(s), _pos(position_in_partition::before_all_clustered_rows()), _tombstones{}
-        { }
-        std::optional<range_tombstone_change> apply(source src, range_tombstone_change&& rtc) {
-            auto ret = do_flush(rtc.position(), false);
-            _tombstones[static_cast<size_t>(src)] = rtc.tombstone();
-            return ret;
-        }
-        std::optional<range_tombstone_change> flush(position_in_partition_view pos, bool end_of_range) {
-            return do_flush(position_in_partition(pos), end_of_range);
-        }
-    };
     partition_snapshot_ptr _snp;
 
     query::clustering_key_filter_ranges _ck_ranges; // Query schema domain, reversed reads use native order
@@ -122,22 +86,12 @@ class cache_flat_mutation_reader final : public flat_mutation_reader_v2::impl {
     read_context& _read_context;
     partition_snapshot_row_cursor _next_row;
 
-    range_tombstone_change_generator _rt_gen; // cache -> reader
-    range_tombstone_assembler _rt_assembler; // underlying -> cache
-    range_tombstone_change_merger _rt_merger; // {cache, underlying} -> reader
-
-    // When the read moves to the underlying, the read range will be
-    // (_lower_bound, x], where x is either _next_row.position() or _upper_bound.
-    // In the former case (x is _next_row.position()), underlying can emit
-    // a range tombstone change for after_key(x), which is outside the range.
-    // We can't push this fragment into the buffer straight away, the cache may
-    // have fragments with smaller position. So we save it here and flush it when
-    // a fragment with a larger position is seen.
-    std::optional<mutation_fragment_v2> _queued_underlying_fragment;
+    tombstone _current_tombstone; // underlying -> cache
 
     state _state = state::before_static_row;
 
     bool _next_row_in_range = false;
+    bool _has_rt = false;
 
     // True iff current population interval, since the previous clustering row, starts before all clustered rows.
     // We cannot just look at _lower_bound, because emission of range tombstones changes _lower_bound and
@@ -145,11 +99,6 @@ class cache_flat_mutation_reader final : public flat_mutation_reader_v2::impl {
     // us from marking the interval as continuous.
     // Valid when _state == reading_from_underlying.
     bool _population_range_starts_before_all_rows;
-
-    // Whether _lower_bound was changed within current fill_buffer().
-    // If it did not then we cannot break out of it (e.g. on preemption) because
-    // forward progress is not guaranteed in case iterators are getting constantly invalidated.
-    bool _lower_bound_changed = false;
 
     // Points to the underlying reader conforming to _schema,
     // either to *_underlying_holder or _read_context.underlying().underlying().
@@ -165,12 +114,9 @@ class cache_flat_mutation_reader final : public flat_mutation_reader_v2::impl {
     void move_to_range(query::clustering_row_ranges::const_iterator);
     void move_to_next_entry();
     void maybe_drop_last_entry() noexcept;
-    void flush_tombstones(position_in_partition_view, bool end_of_range = false);
     void add_to_buffer(const partition_snapshot_row_cursor&);
     void add_clustering_row_to_buffer(mutation_fragment_v2&&);
     void add_to_buffer(range_tombstone_change&&, source);
-    void do_add_to_buffer(range_tombstone_change&&);
-    void add_range_tombstone_to_buffer(range_tombstone&&);
     void add_to_buffer(mutation_fragment_v2&&);
     future<> read_from_underlying();
     void start_reading_from_underlying();
@@ -190,7 +136,7 @@ class cache_flat_mutation_reader final : public flat_mutation_reader_v2::impl {
     bool ensure_population_lower_bound();
     void maybe_add_to_cache(const mutation_fragment_v2& mf);
     void maybe_add_to_cache(const clustering_row& cr);
-    void maybe_add_to_cache(const range_tombstone_change& rtc);
+    bool maybe_add_to_cache(const range_tombstone_change& rtc);
     void maybe_add_to_cache(const static_row& sr);
     void maybe_set_static_row_continuous();
     void finish_reader() {
@@ -245,8 +191,6 @@ public:
         , _read_context_holder()
         , _read_context(ctx)    // ctx is owned by the caller, who's responsible for closing it.
         , _next_row(*_schema, *_snp, false, _read_context.is_reversed())
-        , _rt_gen(*_schema)
-        , _rt_merger(*_schema)
     {
         clogger.trace("csm {}: table={}.{}, reversed={}, snap={}", fmt::ptr(this), _schema->ks_name(), _schema->cf_name(), _read_context.is_reversed(),
                       fmt::ptr(&*_snp));
@@ -375,12 +319,29 @@ future<> cache_flat_mutation_reader::do_fill_buffer() {
         _state = state::reading_from_underlying;
         _population_range_starts_before_all_rows = _lower_bound.is_before_all_clustered_rows(*_schema) && !_read_context.is_reversed();
         if (!_read_context.partition_exists()) {
+            if (_current_tombstone) {
+                clogger.trace("csm {}: move_to_underlying: emit rtc({}, null)", fmt::ptr(this), _lower_bound);
+                push_mutation_fragment(mutation_fragment_v2(*_schema, _permit, range_tombstone_change(_lower_bound, {})));
+                _current_tombstone = {};
+            }
             return read_from_underlying();
         }
         _underlying_upper_bound = _next_row_in_range ? position_in_partition(_next_row.position())
                                       : position_in_partition(_upper_bound);
         return _underlying->fast_forward_to(position_range{_lower_bound, *_underlying_upper_bound}).then([this] {
-            return read_from_underlying();
+            if (!_current_tombstone) {
+                return read_from_underlying();
+            }
+            return _underlying->peek().then([this] (mutation_fragment_v2* mf) {
+                position_in_partition::equal_compare eq(*_schema);
+                if (!mf || !mf->is_range_tombstone_change()
+                        || !eq(mf->as_range_tombstone_change().position(), _lower_bound)) {
+                    clogger.trace("csm {}: move_to_underlying: emit rtc({}, null)", fmt::ptr(this), _lower_bound);
+                    push_mutation_fragment(mutation_fragment_v2(*_schema, _permit, range_tombstone_change(_lower_bound, {})));
+                    _current_tombstone = {};
+                }
+                return read_from_underlying();
+            });
         });
     }
     if (_state == state::reading_from_underlying) {
@@ -404,13 +365,9 @@ future<> cache_flat_mutation_reader::do_fill_buffer() {
         }
         _next_row.maybe_refresh();
         clogger.trace("csm {}: next={}", fmt::ptr(this), _next_row);
-        _lower_bound_changed = false;
         while (_state == state::reading_from_cache) {
             copy_from_cache_to_buffer();
-            // We need to check _lower_bound_changed even if is_buffer_full() because
-            // we may have emitted only a range tombstone which overlapped with _lower_bound
-            // and thus didn't cause _lower_bound to change.
-            if ((need_preempt() || is_buffer_full()) && _lower_bound_changed) {
+            if ((need_preempt() || is_buffer_full())) {
                 break;
             }
         }
@@ -424,10 +381,10 @@ future<> cache_flat_mutation_reader::read_from_underlying() {
         [this] { return _state != state::reading_from_underlying || is_buffer_full(); },
         [this] (mutation_fragment_v2 mf) {
             _read_context.cache().on_row_miss();
-            maybe_add_to_cache(mf);
             add_to_buffer(std::move(mf));
         },
         [this] {
+            assert(!_current_tombstone);
             _underlying_upper_bound.reset();
             _state = state::reading_from_cache;
             _lsa_manager.run_in_update_section([this] {
@@ -455,6 +412,11 @@ future<> cache_flat_mutation_reader::read_from_underlying() {
                         rows_entry::tri_compare cmp(table_s);
                         auto& rows = _snp->version()->partition().mutable_clustered_rows();
                         if (query::is_single_row(*_schema, *_ck_ranges_curr)) {
+                            // If there are range tombstones which apply to the row then
+                            // we cannot insert an empty entry here because if those range
+                            // tombstones got evicted by now, we will insert an entry
+                            // with missing range tombstone information.
+                          if (!_has_rt) {
                             with_allocator(_snp->region().allocator(), [&] {
                                 auto e = alloc_strategy_unique_ptr<rows_entry>(
                                     current_allocator().construct<rows_entry>(_ck_ranges_curr->start()->value()));
@@ -467,9 +429,10 @@ future<> cache_flat_mutation_reader::read_from_underlying() {
                                     // Also works in reverse read mode.
                                     // It preserves the continuity of the range the entry falls into.
                                     it->set_continuous(next->continuous());
-                                    clogger.trace("csm {}: inserted empty row at {}, cont={}", fmt::ptr(this), it->position(), it->continuous());
+                                    clogger.trace("csm {}: inserted empty row at {}, cont={}, rt={}", fmt::ptr(this), it->position(), it->continuous(), it->range_tombstone());
                                 }
                             });
+                          }
                         } else if (ensure_population_lower_bound()) {
                             with_allocator(_snp->region().allocator(), [&] {
                                 auto e = alloc_strategy_unique_ptr<rows_entry>(
@@ -481,10 +444,10 @@ future<> cache_flat_mutation_reader::read_from_underlying() {
                                     _snp->tracker()->insert(*insert_result.first);
                                 }
                                 if (_read_context.is_reversed()) [[unlikely]] {
-                                    clogger.trace("csm {}: set_continuous({})", fmt::ptr(this), _last_row.position());
+                                    clogger.trace("csm {}: set_continuous({}), rt={}", fmt::ptr(this), _last_row.position(), _last_row->range_tombstone());
                                     _last_row->set_continuous(true);
                                 } else {
-                                    clogger.trace("csm {}: set_continuous({})", fmt::ptr(this), insert_result.first->position());
+                                    clogger.trace("csm {}: set_continuous({}), rt={}", fmt::ptr(this), insert_result.first->position(), insert_result.first->range_tombstone());
                                     insert_result.first->set_continuous(true);
                                 }
                                 maybe_drop_last_entry();
@@ -516,52 +479,51 @@ bool cache_flat_mutation_reader::ensure_population_lower_bound() {
     // Continuity flag we will later set for the upper bound extends to the previous row in the same version,
     // so we need to ensure we have an entry in the latest version.
     if (!_last_row.is_in_latest_version()) {
-        with_allocator(_snp->region().allocator(), [&] {
-            auto& rows = _snp->version()->partition().mutable_clustered_rows();
-            rows_entry::tri_compare cmp(table_schema());
-            // FIXME: Avoid the copy by inserting an incomplete clustering row
-            auto e = alloc_strategy_unique_ptr<rows_entry>(
-                current_allocator().construct<rows_entry>(table_schema(), *_last_row));
-            e->set_continuous(false);
-            auto insert_result = rows.insert_before_hint(rows.end(), std::move(e), cmp);
-            if (insert_result.second) {
-                auto it = insert_result.first;
-                clogger.trace("csm {}: inserted lower bound dummy at {}", fmt::ptr(this), it->position());
-                _snp->tracker()->insert(*it);
-            }
-            _last_row.set_latest(insert_result.first);
+        rows_entry::tri_compare cmp(*_schema);
+        partition_snapshot_row_cursor cur(*_schema, *_snp, false, _read_context.is_reversed());
+
+        if (!cur.advance_to(_last_row.position())) {
+            return false;
+        }
+
+        if (cmp(cur.position(), _last_row.position()) != 0) {
+            return false;
+        }
+
+        auto res = with_allocator(_snp->region().allocator(), [&] {
+            return cur.ensure_entry_in_latest();
         });
+
+        _last_row.set_latest(res.it);
+        if (res.inserted) {
+            clogger.trace("csm {}: inserted lower bound dummy at {}", fmt::ptr(this), _last_row.position());
+        }
     }
+
     return true;
 }
 
 inline
 void cache_flat_mutation_reader::maybe_update_continuity() {
-    if (can_populate() && ensure_population_lower_bound()) {
+    position_in_partition::equal_compare eq(*_schema);
+    if (can_populate()
+            && ensure_population_lower_bound()
+            && !eq(_last_row.position(), _next_row.position())) {
         with_allocator(_snp->region().allocator(), [&] {
             rows_entry& e = _next_row.ensure_entry_in_latest().row;
             if (_read_context.is_reversed()) [[unlikely]] {
-                clogger.trace("csm {}: set_continuous({})", fmt::ptr(this), _last_row.position());
+                clogger.trace("csm {}: set_continuous({}), rt={}", fmt::ptr(this), _last_row.position(), _current_tombstone);
                 _last_row->set_continuous(true);
+                _last_row->set_range_tombstone(_current_tombstone);
             } else {
-                clogger.trace("csm {}: set_continuous({})", fmt::ptr(this), e.position());
+                clogger.trace("csm {}: set_continuous({}), rt={}", fmt::ptr(this), e.position(), _current_tombstone);
                 e.set_continuous(true);
+                e.set_range_tombstone(_current_tombstone);
             }
             maybe_drop_last_entry();
         });
     } else {
         _read_context.cache().on_mispopulate();
-    }
-}
-
-inline
-void cache_flat_mutation_reader::maybe_add_to_cache(const mutation_fragment_v2& mf) {
-    if (mf.is_range_tombstone_change()) {
-        maybe_add_to_cache(mf.as_range_tombstone_change());
-    } else {
-        assert(mf.is_clustering_row());
-        const clustering_row& cr = mf.as_clustering_row();
-        maybe_add_to_cache(cr);
     }
 }
 
@@ -573,16 +535,9 @@ void cache_flat_mutation_reader::maybe_add_to_cache(const clustering_row& cr) {
         _read_context.cache().on_mispopulate();
         return;
     }
-    auto rt_opt = _rt_assembler.flush(*_schema, position_in_partition::after_key(cr.key()));
     clogger.trace("csm {}: populate({})", fmt::ptr(this), clustering_row::printer(*_schema, cr));
-    _lsa_manager.run_in_update_section_with_allocator([this, &cr, &rt_opt] {
-        mutation_partition& mp = _snp->version()->partition();
-
-        if (rt_opt) {
-            clogger.trace("csm {}: populate flushed rt({})", fmt::ptr(this), *rt_opt);
-            mp.mutable_row_tombstones().apply_monotonically(table_schema(), to_table_domain(range_tombstone(*rt_opt)));
-        }
-
+    _lsa_manager.run_in_update_section_with_allocator([this, &cr] {
+        mutation_partition_v2& mp = _snp->version()->partition();
         rows_entry::tri_compare cmp(table_schema());
 
         if (_read_context.digest_requested()) {
@@ -604,9 +559,69 @@ void cache_flat_mutation_reader::maybe_add_to_cache(const clustering_row& cr) {
             if (_read_context.is_reversed()) [[unlikely]] {
                 clogger.trace("csm {}: set_continuous({})", fmt::ptr(this), _last_row.position());
                 _last_row->set_continuous(true);
+                _last_row->set_range_tombstone(_current_tombstone);
             } else {
                 clogger.trace("csm {}: set_continuous({})", fmt::ptr(this), e.position());
                 e.set_continuous(true);
+                e.set_range_tombstone(_current_tombstone);
+            }
+        } else {
+            e.row().apply(_current_tombstone);
+            _read_context.cache().on_mispopulate();
+        }
+        with_allocator(standard_allocator(), [&] {
+            _last_row = partition_snapshot_row_weakref(*_snp, it, true);
+        });
+        _population_range_starts_before_all_rows = false;
+    });
+}
+
+inline
+bool cache_flat_mutation_reader::maybe_add_to_cache(const range_tombstone_change& rtc) {
+    clogger.trace("csm {}: maybe_add_to_cache({})", fmt::ptr(this), rtc);
+
+    auto prev = std::exchange(_current_tombstone, rtc.tombstone());
+    if (_current_tombstone == prev) {
+        return false;
+    }
+
+    if (!can_populate()) {
+        // _current_tombstone is now invalid and remains so for this reader. No need to change it.
+        _last_row = nullptr;
+        _population_range_starts_before_all_rows = false;
+        _read_context.cache().on_mispopulate();
+        return true;
+    }
+
+    _lsa_manager.run_in_update_section_with_allocator([&] {
+        mutation_partition_v2& mp = _snp->version()->partition();
+        rows_entry::tri_compare cmp(table_schema());
+
+        auto new_entry = alloc_strategy_unique_ptr<rows_entry>(
+                current_allocator().construct<rows_entry>(table_schema(), rtc.position(), is_dummy::yes, is_continuous::no));
+        auto it = _next_row.iterators_valid() ? _next_row.get_iterator_in_latest_version()
+                                              : mp.clustered_rows().lower_bound(rtc.position(), cmp);
+        auto insert_result = mp.mutable_clustered_rows().insert_before_hint(it, std::move(new_entry), cmp);
+        it = insert_result.first;
+        if (insert_result.second) {
+            _snp->tracker()->insert(*it);
+        }
+
+        rows_entry& e = *it;
+        if (ensure_population_lower_bound()) {
+            position_in_partition::less_compare less(*_schema);
+            // underlying may emit range_tombstone_change fragments with the same position.
+            // In such case, the range to which the tombstone from the first fragment applies is empty and should be ignored.
+            if (less(_last_row.position(), it->position())) {
+                if (_read_context.is_reversed()) [[unlikely]] {
+                    clogger.trace("csm {}: set_continuous({}), rt={}", fmt::ptr(this), _last_row.position(), prev);
+                    _last_row->set_continuous(true);
+                    _last_row->set_range_tombstone(prev);
+                } else {
+                    clogger.trace("csm {}: set_continuous({}), rt={}", fmt::ptr(this), e.position(), prev);
+                    e.set_continuous(true);
+                    e.set_range_tombstone(prev);
+                }
             }
         } else {
             _read_context.cache().on_mispopulate();
@@ -616,6 +631,7 @@ void cache_flat_mutation_reader::maybe_add_to_cache(const clustering_row& cr) {
         });
         _population_range_starts_before_all_rows = false;
     });
+    return true;
 }
 
 inline
@@ -635,13 +651,19 @@ inline
 void cache_flat_mutation_reader::copy_from_cache_to_buffer() {
     clogger.trace("csm {}: copy_from_cache, next={}, next_row_in_range={}", fmt::ptr(this), _next_row.position(), _next_row_in_range);
     _next_row.touch();
-    position_in_partition_view next_lower_bound = _next_row.dummy() ? _next_row.position() : position_in_partition_view::after_key(_next_row.key());
-    auto upper_bound = _next_row_in_range ? next_lower_bound : _upper_bound;
-    if (_snp->range_tombstones(_lower_bound, upper_bound, [&] (range_tombstone rts) {
-        add_range_tombstone_to_buffer(std::move(rts));
-        return stop_iteration(_lower_bound_changed && is_buffer_full());
-    }, _read_context.is_reversed()) == stop_iteration::no) {
-        return;
+    if (_next_row.range_tombstone() != _current_tombstone) {
+        auto tomb = _next_row.range_tombstone();
+        clogger.trace("csm {}: rtc({}, {})", fmt::ptr(this), _lower_bound, tomb);
+        push_mutation_fragment(mutation_fragment_v2(*_schema, _permit, range_tombstone_change(_lower_bound, tomb)));
+        _current_tombstone = tomb;
+    }
+    if (_next_row.range_tombstone_for_row() != _current_tombstone) [[unlikely]] {
+        auto tomb = _next_row.range_tombstone_for_row();
+        auto pos = position_in_partition::before_key(_next_row.position());
+        clogger.trace("csm {}: rtc({}, {})", fmt::ptr(this), pos, tomb);
+        push_mutation_fragment(mutation_fragment_v2(*_schema, _permit, range_tombstone_change(pos, tomb)));
+        _lower_bound = std::move(pos);
+        _current_tombstone = tomb;
     }
     // We add the row to the buffer even when it's full.
     // This simplifies the code. For more info see #3139.
@@ -661,10 +683,11 @@ void cache_flat_mutation_reader::move_to_end() {
 
 inline
 void cache_flat_mutation_reader::move_to_next_range() {
-    if (_queued_underlying_fragment) {
-        add_to_buffer(*std::exchange(_queued_underlying_fragment, {}));
+    if (_current_tombstone) {
+        clogger.trace("csm {}: move_to_next_range: emit rtc({}, null)", fmt::ptr(this), _upper_bound);
+        push_mutation_fragment(mutation_fragment_v2(*_schema, _permit, range_tombstone_change(_upper_bound, {})));
+        _current_tombstone = {};
     }
-    flush_tombstones(position_in_partition::for_range_end(*_ck_ranges_curr), true);
     auto next_it = std::next(_ck_ranges_curr);
     if (next_it == _ck_ranges_end) {
         move_to_end();
@@ -681,8 +704,6 @@ void cache_flat_mutation_reader::move_to_range(query::clustering_row_ranges::con
     _last_row = nullptr;
     _lower_bound = std::move(lb);
     _upper_bound = std::move(ub);
-    _rt_gen.trim(_lower_bound);
-    _lower_bound_changed = true;
     _ck_ranges_curr = next_it;
     auto adjacent = _next_row.advance_to(_lower_bound);
     _next_row_in_range = !after_current_range(_next_row.position());
@@ -734,6 +755,7 @@ void cache_flat_mutation_reader::maybe_drop_last_entry() noexcept {
             && !_read_context.is_reversed() // FIXME
             && _last_row->dummy()
             && _last_row->continuous()
+            && _last_row->range_tombstone() == _next_row.range_tombstone()
             && _snp->at_latest_version()
             && _snp->at_oldest_version()) {
 
@@ -773,52 +795,33 @@ void cache_flat_mutation_reader::move_to_next_entry() {
     }
 }
 
-void cache_flat_mutation_reader::flush_tombstones(position_in_partition_view pos, bool end_of_range) {
-    // Ensure position is appropriate for range tombstone bound
-    pos = position_in_partition_view::after_key(pos);
-    clogger.trace("csm {}: flush_tombstones({}) end_of_range: {}", fmt::ptr(this), pos, end_of_range);
-    _rt_gen.flush(pos, [this] (range_tombstone_change&& rtc) {
-        add_to_buffer(std::move(rtc), source::cache);
-    }, end_of_range);
-    if (auto rtc_opt = _rt_merger.flush(pos, end_of_range)) {
-        do_add_to_buffer(std::move(*rtc_opt));
-    }
-}
-
 inline
 void cache_flat_mutation_reader::add_to_buffer(mutation_fragment_v2&& mf) {
     clogger.trace("csm {}: add_to_buffer({})", fmt::ptr(this), mutation_fragment_v2::printer(*_schema, mf));
-    position_in_partition::less_compare less(*_schema);
-    if (_underlying_upper_bound && less(*_underlying_upper_bound, mf.position())) {
-        _queued_underlying_fragment = std::move(mf);
-        return;
-    }
-    flush_tombstones(mf.position());
     if (mf.is_clustering_row()) {
+        maybe_add_to_cache(mf.as_clustering_row());
         add_clustering_row_to_buffer(std::move(mf));
     } else {
         assert(mf.is_range_tombstone_change());
-        add_to_buffer(std::move(mf).as_range_tombstone_change(), source::underlying);
+        auto& chg = mf.as_range_tombstone_change();
+        if (maybe_add_to_cache(chg)) {
+            add_to_buffer(std::move(mf).as_range_tombstone_change(), source::underlying);
+        }
     }
 }
 
 inline
 void cache_flat_mutation_reader::add_to_buffer(const partition_snapshot_row_cursor& row) {
     position_in_partition::less_compare less(*_schema);
-    if (_queued_underlying_fragment && less(_queued_underlying_fragment->position(), row.position())) {
-        add_to_buffer(*std::exchange(_queued_underlying_fragment, {}));
-    }
     if (!row.dummy()) {
         _read_context.cache().on_row_hit();
         if (_read_context.digest_requested()) {
             row.latest_row().cells().prepare_hash(table_schema(), column_kind::regular_column);
         }
-        flush_tombstones(position_in_partition_view::for_key(row.key()));
         add_clustering_row_to_buffer(mutation_fragment_v2(*_schema, _permit, row.row()));
     } else {
         if (less(_lower_bound, row.position())) {
             _lower_bound = row.position();
-            _lower_bound_changed = true;
         }
         _read_context.cache()._tracker.on_dummy_row_hit();
     }
@@ -834,7 +837,6 @@ void cache_flat_mutation_reader::add_clustering_row_to_buffer(mutation_fragment_
     auto new_lower_bound = position_in_partition::after_key(row.key());
     push_mutation_fragment(std::move(mf));
     _lower_bound = std::move(new_lower_bound);
-    _lower_bound_changed = true;
     if (row.tomb()) {
         _read_context.cache()._tracker.on_row_tombstone_read();
     }
@@ -843,52 +845,11 @@ void cache_flat_mutation_reader::add_clustering_row_to_buffer(mutation_fragment_
 inline
 void cache_flat_mutation_reader::add_to_buffer(range_tombstone_change&& rtc, source src) {
     clogger.trace("csm {}: add_to_buffer({})", fmt::ptr(this), rtc);
-    if (auto rtc_opt = _rt_merger.apply(src, std::move(rtc))) {
-        do_add_to_buffer(std::move(*rtc_opt));
-    }
-}
-
-inline
-void cache_flat_mutation_reader::do_add_to_buffer(range_tombstone_change&& rtc) {
-    clogger.trace("csm {}: push({})", fmt::ptr(this), rtc);
+    _has_rt = true;
     position_in_partition::less_compare less(*_schema);
     _lower_bound = position_in_partition(rtc.position());
-    _lower_bound_changed = less(_lower_bound, rtc.position());
     push_mutation_fragment(*_schema, _permit, std::move(rtc));
     _read_context.cache()._tracker.on_range_tombstone_read();
-}
-
-inline
-void cache_flat_mutation_reader::add_range_tombstone_to_buffer(range_tombstone&& rt) {
-    position_in_partition::less_compare less(*_schema);
-    if (_queued_underlying_fragment && less(_queued_underlying_fragment->position(), rt.position())) {
-        add_to_buffer(*std::exchange(_queued_underlying_fragment, {}));
-    }
-    clogger.trace("csm {}: add_to_buffer({})", fmt::ptr(this), rt);
-    if (!less(_lower_bound, rt.position())) {
-        rt.set_start(_lower_bound);
-    }
-    flush_tombstones(rt.position());
-    _rt_gen.consume(std::move(rt));
-}
-
-inline
-void cache_flat_mutation_reader::maybe_add_to_cache(const range_tombstone_change& rtc) {
-    clogger.trace("csm {}: maybe_add_to_cache({})", fmt::ptr(this), rtc);
-    auto rt_opt = _rt_assembler.consume(*_schema, range_tombstone_change(rtc));
-    if (!rt_opt) {
-        return;
-    }
-    const auto& rt = *rt_opt;
-    if (can_populate()) {
-        clogger.trace("csm {}: maybe_add_to_cache({})", fmt::ptr(this), rt);
-        _lsa_manager.run_in_update_section_with_allocator([&] {
-            _snp->version()->partition().mutable_row_tombstones().apply_monotonically(
-                    table_schema(), to_table_domain(rt));
-        });
-    } else {
-        _read_context.cache().on_mispopulate();
-    }
 }
 
 inline
