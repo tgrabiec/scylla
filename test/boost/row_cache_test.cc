@@ -2603,7 +2603,7 @@ SEASTAR_TEST_CASE(test_exception_safety_of_reads) {
                 BOOST_REQUIRE(got_opt);
                 BOOST_REQUIRE(!read_mutation_from_flat_mutation_reader(rd).get0());
 
-                assert_that(*got_opt).is_equal_to(mut, ranges);
+                assert_that(*got_opt).is_equal_to_compacted(mut, ranges);
                 assert_that(cache.make_reader(s, semaphore.make_permit(), query::full_partition_range, slice))
                     .produces(mut, ranges);
             });

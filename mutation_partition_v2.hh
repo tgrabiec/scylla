@@ -219,6 +219,8 @@ public:
     //
     // Strong exception guarantees.
     void upgrade(const schema& old_schema, const schema& new_schema);
+
+    mutation_partition as_mutation_partition(const schema&) const;
 private:
     void insert_row(const schema& s, const clustering_key& key, deletable_row&& row);
     void insert_row(const schema& s, const clustering_key& key, const deletable_row& row);
