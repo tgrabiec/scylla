@@ -88,7 +88,7 @@ concept Reducer =
 // |map| extracts the part from each version.
 // |reduce| Combines parts from the two versions.
 template <typename Result, typename Map, typename Initial, typename Reduce>
-requires Mapper<Map, mutation_partition, Result> && Reducer<Reduce, Result>
+requires Mapper<Map, mutation_partition_v2, Result> && Reducer<Reduce, Result>
 inline Result squashed(const partition_version_ref& v, Map&& map, Initial&& initial, Reduce&& reduce) {
     const partition_version* this_v = &*v;
     partition_version* it = v->last();
@@ -101,7 +101,7 @@ inline Result squashed(const partition_version_ref& v, Map&& map, Initial&& init
 }
 
 template <typename Result, typename Map, typename Reduce>
-requires Mapper<Map, mutation_partition, Result> && Reducer<Reduce, Result>
+requires Mapper<Map, mutation_partition_v2, Result> && Reducer<Reduce, Result>
 inline Result squashed(const partition_version_ref& v, Map&& map, Reduce&& reduce) {
     return squashed<Result>(v, map,
                             [] (auto&& o) -> decltype(auto) { return std::forward<decltype(o)>(o); },
@@ -112,7 +112,7 @@ inline Result squashed(const partition_version_ref& v, Map&& map, Reduce&& reduc
 
 ::static_row partition_snapshot::static_row(bool digest_requested) const {
     return ::static_row(::squashed<row>(version(),
-                         [&] (const mutation_partition& mp) -> const row& {
+                         [&] (const mutation_partition_v2& mp) -> const row& {
                             if (digest_requested) {
                                 mp.static_row().prepare_hash(*_schema, column_kind::static_column);
                             }
@@ -128,14 +128,16 @@ bool partition_snapshot::static_row_continuous() const {
 
 tombstone partition_snapshot::partition_tombstone() const {
     return ::squashed<tombstone>(version(),
-                               [] (const mutation_partition& mp) { return mp.partition_tombstone(); },
+                               [] (const mutation_partition_v2& mp) { return mp.partition_tombstone(); },
                                [] (tombstone& a, tombstone b) { a.apply(b); });
 }
 
 mutation_partition partition_snapshot::squashed() const {
     return ::squashed<mutation_partition>(version(),
-                               [] (const mutation_partition& mp) -> const mutation_partition& { return mp; },
-                               [this] (const mutation_partition& mp) { return mutation_partition(*_schema, mp); },
+                               [this] (const mutation_partition_v2& mp) -> mutation_partition {
+                                   return mp.as_mutation_partition(*_schema);
+                               },
+                               [] (mutation_partition&& mp) { return std::move(mp); },
                                [this] (mutation_partition& a, const mutation_partition& b) {
                                    mutation_application_stats app_stats;
                                    a.apply(*_schema, b, *_schema, app_stats);
@@ -144,7 +146,7 @@ mutation_partition partition_snapshot::squashed() const {
 
 tombstone partition_entry::partition_tombstone() const {
     return ::squashed<tombstone>(_version,
-        [] (const mutation_partition& mp) { return mp.partition_tombstone(); },
+        [] (const mutation_partition_v2& mp) { return mp.partition_tombstone(); },
         [] (tombstone& a, tombstone b) { a.apply(b); });
 }
 
@@ -163,7 +165,7 @@ partition_snapshot::~partition_snapshot() {
     });
 }
 
-void merge_versions(const schema& s, mutation_partition& newer, mutation_partition&& older, cache_tracker* tracker) {
+void merge_versions(const schema& s, mutation_partition_v2& newer, mutation_partition_v2&& older, cache_tracker* tracker) {
     mutation_application_stats app_stats;
     older.apply_monotonically(s, std::move(newer), tracker, app_stats);
     newer = std::move(older);
@@ -240,16 +242,20 @@ unsigned partition_snapshot::version_count()
     return count;
 }
 
-partition_entry::partition_entry(mutation_partition mp)
+partition_entry::partition_entry(mutation_partition_v2 mp)
 {
     auto new_version = current_allocator().construct<partition_version>(std::move(mp));
     _version = partition_version_ref(*new_version);
 }
 
+partition_entry::partition_entry(const schema& s, mutation_partition mp)
+    : partition_entry(mutation_partition_v2(s, std::move(mp)))
+{ }
+
 partition_entry::partition_entry(partition_entry::evictable_tag, const schema& s, mutation_partition&& mp)
     : partition_entry([&] {
         mp.ensure_last_dummy(s);
-        return std::move(mp);
+        return mutation_partition_v2(s, std::move(mp));
     }())
 { }
 
@@ -326,8 +332,8 @@ partition_version& partition_entry::add_version(const schema& s, cache_tracker* 
     // to stay around (with tombstones and static rows) after fully evicted.
     // Such versions must be fully discontinuous, and thus have a dummy at the end.
     auto new_version = tracker
-                       ? current_allocator().construct<partition_version>(mutation_partition::make_incomplete(s))
-                       : current_allocator().construct<partition_version>(mutation_partition(s.shared_from_this()));
+                       ? current_allocator().construct<partition_version>(mutation_partition_v2::make_incomplete(s))
+                       : current_allocator().construct<partition_version>(mutation_partition_v2(s.shared_from_this()));
     new_version->partition().set_static_row_continuous(_version->partition().static_row_continuous());
     new_version->insert_before(*_version);
     set_version(new_version);
@@ -337,12 +343,12 @@ partition_version& partition_entry::add_version(const schema& s, cache_tracker* 
     return *new_version;
 }
 
-void partition_entry::apply(logalloc::region& r, mutation_cleaner& cleaner, const schema& s, const mutation_partition& mp, const schema& mp_schema,
+void partition_entry::apply(logalloc::region& r, mutation_cleaner& cleaner, const schema& s, const mutation_partition_v2& mp, const schema& mp_schema,
         mutation_application_stats& app_stats) {
-    apply(r, cleaner, s, mutation_partition(mp_schema, mp), mp_schema, app_stats);
+    apply(r, cleaner, s, mutation_partition_v2(mp_schema, mp), mp_schema, app_stats);
 }
 
-void partition_entry::apply(logalloc::region& r, mutation_cleaner& cleaner, const schema& s, mutation_partition&& mp, const schema& mp_schema,
+void partition_entry::apply(logalloc::region& r, mutation_cleaner& cleaner, const schema& s, mutation_partition_v2&& mp, const schema& mp_schema,
         mutation_application_stats& app_stats) {
     // A note about app_stats: it may happen that mp has rows that overwrite other rows
     // in older partition_version. Those overwrites will be counted when their versions get merged.
@@ -451,7 +457,7 @@ utils::coroutine partition_entry::apply_to_incomplete(const schema& s,
                     if (can_move) {
                         tombstones.apply_monotonically(s, std::move(current->partition().mutable_row_tombstones()));
                     } else {
-                        tombstones.apply_monotonically(s, const_cast<const mutation_partition&>(current->partition()).row_tombstones());
+                        tombstones.apply_monotonically(s, const_cast<const mutation_partition_v2&>(current->partition()).row_tombstones());
                     }
                     current = current->next();
                     can_move &= current && !current->is_referenced();
@@ -493,12 +499,12 @@ utils::coroutine partition_entry::apply_to_incomplete(const schema& s,
     });
 }
 
-mutation_partition partition_entry::squashed(schema_ptr from, schema_ptr to)
+mutation_partition_v2 partition_entry::squashed(schema_ptr from, schema_ptr to)
 {
-    mutation_partition mp(to);
+    mutation_partition_v2 mp(to);
     mp.set_static_row_continuous(_version->partition().static_row_continuous());
     for (auto&& v : _version->all_elements()) {
-        auto older = mutation_partition(*from, v.partition());
+        auto older = mutation_partition_v2(*from, v.partition());
         if (from->version() != to->version()) {
             older.upgrade(*from, *to);
         }
@@ -509,7 +515,8 @@ mutation_partition partition_entry::squashed(schema_ptr from, schema_ptr to)
 
 mutation_partition partition_entry::squashed(const schema& s)
 {
-    return squashed(s.shared_from_this(), s.shared_from_this());
+    return squashed(s.shared_from_this(), s.shared_from_this())
+        .as_mutation_partition(s);
 }
 
 void partition_entry::upgrade(schema_ptr from, schema_ptr to, mutation_cleaner& cleaner, cache_tracker* tracker)
@@ -667,7 +674,7 @@ std::ostream& operator<<(std::ostream& out, const partition_entry::printer& p) {
             if (v->is_referenced()) {
                 out << "(*) ";
             }
-            out << mutation_partition::printer(p._schema, v->partition());
+            out << mutation_partition_v2::printer(p._schema, v->partition());
             v = v->next();
             first = false;
         }

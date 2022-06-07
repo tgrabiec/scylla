@@ -576,7 +576,7 @@ void cache_flat_mutation_reader::maybe_add_to_cache(const clustering_row& cr) {
     auto rt_opt = _rt_assembler.flush(*_schema, position_in_partition::after_key(cr.key()));
     clogger.trace("csm {}: populate({})", fmt::ptr(this), clustering_row::printer(*_schema, cr));
     _lsa_manager.run_in_update_section_with_allocator([this, &cr, &rt_opt] {
-        mutation_partition& mp = _snp->version()->partition();
+        mutation_partition_v2& mp = _snp->version()->partition();
 
         if (rt_opt) {
             clogger.trace("csm {}: populate flushed rt({})", fmt::ptr(this), *rt_opt);

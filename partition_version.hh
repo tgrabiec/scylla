@@ -135,13 +135,13 @@ class partition_version_ref;
 
 class partition_version : public anchorless_list_base_hook<partition_version> {
     partition_version_ref* _backref = nullptr;
-    mutation_partition _partition;
+    mutation_partition_v2 _partition;
 
     friend class partition_version_ref;
     friend class partition_entry;
     friend class partition_snapshot;
 public:
-    static partition_version& container_of(mutation_partition& mp) {
+    static partition_version& container_of(mutation_partition_v2& mp) {
         return *boost::intrusive::get_parent_from_member(&mp, &partition_version::_partition);
     }
 
@@ -149,7 +149,7 @@ public:
 
     explicit partition_version(schema_ptr s) noexcept
         : _partition(std::move(s)) { }
-    explicit partition_version(mutation_partition mp) noexcept
+    explicit partition_version(mutation_partition_v2 mp) noexcept
         : _partition(std::move(mp)) { }
     partition_version(partition_version&& pv) noexcept;
     partition_version& operator=(partition_version&& pv) noexcept;
@@ -158,8 +158,8 @@ public:
     // Returns stop_iteration::yes iff there are no more elements to free.
     stop_iteration clear_gently(cache_tracker* tracker) noexcept;
 
-    mutation_partition& partition() { return _partition; }
-    const mutation_partition& partition() const { return _partition; }
+    mutation_partition_v2& partition() { return _partition; }
+    const mutation_partition_v2& partition() const { return _partition; }
 
     bool is_referenced() const { return _backref; }
     // Returns true iff this version is directly referenced from a partition_entry (is its newset version).
@@ -481,7 +481,8 @@ public:
     // Constructs a non-evictable entry holding empty partition
     partition_entry() = default;
     // Constructs a non-evictable entry
-    explicit partition_entry(mutation_partition mp);
+    explicit partition_entry(mutation_partition_v2);
+    partition_entry(const schema&, mutation_partition);
     // Returns a reference to partition_entry containing given pv,
     // assuming pv.is_referenced_from_entry().
     static partition_entry& container_of(partition_version& pv) {
@@ -546,16 +547,25 @@ public:
     void apply(logalloc::region&,
                mutation_cleaner&,
                const schema& s,
-               const mutation_partition& mp,
+               const mutation_partition_v2& mp,
                const schema& mp_schema,
                mutation_application_stats& app_stats);
 
     void apply(logalloc::region&,
                mutation_cleaner&,
                const schema& s,
-               mutation_partition&& mp,
+               mutation_partition_v2&& mp,
                const schema& mp_schema,
                mutation_application_stats& app_stats);
+
+    void apply(logalloc::region& r,
+               mutation_cleaner& c,
+               const schema& s,
+               const mutation_partition& mp,
+               const schema& mp_schema,
+               mutation_application_stats& app_stats) {
+        apply(r, c, s, mutation_partition_v2(mp_schema, mutation_partition(mp_schema, mp)), mp_schema, app_stats);
+    }
 
     // Adds mutation_partition represented by "other" to the one represented
     // by this entry.
@@ -615,7 +625,7 @@ public:
         return *_version;
     }
 
-    mutation_partition squashed(schema_ptr from, schema_ptr to);
+    mutation_partition_v2 squashed(schema_ptr from, schema_ptr to);
     mutation_partition squashed(const schema&);
     tombstone partition_tombstone() const;
 

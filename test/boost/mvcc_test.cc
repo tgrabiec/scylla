@@ -112,7 +112,7 @@ SEASTAR_TEST_CASE(test_range_tombstone_slicing) {
             m1.apply_delete(*s, rt2);
             m1.apply_delete(*s, rt3);
 
-            partition_entry e(mutation_partition(*s, m1));
+            partition_entry e(mutation_partition_v2(*s, m1));
 
             auto snap = e.read(r, cleaner, s, no_cache_tracker);
 
@@ -227,7 +227,7 @@ SEASTAR_THREAD_TEST_CASE(test_range_tombstone_reverse_slicing) {
 
         // Single version
         {
-            partition_entry e(mutation_partition(*s, m1));
+            partition_entry e(mutation_partition_v2(*s, m1));
             auto snap = e.read(r, cleaner, s, no_cache_tracker);
             check_range(*snap, query::clustering_range::make_open_ended_both_sides());
             check_range(*snap, query::clustering_range::make_open_ended_both_sides(), true);
@@ -235,7 +235,7 @@ SEASTAR_THREAD_TEST_CASE(test_range_tombstone_reverse_slicing) {
 
         // Two versions
         {
-            partition_entry e(mutation_partition(*s, m2));
+            partition_entry e(mutation_partition_v2(*s, m2));
             auto snap = e.read(r, cleaner, s, no_cache_tracker);
 
             auto&& v2 = e.add_version(*s, no_cache_tracker);
@@ -396,7 +396,7 @@ mvcc_partition& mvcc_partition::operator+=(const mutation& m) {
 void mvcc_partition::apply(const mutation_partition& mp, schema_ptr mp_s) {
     with_allocator(region().allocator(), [&] {
         if (_evictable) {
-            apply_to_evictable(partition_entry(mutation_partition(*mp_s, mp)), mp_s);
+            apply_to_evictable(partition_entry(mutation_partition_v2(*mp_s, mp)), mp_s);
         } else {
             logalloc::allocating_section as;
             as(region(), [&] {
@@ -420,7 +420,7 @@ mvcc_partition mvcc_container::make_not_evictable(const mutation_partition& mp) 
     return with_allocator(region().allocator(), [&] {
         logalloc::allocating_section as;
         return as(region(), [&] {
-            return mvcc_partition(_schema, partition_entry(mutation_partition(*_schema, mp)), *this, false);
+            return mvcc_partition(_schema, partition_entry(mutation_partition_v2(*_schema, mp)), *this, false);
         });
     });
 }
@@ -711,7 +711,7 @@ SEASTAR_TEST_CASE(test_snapshot_cursor_is_consistent_with_merging_for_nonevictab
             {
                 mutation_application_stats app_stats;
                 logalloc::reclaim_lock rl(r);
-                auto e = partition_entry(mutation_partition(*s, m3.partition()));
+                auto e = partition_entry(mutation_partition_v2(*s, m3.partition()));
                 auto snap1 = e.read(r, cleaner, s, no_cache_tracker);
                 e.apply(r, cleaner, *s, m2.partition(), *s, app_stats);
                 auto snap2 = e.read(r, cleaner, s, no_cache_tracker);
@@ -1364,7 +1364,7 @@ SEASTAR_TEST_CASE(test_apply_is_atomic) {
             size_t fail_offset = 0;
             while (true) {
                 mutation_partition m2 = mutation_partition(*second.schema(), second.partition());
-                auto e = partition_entry(mutation_partition(*target.schema(), target.partition()));
+                auto e = partition_entry(mutation_partition_v2(*target.schema(), target.partition()));
                 //auto snap1 = e.read(r, gen.schema());
 
                 alloc.fail_after(fail_offset++);
@@ -1412,7 +1412,7 @@ SEASTAR_TEST_CASE(test_versions_are_merged_when_snapshots_go_away) {
             m3.partition().make_fully_continuous();
 
             {
-                auto e = partition_entry(mutation_partition(*s, m1.partition()));
+                auto e = partition_entry(mutation_partition_v2(*s, m1.partition()));
                 auto snap1 = e.read(r, cleaner, s, nullptr);
 
                 {
@@ -1433,7 +1433,7 @@ SEASTAR_TEST_CASE(test_versions_are_merged_when_snapshots_go_away) {
             }
 
             {
-                auto e = partition_entry(mutation_partition(*s, m1.partition()));
+                auto e = partition_entry(mutation_partition_v2(*s, m1.partition()));
                 auto snap1 = e.read(r, cleaner, s, nullptr);
 
                 {

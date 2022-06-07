@@ -98,6 +98,11 @@ mutation_partition_assertion assert_that(schema_ptr s, const mutation_partition&
     return {std::move(s), mp};
 }
 
+static inline
+mutation_partition_assertion assert_that(schema_ptr s, const mutation_partition_v2& mp) {
+    return {std::move(s), mp.as_mutation_partition(*s)};
+}
+
 class mutation_assertion {
     mutation _m;
 public:
