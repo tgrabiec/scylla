@@ -135,7 +135,7 @@ struct reversal_traits<true> {
     }
 };
 
-mutation_partition::mutation_partition(const schema& s, const mutation_partition& x)
+mutation_partition_v2::mutation_partition_v2(const schema& s, const mutation_partition_v2& x)
         : _tombstone(x._tombstone)
         , _static_row(s, column_kind::static_column, x._static_row)
         , _static_row_continuous(x._static_row_continuous)
@@ -779,29 +779,6 @@ void mutation_partition_v2::for_each_row(const schema& schema, const query::clus
             }
         }
     }
-}
-
-bool has_any_live_data(const schema& s, column_kind kind, const row& cells, tombstone tomb = tombstone(),
-                       gc_clock::time_point now = gc_clock::time_point::min()) {
-    bool any_live = false;
-    cells.for_each_cell_until([&] (column_id id, const atomic_cell_or_collection& cell_or_collection) {
-        const column_definition& def = s.column_at(kind, id);
-        if (def.is_atomic()) {
-            auto&& c = cell_or_collection.as_atomic_cell(def);
-            if (c.is_live(tomb, now, def.is_counter())) {
-                any_live = true;
-                return stop_iteration::yes;
-            }
-        } else {
-            auto mut = cell_or_collection.as_collection_mutation();
-            if (mut.is_any_live(*def.type, tomb, now)) {
-                any_live = true;
-                return stop_iteration::yes;
-            }
-        }
-        return stop_iteration::no;
-    });
-    return any_live;
 }
 
 // Transforms given range of printable into a range of strings where each element
