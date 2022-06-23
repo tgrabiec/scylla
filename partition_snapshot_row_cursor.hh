@@ -134,6 +134,7 @@ class partition_snapshot_row_cursor final {
     bool _dummy{};
     const bool _unique_owner;
     const bool _reversed;
+    tombstone _range_tombstone; // FIXME
     position_in_partition _position; // table domain
     partition_snapshot::change_mark _change_mark;
 
@@ -464,6 +465,10 @@ public:
     // Returns true iff the key range adjacent to the cursor's position from the side of smaller keys
     // is marked as continuous.
     bool continuous() const { return _continuous; }
+
+    // Can be called when cursor is pointing at a row.
+    // Returns the range tombstone for the key range adjacent to the cursor's position from the side of smaller keys.
+    tombstone range_tombstone() const { return _range_tombstone; }
 
     // Can be called when cursor is pointing at a row.
     bool dummy() const { return _dummy; }

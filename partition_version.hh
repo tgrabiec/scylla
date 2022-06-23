@@ -400,19 +400,6 @@ public:
     mutation_partition squashed() const;
 
     using range_tombstone_result = utils::chunked_vector<range_tombstone>;
-
-    // Returns range tombstones overlapping with [start, end)
-    range_tombstone_result range_tombstones(position_in_partition_view start, position_in_partition_view end);
-    // Invokes the callback for every range tombstones overlapping with [start, end) until
-    // the callback returns stop_iteration::yes or all tombstones are exhausted.
-    // Returns stop_iteration::yes if all range tombstones in the range were consumed.
-    // When reversed is true, start and end are assumed to belong to the domain of reverse clustering order schema
-    // and the method produces range_tombstones in reverse order, conforming to reverse schema.
-    stop_iteration range_tombstones(position_in_partition_view start, position_in_partition_view end,
-                                    std::function<stop_iteration(range_tombstone)> callback,
-                                    bool reversed = false);
-    // Returns all range tombstones
-    range_tombstone_result range_tombstones();
 };
 
 class partition_snapshot_ptr {

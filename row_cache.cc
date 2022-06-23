@@ -1231,9 +1231,10 @@ void rows_entry::on_evicted(cache_tracker& tracker) noexcept {
         // When evicting a dummy with both sides continuous we don't need to break continuity.
         //
         auto still_continuous = continuous() && dummy();
+        auto old_rt = range_tombstone();
         mutation_partition_v2::rows_type::key_grabber kg(it);
         kg.release(current_deleter<rows_entry>());
-        if (!still_continuous) {
+        if (!still_continuous || old_rt != it->range_tombstone()) {
             it->set_continuous(false);
         }
         tracker.on_row_eviction();

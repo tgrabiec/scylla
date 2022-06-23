@@ -41,3 +41,11 @@ The above rules have consequences for range population. When populating a discon
 Options (3) and (2) are more efficient than (1), but (1) is the simplest to implement, so it was chosen. With option (2) we have an additional problem of cleaning up the extra dummy entries when the versions are finally merged. Option (3) makes cache reader more complicated.
 
 Each `partition_version` always has a dummy entry at `position_in_partition::after_all_clustering_rows()`, so that its row range can be marked as fully discontinuous when all of its rows get evicted. Note that we can't remove fully evicted non-latest versions, because they may contain range tombstones and static row versions, which are needed to calculate snapshot's view on those elements. We can't merge them into newer versions in reclamation context due to no-allocation requirement, and because they could be referenced by snapshots.
+
+Range tombstones are represented in cache by the means of annotating row entries with a tombstone object which applies to
+the range which precedes the entry (up to the previous entry), and including the key for the row entry. It applies to the
+same range as the continuity flag, and is valid only for the range which is marked as continuous. The rows entry itself is always continuous
+so the tombstone is valid for the rows entry.
+
+When inserting an empty rows entry into a continuous range, we must set the range tombstone on that entry even if the range to the left
+is marked as discontinuous.
