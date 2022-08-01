@@ -1244,6 +1244,11 @@ void rows_entry::on_evicted(cache_tracker& tracker) noexcept {
     mutation_partition::rows_type* rows = it.tree_if_singular();
     if (rows != nullptr) {
         assert(it->is_last_dummy());
+
+        mutation_partition::rows_type::key_grabber kg(it);
+        kg.release(current_deleter<rows_entry>());
+        tracker.on_row_eviction();
+
         partition_version& pv = partition_version::container_of(mutation_partition::container_of(*rows));
         if (pv.is_referenced_from_entry()) {
             partition_entry& pe = partition_entry::container_of(pv);
