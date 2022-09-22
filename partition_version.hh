@@ -105,34 +105,6 @@ class static_row;
 // snapshot on the list is marked as unique owner so that on its destruction
 // it continues removal of the partition versions.
 
-//
-// Continuity merging rules.
-//
-// Non-evictable snapshots contain fully continuous partitions in all versions at all times.
-// For evictable snapshots, that's not the case.
-//
-// Each version has its own continuity, fully specified in that version,
-// independent of continuity of other versions. Continuity of the snapshot is a
-// union of continuities of each version. This rule follows from the fact that we
-// want eviction from older versions to not have to touch newer versions.
-//
-// It is assumed that continuous intervals in different versions are non-
-// overlapping,  with exceptions for points corresponding to complete rows.
-// A row may overlap  with another row, in which case it completely overrides
-// it. A later version may have a row which falls into a continuous interval
-// in the older version. A newer version cannot have a continuous interval
-// which is not a row and covers a row in the older version. We make use of
-// this assumption to make calculation of the union of intervals on merging
-// easier.
-//
-// versions of evictable entries always have a dummy entry at position_in_partition::after_all_clustered_rows().
-// This is needed so that they can be always made fully discontinuous by eviction, and because
-// we need a way to link partitions with no rows into the LRU.
-//
-// Snapshots of evictable entries always have a row entry at
-// position_in_partition::after_all_clustered_rows().
-//
-
 class partition_version_ref;
 
 class partition_version : public anchorless_list_base_hook<partition_version> {
@@ -547,14 +519,12 @@ public:
                const schema& mp_schema,
                mutation_application_stats& app_stats);
 
-    void apply(logalloc::region& r,
-               mutation_cleaner& c,
+    void apply(logalloc::region&,
+               mutation_cleaner&,
                const schema& s,
                const mutation_partition& mp,
                const schema& mp_schema,
-               mutation_application_stats& app_stats) {
-        apply(r, c, s, mutation_partition_v2(mp_schema, mutation_partition(mp_schema, mp)), mp_schema, app_stats);
-    }
+               mutation_application_stats& app_stats);
 
     // Adds mutation_partition represented by "other" to the one represented
     // by this entry.

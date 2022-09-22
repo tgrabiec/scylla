@@ -335,6 +335,16 @@ partition_version& partition_entry::add_version(const schema& s, cache_tracker* 
                        ? current_allocator().construct<partition_version>(mutation_partition_v2::make_incomplete(s))
                        : current_allocator().construct<partition_version>(mutation_partition_v2(s.shared_from_this()));
     new_version->partition().set_static_row_continuous(_version->partition().static_row_continuous());
+    if (tracker) {
+        auto&& rows = _version->partition().mutable_clustered_rows();
+        auto i = rows.end();
+        assert(i != rows.begin()); // There must be a last dummy entry.
+        --i;
+        assert(i->is_last_dummy());
+        auto& new_dummy = *std::prev(new_version->partition().mutable_clustered_rows().end());
+        assert(new_dummy.is_last_dummy());
+        new_dummy.set_range_tombstone(i->range_tombstone());
+    }
     new_version->insert_before(*_version);
     set_version(new_version);
     if (tracker) {
@@ -346,6 +356,17 @@ partition_version& partition_entry::add_version(const schema& s, cache_tracker* 
 void partition_entry::apply(logalloc::region& r, mutation_cleaner& cleaner, const schema& s, const mutation_partition_v2& mp, const schema& mp_schema,
         mutation_application_stats& app_stats) {
     apply(r, cleaner, s, mutation_partition_v2(mp_schema, mp), mp_schema, app_stats);
+}
+
+void partition_entry::apply(logalloc::region& r,
+           mutation_cleaner& c,
+           const schema& s,
+           const mutation_partition& mp,
+           const schema& mp_schema,
+           mutation_application_stats& app_stats) {
+    auto mp_v1 = mutation_partition(mp_schema, mp);
+    mp_v1.make_fully_continuous();
+    apply(r, c, s, mutation_partition_v2(mp_schema, std::move(mp_v1)), mp_schema, app_stats);
 }
 
 void partition_entry::apply(logalloc::region& r, mutation_cleaner& cleaner, const schema& s, mutation_partition_v2&& mp, const schema& mp_schema,
@@ -360,6 +381,7 @@ void partition_entry::apply(logalloc::region& r, mutation_cleaner& cleaner, cons
     if (!_snapshot) {
         try {
             apply_resume res;
+            auto notify = cleaner.make_region_space_guard();
             if (_version->partition().apply_monotonically(s,
                       std::move(new_version->partition()),
                       no_cache_tracker,
@@ -423,12 +445,13 @@ utils::coroutine partition_entry::apply_to_incomplete(const schema& s,
     // of allocating sections, so we return here to get out of the current allocating section and
     // give the caller a chance to store the coroutine object. The code inside coroutine below
     // runs outside allocating section.
-    return utils::coroutine([&tracker, &s, &alloc, &reg, &acc, can_move, preemptible,
+    return utils::coroutine([self = this, &tracker, &s, &alloc, &reg, &acc, can_move, preemptible,
             cur = partition_snapshot_row_cursor(s, *dst_snp),
             src_cur = partition_snapshot_row_cursor(s, *src_snp, can_move),
             dst_snp = std::move(dst_snp),
             prev_snp = std::move(prev_snp),
             src_snp = std::move(src_snp),
+            lb = position_in_partition::before_all_clustered_rows(),
             static_done = false] () mutable {
         auto&& allocator = reg.allocator();
         return alloc(reg, [&] {
@@ -451,14 +474,6 @@ utils::coroutine partition_entry::apply_to_incomplete(const schema& s,
                             static_row.apply(s, column_kind::static_column, current->partition().static_row());
                         }
                     }
-                    dirty_size += current->partition().row_tombstones().external_memory_usage(s);
-                    range_tombstone_list& tombstones = dst.partition().mutable_row_tombstones();
-                    // FIXME: defer while applying range tombstones
-                    if (can_move) {
-                        tombstones.apply_monotonically(s, std::move(current->partition().mutable_row_tombstones()));
-                    } else {
-                        tombstones.apply_monotonically(s, const_cast<const mutation_partition_v2&>(current->partition()).row_tombstones());
-                    }
                     current = current->next();
                     can_move &= current && !current->is_referenced();
                 }
@@ -472,21 +487,70 @@ utils::coroutine partition_entry::apply_to_incomplete(const schema& s,
 
             do {
                 auto size = src_cur.memory_usage();
-                if (!src_cur.dummy()) {
-                    tracker.on_row_processed_from_memtable();
+                if (src_cur.range_tombstone()) {
+                    // Apply the tombstone to (lb, src_cur.position())
+                    // FIXME: Avoid if before all rows
+                    auto ropt = cur.ensure_entry_if_complete(lb);
+                    cur.advance_to(lb); // ensure_entry_if_complete() leaves the cursor invalid. Bring back to valid.
+                    // If !ropt, it means there is no entry at lb, so cur is guaranteed to be at a position
+                    // greater than lb. No need to advance it.
+                    if (ropt) {
+                        cur.next();
+                    }
+                    position_in_partition::less_compare less(s);
+                    assert(less(lb, cur.position()));
+                    while (less(cur.position(), src_cur.position())) {
+                        auto res = cur.ensure_entry_in_latest();
+                        if (cur.continuous()) {
+                            res.row.set_continuous(is_continuous::yes);
+                        }
+                        // FIXME: Compact the row
+                        res.row.set_range_tombstone(res.row.range_tombstone() + src_cur.range_tombstone());
+                        ++tracker.stats().rows_covered_by_range_tombstones_from_memtable;
+                        cur.next();
+                        // FIXME: preempt
+                    }
+                }
+                {
+                    if (src_cur.dummy()) {
+                        ++tracker.stats().dummy_processed_from_memtable;
+                    } else {
+                        tracker.on_row_processed_from_memtable();
+                    }
                     auto ropt = cur.ensure_entry_if_complete(src_cur.position());
                     if (ropt) {
                         if (!ropt->inserted) {
                             tracker.on_row_merged_from_memtable();
                         }
                         rows_entry& e = ropt->row;
-                        src_cur.consume_row([&](deletable_row&& row) {
-                            e.row().apply_monotonically(s, std::move(row));
-                        });
+                        if (!src_cur.dummy()) {
+                            src_cur.consume_row([&](deletable_row&& row) {
+                                e.row().apply_monotonically(s, std::move(row));
+                            });
+                        }
+                        // We can set cont=1 only if there is a range tombstone because
+                        // only then the lower bound of the range is ensured in the latest version earlier.
+                        if (src_cur.range_tombstone()) {
+                            if (cur.continuous()) {
+                                e.set_continuous(is_continuous::yes);
+                                e.set_range_tombstone(e.range_tombstone() + src_cur.range_tombstone());
+                                // FIXME: This can't trigger because range tombstones in memtables are bounded by
+                                // dummy entries on both sides.
+                                assert(src_cur.range_tombstone_for_row() == src_cur.range_tombstone());
+                            }
+                        }
+                        if (src_cur.range_tombstone_for_row()) {
+                            assert(!e.continuous() || src_cur.range_tombstone_for_row() == src_cur.range_tombstone());
+                            e.set_range_tombstone(e.range_tombstone() + src_cur.range_tombstone_for_row());
+                        }
                     } else {
                         tracker.on_row_dropped_from_memtable();
                     }
                 }
+                // FIXME: Avoid storing lb if no range tombstones
+                with_allocator(standard_allocator(), [&] {
+                    lb = position_in_partition(src_cur.position());
+                });
                 auto has_next = src_cur.erase_and_advance();
                 acc.unpin_memory(size);
                 if (!has_next) {
