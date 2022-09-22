@@ -311,6 +311,10 @@ public:
         return {after_clustering_row_tag_t(), pos};
     }
 
+    static position_in_partition after_key(position_in_partition&& pos) noexcept {
+        return {after_clustering_row_tag_t(), std::move(pos)};
+    }
+
     static position_in_partition for_key(clustering_key ck) {
         return {clustering_row_tag_t(), std::move(ck)};
     }
