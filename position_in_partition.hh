@@ -168,12 +168,12 @@ public:
         return {clustering_row_tag_t(), ck};
     }
 
-    static position_in_partition_view after_key(const clustering_key& ck) {
+    static position_in_partition_view after_all_prefixed(const clustering_key& ck) {
         return {partition_region::clustered, bound_weight::after_all_prefixed, &ck};
     }
 
-    // Returns a view to after_key(pos._ck) if pos.is_clustering_row() else returns pos as-is.
-    static position_in_partition_view after_key(position_in_partition_view pos) {
+    // Returns a view to after_all_prefixed(pos._ck) if pos.is_clustering_row() else returns pos as-is.
+    static position_in_partition_view after_all_prefixed(position_in_partition_view pos) {
         return {partition_region::clustered, pos._bound_weight == bound_weight::equal ? bound_weight::after_all_prefixed : pos._bound_weight, pos._ck};
     }
 
@@ -266,13 +266,27 @@ public:
     explicit position_in_partition(static_row_tag_t) : _type(partition_region::static_row) { }
     position_in_partition(clustering_row_tag_t, clustering_key_prefix ck)
         : _type(partition_region::clustered), _ck(std::move(ck)) { }
-    position_in_partition(after_clustering_row_tag_t, clustering_key_prefix ck)
-        // FIXME: Use lexicographical_relation::before_strictly_prefixed here. Refs #1446
-        : _type(partition_region::clustered), _bound_weight(bound_weight::after_all_prefixed), _ck(std::move(ck)) { }
-    position_in_partition(after_clustering_row_tag_t, position_in_partition_view pos)
+    position_in_partition(after_clustering_row_tag_t, const schema& s, clustering_key_prefix ck)
+        : _type(partition_region::clustered)
+        , _bound_weight(bound_weight::after_all_prefixed)
+        , _ck(std::move(ck))
+    {
+        if (clustering_key::make_full(s, *_ck)) { // Refs #1446
+            _bound_weight = bound_weight::before_all_prefixed;
+        }
+    }
+    position_in_partition(after_clustering_row_tag_t, const schema& s, position_in_partition_view pos)
+        : position_in_partition(after_clustering_row_tag_t(), s, position_in_partition(pos))
+    { }
+    position_in_partition(after_clustering_row_tag_t, const schema& s, position_in_partition&& pos)
         : _type(partition_region::clustered)
         , _bound_weight(pos._bound_weight != bound_weight::equal ? pos._bound_weight : bound_weight::after_all_prefixed)
-        , _ck(*pos._ck) { }
+        , _ck(std::move(pos._ck))
+    {
+        if (pos._bound_weight == bound_weight::equal && _ck && clustering_key::make_full(s, *_ck)) { // Refs #1446
+            _bound_weight = bound_weight::before_all_prefixed;
+        }
+    }
     position_in_partition(before_clustering_row_tag_t, clustering_key_prefix ck)
         : _type(partition_region::clustered), _bound_weight(bound_weight::before_all_prefixed), _ck(std::move(ck)) { }
     position_in_partition(range_tag_t, bound_view bv)
@@ -312,15 +326,19 @@ public:
         return {before_clustering_row_tag_t(), std::move(ck)};
     }
 
-    static position_in_partition after_key(clustering_key ck) {
-        return {after_clustering_row_tag_t(), std::move(ck)};
+    static position_in_partition after_key(const schema& s, clustering_key ck) {
+        return {after_clustering_row_tag_t(), s, std::move(ck)};
     }
 
     // If given position is a clustering row position, returns a position
     // right after it. Otherwise returns it unchanged.
     // The position "pos" must be a clustering position.
-    static position_in_partition after_key(position_in_partition_view pos) {
-        return {after_clustering_row_tag_t(), pos};
+    static position_in_partition after_key(const schema& s, position_in_partition_view pos) {
+        return {after_clustering_row_tag_t(), s, pos};
+    }
+
+    static position_in_partition after_key(const schema& s, position_in_partition&& pos) noexcept {
+        return {after_clustering_row_tag_t(), s, std::move(pos)};
     }
 
     static position_in_partition for_key(clustering_key ck) {
