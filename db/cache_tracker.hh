@@ -92,6 +92,8 @@ public:
     void insert(partition_entry&) noexcept;
     void insert(partition_version&) noexcept;
     void insert(rows_entry&) noexcept;
+    // Inserts e such that it will be evicted right before more_recent in the absence of later touches.
+    void insert(rows_entry& e, rows_entry& more_recent) noexcept;
     void on_remove() noexcept;
     void clear_continuity(cache_entry& ce) noexcept;
     void on_partition_erase() noexcept;
@@ -133,6 +135,13 @@ void cache_tracker::insert(rows_entry& entry) noexcept {
     ++_stats.row_insertions;
     ++_stats.rows;
     _lru.add(entry);
+}
+
+inline
+void cache_tracker::insert(rows_entry& entry, rows_entry& more_recent) noexcept {
+    ++_stats.row_insertions;
+    ++_stats.rows;
+    _lru.add_before(entry, more_recent);
 }
 
 inline
