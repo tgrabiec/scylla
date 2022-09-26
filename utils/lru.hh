@@ -63,6 +63,11 @@ public:
         _list.push_back(e);
     }
 
+    // Like add(e) but makes sure that e is evicted right before "more_recent" in the absence of later touches.
+    void add_before(evictable& e, evictable& more_recent) noexcept {
+        _list.insert(_list.iterator_to(more_recent), e);
+    }
+
     void touch(evictable& e) noexcept {
         remove(e);
         add(e);
