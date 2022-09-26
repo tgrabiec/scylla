@@ -171,9 +171,6 @@ public:
     // Use in case this instance and p share the same schema.
     // Same guarantees as apply(const schema&, mutation_partition_v2&&, const schema&);
     void apply(const schema& s, mutation_partition_v2&& p, mutation_application_stats& app_stats);
-    // Same guarantees and constraints as for apply(const schema&, const mutation_partition_v2&, const schema&).
-    void apply(const schema& this_schema, mutation_partition_view p, const schema& p_schema,
-            mutation_application_stats& app_stats);
 
     // Applies p to this instance.
     //
@@ -225,17 +222,6 @@ public:
 private:
     void insert_row(const schema& s, const clustering_key& key, deletable_row&& row);
     void insert_row(const schema& s, const clustering_key& key, const deletable_row& row);
-
-    // Calls func for each row entry inside row_ranges until func returns stop_iteration::yes.
-    // Removes all entries for which func didn't return stop_iteration::no or wasn't called at all.
-    // Removes all entries that are empty, check rows_entry::empty().
-    // If reversed is true, func will be called on entries in reverse order. In that case row_ranges
-    // must be already in reverse order.
-    template<bool reversed, typename Func>
-    requires std::is_invocable_r_v<stop_iteration, Func, rows_entry&>
-    void trim_rows(const schema& s,
-        const std::vector<query::clustering_range>& row_ranges,
-        Func&& func);
 public:
     // Returns true if the mutation_partition_v2 represents no writes.
     bool empty() const;

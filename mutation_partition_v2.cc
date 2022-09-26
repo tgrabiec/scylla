@@ -409,6 +409,15 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
     return apply_monotonically(s, std::move(p), p_schema, app_stats, is_preemptible::no, res);
 }
 
+void mutation_partition_v2::apply(const schema& s, const mutation_partition_v2& p, const schema& p_schema,
+                               mutation_application_stats& app_stats) {
+    apply_monotonically(s, mutation_partition_v2(p_schema, std::move(p)), p_schema, app_stats);
+}
+
+void mutation_partition_v2::apply(const schema& s, mutation_partition_v2&& p, mutation_application_stats& app_stats) {
+    apply_monotonically(s, mutation_partition_v2(s, std::move(p)), no_cache_tracker, app_stats);
+}
+
 void
 mutation_partition_v2::apply_weak(const schema& s, mutation_partition_view p,
                                   const schema& p_schema, mutation_application_stats& app_stats) {
