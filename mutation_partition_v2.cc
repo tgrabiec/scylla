@@ -233,6 +233,11 @@ struct mutation_fragment_applier {
 
 stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutation_partition_v2&& p, cache_tracker* tracker,
         mutation_application_stats& app_stats, is_preemptible preemptible, apply_resume& res) {
+    return apply_monotonically(s, std::move(p), tracker, app_stats, preemptible ? default_preemption_check() : never_preempt(), res);
+}
+
+stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutation_partition_v2&& p, cache_tracker* tracker,
+        mutation_application_stats& app_stats, preemption_check need_preempt, apply_resume& res) {
 #ifdef SEASTAR_DEBUG
     assert(s.version() == _schema_version);
     assert(p._schema_version == _schema_version);
@@ -306,7 +311,7 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
             if (prev_i) {
                 maybe_drop(prev_i);
             }
-            if (preemptible && need_preempt() && i != _rows.end()) {
+            if (need_preempt() && i != _rows.end()) {
                 res = apply_resume(apply_resume::stage::partition_tombstone_compaction, i->position());
                 return stop_iteration::no;
             }
@@ -400,7 +405,7 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
                 lb_i->set_range_tombstone(lb_i->range_tombstone() + src_e.range_tombstone());
                 lb_i->set_continuous(true);
 
-                if (preemptible && need_preempt()) {
+                if (need_preempt()) {
                     res.set_position(lb_i->position());
                     return stop_iteration::no;
                 }
@@ -548,11 +553,12 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
 stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutation_partition_v2&& p, const schema& p_schema,
         mutation_application_stats& app_stats, is_preemptible preemptible, apply_resume& res) {
     if (s.version() == p_schema.version()) {
-        return apply_monotonically(s, std::move(p), no_cache_tracker, app_stats, preemptible, res);
+        return apply_monotonically(s, std::move(p), no_cache_tracker, app_stats,
+                                   preemptible ? default_preemption_check() : never_preempt(), res);
     } else {
         mutation_partition_v2 p2(s, p);
         p2.upgrade(p_schema, s);
-        return apply_monotonically(s, std::move(p2), no_cache_tracker, app_stats, is_preemptible::no, res); // FIXME: make preemptible
+        return apply_monotonically(s, std::move(p2), no_cache_tracker, app_stats, never_preempt(), res); // FIXME: make preemptible
     }
 }
 
