@@ -231,6 +231,10 @@ struct mutation_fragment_applier {
     }
 };
 
+std::ostream& operator<<(std::ostream& out, const apply_resume& res) {
+    return out << "{" << int(res._stage) << ", " << res._pos << "}";
+}
+
 stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutation_partition_v2&& p, cache_tracker* tracker,
         mutation_application_stats& app_stats, is_preemptible preemptible, apply_resume& res) {
     return apply_monotonically(s, std::move(p), tracker, app_stats, preemptible ? default_preemption_check() : never_preempt(), res);
@@ -313,6 +317,7 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
             }
             if (need_preempt() && i != _rows.end()) {
                 res = apply_resume(apply_resume::stage::partition_tombstone_compaction, i->position());
+                mplog.trace("preempted, res={}", res);
                 return stop_iteration::no;
             }
             prev_i = i;
@@ -351,6 +356,7 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
 
     bool prev_compacted = false;
     bool made_progress = false;
+    mplog.trace("start, res={}", res);
 
     while (p_i != p._rows.end()) {
         rows_entry& src_e = *p_i;
@@ -365,6 +371,12 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
             } else {
                 miss = x > 0;
             }
+        }
+
+        if (i != _rows.end()) {
+            mplog.trace("i={}", i->position());
+        } else {
+            mplog.trace("i=end");
         }
 
         // Invariants:
@@ -396,6 +408,8 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
                 }
             }
 
+            mplog.trace("lb_i={}", lb_i->position());
+
             while (lb_i != i) {
                 bool compaction_worthwhile = src_e.range_tombstone() > lb_i->range_tombstone();
 
@@ -407,6 +421,7 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
 
                 if (need_preempt()) {
                     res.set_position(lb_i->position());
+                    mplog.trace("preempted, res={}", res);
                     return stop_iteration::no;
                 }
 
@@ -541,6 +556,7 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
         }
         ++app_stats.row_writes;
         if (made_progress && need_preempt() && p_i != p._rows.end()) {
+            mplog.trace("preempted, pos={}, res={}", p_i->position(), res);
             return stop_iteration::no;
         }
     }
