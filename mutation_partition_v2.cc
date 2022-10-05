@@ -237,6 +237,7 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
     assert(s.version() == _schema_version);
     assert(p._schema_version == _schema_version);
 #endif
+    mplog.trace("apply {}\nto: {}", mutation_partition_v2::printer(s, p), mutation_partition_v2::printer(s, *this));
     _tombstone.apply(p._tombstone);
     app_stats.has_any_tombstones |= bool(_tombstone);
     _static_row.apply_monotonically(s, column_kind::static_column, std::move(p._static_row));
