@@ -14,6 +14,8 @@
 #include "utils/coroutine.hh"
 #include "real_dirty_memory_accounter.hh"
 
+extern seastar::logger dblog;
+
 static void remove_or_mark_as_unique_owner(partition_version* current, mutation_cleaner* cleaner)
 {
     while (current && !current->is_referenced()) {
@@ -167,6 +169,7 @@ partition_snapshot::~partition_snapshot() {
 
 void merge_versions(const schema& s, mutation_partition_v2& newer, mutation_partition_v2&& older, cache_tracker* tracker) {
     mutation_application_stats app_stats;
+    dblog.trace("merge {}\ninto: {}", mutation_partition_v2::printer(s, newer), mutation_partition_v2::printer(s, older));
     older.apply_monotonically(s, std::move(newer), tracker, app_stats);
     newer = std::move(older);
 }
@@ -490,19 +493,26 @@ utils::coroutine partition_entry::apply_to_incomplete(const schema& s,
 
             do {
                 auto size = src_cur.memory_usage();
+                dblog.trace("apply_to_incomplete: src={}, dst={}", src_cur, cur);
                 if (src_cur.range_tombstone()) {
                     // Apply the tombstone to (lb, src_cur.position())
                     // FIXME: Avoid if before all rows
                     auto ropt = cur.ensure_entry_if_complete(lb);
                     cur.advance_to(lb); // ensure_entry_if_complete() leaves the cursor invalid. Bring back to valid.
+                    dblog.trace("apply_to_incomplete: lb={}, ropt={}, dst={}", lb, bool(ropt), cur);
                     // If !ropt, it means there is no entry at lb, so cur is guaranteed to be at a position
                     // greater than lb. No need to advance it.
                     if (ropt) {
                         cur.next();
+                        dblog.trace("apply_to_incomplete: inserted, dst={}", cur);
                     }
                     position_in_partition::less_compare less(s);
-                    assert(less(lb, cur.position()));
+                    if (!less(lb, cur.position())) {
+                        std::cerr << printer(s, *self) << std::endl; // FIXME
+                        abort();
+                    }
                     while (less(cur.position(), src_cur.position())) {
+                        dblog.trace("apply_to_incomplete: applying rt, dst={}", cur);
                         auto res = cur.ensure_entry_in_latest();
                         if (cur.continuous()) {
                             res.row.set_continuous(is_continuous::yes);
@@ -521,6 +531,7 @@ utils::coroutine partition_entry::apply_to_incomplete(const schema& s,
                         tracker.on_row_processed_from_memtable();
                     }
                     auto ropt = cur.ensure_entry_if_complete(src_cur.position());
+                    dblog.trace("apply_to_incomplete: dst={}", cur);
                     if (ropt) {
                         if (!ropt->inserted) {
                             tracker.on_row_merged_from_memtable();

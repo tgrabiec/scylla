@@ -1222,7 +1222,7 @@ void cache_entry::on_evicted(cache_tracker& tracker) noexcept {
 
 void rows_entry::on_evicted(cache_tracker& tracker) noexcept {
     mutation_partition_v2::rows_type::iterator it(this);
-
+    clogger.trace("on_evicted: {}", position());
     if (is_last_dummy()) {
         // Every evictable partition entry must have a dummy entry at the end,
         // so don't remove it, just unlink from the LRU.

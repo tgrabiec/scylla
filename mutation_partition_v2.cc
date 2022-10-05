@@ -150,6 +150,7 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
     assert(s.version() == _schema_version);
     assert(p._schema_version == _schema_version);
 #endif
+    mplog.trace("apply {}\nto: {}", mutation_partition_v2::printer(s, p), mutation_partition_v2::printer(s, *this));
     _tombstone.apply(p._tombstone);
     _static_row.apply_monotonically(s, column_kind::static_column, std::move(p._static_row));
     _static_row_continuous |= p._static_row_continuous;
@@ -220,6 +221,7 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
             }
             if (need_preempt() && i != _rows.end()) {
                 res = apply_resume(apply_resume::stage::partition_tombstone_compaction, i->position());
+                mplog.trace("preempted, res={}", res);
                 return stop_iteration::no;
             }
             prev_i = i;
@@ -261,6 +263,7 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
     }
 
     bool made_progress = false;
+    mplog.trace("start, res={}", res);
 
     // Engaged p_sentinel indicates that information in p up to sentinel->position() was
     // merged into this instance and that flags on the entry pointed to by p_i are
@@ -326,6 +329,12 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
             }
         }
 
+        if (i != _rows.end()) {
+            mplog.trace("i={}", i->position());
+        } else {
+            mplog.trace("i=end");
+        }
+
         // Invariants:
         //   i->position() >= p_i->position()
 
@@ -350,6 +359,7 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
             }
 
             while (lb_i != i) {
+                mplog.trace("lb_i={}", lb_i->position());
                 bool compaction_worthwhile = src_e.range_tombstone() > lb_i->range_tombstone();
 
                 // This works for both evictable and non-evictable snapshots.
@@ -532,6 +542,7 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
         // Otherwise, p_i will be left empty, and thus fully continuous, violating the
         // invariant that the sum of this and p has the same continuity as before merging.
         if (made_progress && need_preempt() && p_i != p._rows.end()) {
+            mplog.trace("preempted, pos={}, res={}", p_i->position(), res);
             return stop_iteration::no;
         }
 

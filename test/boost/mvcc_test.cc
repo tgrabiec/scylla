@@ -428,8 +428,13 @@ SEASTAR_TEST_CASE(test_apply_to_incomplete_respects_continuity) {
                     snap = e.read();
                 }
 
+                testlog.trace("entry @v4: {}", partition_entry::printer(*s, e.entry()));
+
                 auto before = e.squashed();
                 auto e_continuity = before.get_continuity(*s);
+
+                testlog.trace("snapshot @v4: {}", mutation_partition::printer(*s, before));
+                testlog.trace("e_continuity = {}", e_continuity);
 
                 auto expected_to_apply_slice = mutation_partition(*s, to_apply.partition());
                 if (!before.static_row_continuous()) {
@@ -439,10 +444,14 @@ SEASTAR_TEST_CASE(test_apply_to_incomplete_respects_continuity) {
                 auto expected = mutation_partition(*s, before);
                 expected.apply_weak(*s, std::move(expected_to_apply_slice), app_stats);
 
+                testlog.trace("to_apply = {}", to_apply);
+
                 e += to_apply;
 
+                testlog.trace("entry @v5: {}", partition_entry::printer(*s, e.entry()));
 
                 auto sq = e.squashed();
+                testlog.trace("snapshot @v5: {}", mutation_partition::printer(*s, sq));
 
                 // After applying to_apply the continuity can be more narrow due to compaction with tombstones
                 // present in to_apply.
