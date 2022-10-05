@@ -70,9 +70,6 @@ private:
     lazy_row _static_row;
     bool _static_row_continuous = true;
     rows_type _rows;
-    // Contains only strict prefixes so that we don't have to lookup full keys
-    // in both _row_tombstones and _rows.
-    range_tombstone_list _row_tombstones;
 #ifdef SEASTAR_DEBUG
     table_schema_version _schema_version;
 #endif
@@ -88,14 +85,12 @@ public:
     }
     mutation_partition_v2(schema_ptr s)
         : _rows()
-        , _row_tombstones(*s)
 #ifdef SEASTAR_DEBUG
         , _schema_version(s->version())
 #endif
     { }
     mutation_partition_v2(mutation_partition_v2& other, copy_comparators_only)
         : _rows()
-        , _row_tombstones(other._row_tombstones, range_tombstone_list::copy_comparator_only())
 #ifdef SEASTAR_DEBUG
         , _schema_version(other._schema_version)
 #endif
@@ -104,8 +99,6 @@ public:
     mutation_partition_v2(const schema& s, mutation_partition&&);
     mutation_partition_v2(const schema& s, const mutation_partition_v2&);
     mutation_partition_v2(const schema& s, const mutation_partition&);
-    mutation_partition_v2(const mutation_partition_v2&, const schema&, query::clustering_key_filter_ranges);
-    mutation_partition_v2(mutation_partition_v2&&, const schema&, query::clustering_key_filter_ranges);
     ~mutation_partition_v2();
     static mutation_partition_v2& container_of(rows_type&);
     mutation_partition_v2& operator=(mutation_partition_v2&& x) noexcept;
@@ -178,9 +171,6 @@ public:
     // Use in case this instance and p share the same schema.
     // Same guarantees as apply(const schema&, mutation_partition_v2&&, const schema&);
     void apply(const schema& s, mutation_partition_v2&& p, mutation_application_stats& app_stats);
-    // Same guarantees and constraints as for apply(const schema&, const mutation_partition_v2&, const schema&).
-    void apply(const schema& this_schema, mutation_partition_view p, const schema& p_schema,
-            mutation_application_stats& app_stats);
 
     // Applies p to this instance.
     //
@@ -230,64 +220,7 @@ public:
 private:
     void insert_row(const schema& s, const clustering_key& key, deletable_row&& row);
     void insert_row(const schema& s, const clustering_key& key, const deletable_row& row);
-
-    uint32_t do_compact(const schema& s,
-        const dht::decorated_key& dk,
-        gc_clock::time_point now,
-        const std::vector<query::clustering_range>& row_ranges,
-        bool always_return_static_content,
-        bool reverse,
-        uint64_t row_limit,
-        can_gc_fn&,
-        bool drop_tombstones_unconditionally);
-
-    // Calls func for each row entry inside row_ranges until func returns stop_iteration::yes.
-    // Removes all entries for which func didn't return stop_iteration::no or wasn't called at all.
-    // Removes all entries that are empty, check rows_entry::empty().
-    // If reversed is true, func will be called on entries in reverse order. In that case row_ranges
-    // must be already in reverse order.
-    template<bool reversed, typename Func>
-    requires std::is_invocable_r_v<stop_iteration, Func, rows_entry&>
-    void trim_rows(const schema& s,
-        const std::vector<query::clustering_range>& row_ranges,
-        Func&& func);
 public:
-    // Performs the following:
-    //   - throws out data which doesn't belong to row_ranges
-    //   - expires cells and tombstones based on query_time
-    //   - drops cells covered by higher-level tombstones (compaction)
-    //   - leaves at most row_limit live rows
-    //
-    // Note: a partition with a static row which has any cell live but no
-    // clustered rows still counts as one row, according to the CQL row
-    // counting rules.
-    //
-    // Returns the count of CQL rows which remained. If the returned number is
-    // smaller than the row_limit it means that there was no more data
-    // satisfying the query left.
-    //
-    // The row_limit parameter must be > 0.
-    //
-    uint64_t compact_for_query(const schema& s, const dht::decorated_key& dk, gc_clock::time_point query_time,
-        const std::vector<query::clustering_range>& row_ranges, bool always_return_static_content,
-        bool reversed, uint64_t row_limit);
-
-    // Performs the following:
-    //   - expires cells based on compaction_time
-    //   - drops cells covered by higher-level tombstones
-    //   - drops expired tombstones which timestamp is before max_purgeable
-    void compact_for_compaction(const schema& s, can_gc_fn&,
-        const dht::decorated_key& dk,
-        gc_clock::time_point compaction_time);
-
-    // Like compact_for_compaction but drop tombstones unconditionally
-    void compact_for_compaction_drop_tombstones_unconditionally(const schema& s,
-            const dht::decorated_key& dk);
-
-    // Returns a subset of this mutation holding only information relevant for given clustering ranges.
-    // Range tombstones will be trimmed to the boundaries of the clustering ranges.
-    mutation_partition_v2 sliced(const schema& s, const query::clustering_row_ranges&) const;
-
     // Returns true if the mutation_partition_v2 represents no writes.
     bool empty() const;
 public:
@@ -295,6 +228,8 @@ public:
     deletable_row& clustered_row(const schema& s, clustering_key&& key);
     deletable_row& clustered_row(const schema& s, clustering_key_view key);
     deletable_row& clustered_row(const schema& s, position_in_partition_view pos, is_dummy, is_continuous);
+    rows_entry& clustered_rows_entry(const schema& s, position_in_partition_view pos, is_dummy, is_continuous);
+    rows_entry& clustered_row(const schema& s, position_in_partition_view pos, is_dummy);
     // Throws if the row already exists or if the row was not inserted to the
     // last position (one or more greater row already exists).
     // Weak exception guarantees.
@@ -309,15 +244,7 @@ public:
     utils::immutable_collection<rows_type> clustered_rows() noexcept { return _rows; }
     rows_type& mutable_clustered_rows() noexcept { return _rows; }
 
-    const range_tombstone_list& row_tombstones() const noexcept { return _row_tombstones; }
-    utils::immutable_collection<range_tombstone_list> row_tombstones() noexcept { return _row_tombstones; }
-    range_tombstone_list& mutable_row_tombstones() noexcept { return _row_tombstones; }
-
     const row* find_row(const schema& s, const clustering_key& key) const;
-    tombstone range_tombstone_for_row(const schema& schema, const clustering_key& key) const;
-    row_tombstone tombstone_for_row(const schema& schema, const clustering_key& key) const;
-    // Can be called only for non-dummy entries
-    row_tombstone tombstone_for_row(const schema& schema, const rows_entry& e) const;
     boost::iterator_range<rows_type::const_iterator> range(const schema& schema, const query::clustering_range& r) const;
     rows_type::const_iterator lower_bound(const schema& schema, const query::clustering_range& r) const;
     rows_type::const_iterator upper_bound(const schema& schema, const query::clustering_range& r) const;
@@ -330,15 +257,6 @@ public:
             | boost::adaptors::filtered([] (const rows_entry& e) { return bool(!e.dummy()); });
     }
     void accept(const schema&, mutation_partition_visitor&) const;
-
-    // Returns the number of live CQL rows in this partition.
-    //
-    // Note: If no regular rows are live, but there's something live in the
-    // static row, the static row counts as one row. If there is at least one
-    // regular row live, static row doesn't count.
-    //
-    uint64_t live_row_count(const schema&,
-        gc_clock::time_point query_time = gc_clock::time_point::min()) const;
 
     bool is_static_row_live(const schema&,
         gc_clock::time_point query_time = gc_clock::time_point::min()) const;
