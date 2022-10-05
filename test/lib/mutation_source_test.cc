@@ -2027,13 +2027,15 @@ class random_mutation_generator::impl {
     };
 
 private:
+    static const bool minimal = true;
+    static const api::timestamp_type min_timestamp = minimal ? 3330000 : ::api::min_timestamp;
     friend class random_mutation_generator;
     generate_counters _generate_counters;
     local_shard_only _local_shard_only;
     generate_uncompactable _uncompactable;
-    const size_t _external_blob_size = 128; // Should be enough to force use of external bytes storage
-    const size_t n_blobs = 1024;
-    const column_id column_count = 64;
+    const size_t _external_blob_size = minimal ? 4 : 128; // Should be enough to force use of external bytes storage
+    const size_t n_blobs = minimal ? 32 : 1024;
+    const column_id column_count = minimal ? 3 : 64;
     std::mt19937 _gen;
     schema_ptr _schema;
     std::vector<bytes> _blobs;

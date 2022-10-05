@@ -1194,6 +1194,7 @@ bool
 rows_entry::equal(const schema& s, const rows_entry& other, const schema& other_schema) const {
     position_in_partition::equal_compare eq(s);
     return eq(position(), other.position())
+           && _range_tombstone == other._range_tombstone
            && row().equal(column_kind::regular_column, s, other.row(), other_schema);
 }
 
@@ -1554,6 +1555,7 @@ rows_entry::rows_entry(rows_entry&& o) noexcept
 
 void rows_entry::replace_with(rows_entry&& o) noexcept {
     swap(o);
+    _range_tombstone = std::move(o._range_tombstone);
     _row = std::move(o._row);
 }
 

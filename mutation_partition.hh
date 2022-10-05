@@ -901,12 +901,12 @@ class rows_entry final : public evictable {
     deletable_row _row;
 
     // Given p is the preceding rows_entry&,
-    // this tombstone applies to the range (p.position(), position()]
-    // if continuous() and to [position(), position()] otherwise.
-    // So the tombstone applies only to the continuous interval,
-    // to the left.
+    // this tombstone applies to the range (p.position(), position()] if continuous()
+    // and to [position(), position()] if !continuous().
+    // So the tombstone applies only to the continuous interval, to the left.
     // On top of that, _row.deleted_at() may still apply new information.
     // So it's not deoverlapped with the row tombstone.
+    // Set only when in mutation_partition_v2.
     tombstone _range_tombstone;
 
     struct flags {
@@ -1113,6 +1113,12 @@ struct apply_resume {
 
     static apply_resume done() {
         return {stage::done, position_in_partition::for_partition_start()};
+    }
+
+    void set_position(position_in_partition_view pos) {
+        with_allocator(standard_allocator(), [&] {
+            _pos = position_in_partition(pos);
+        });
     }
 };
 
