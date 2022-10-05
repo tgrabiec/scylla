@@ -3951,6 +3951,100 @@ SEASTAR_TEST_CASE(test_scans_erase_dummies) {
     });
 }
 
+SEASTAR_TEST_CASE(test_range_tombstone_adjacent_with_population_bound) {
+    return seastar::async([] {
+        simple_schema s;
+        tests::reader_concurrency_semaphore_wrapper semaphore;
+
+        auto pkey = s.make_pkey("pk");
+
+        mutation m1(s.schema(), pkey);
+        auto k1 = s.make_ckey(7);
+        s.add_row(m1, k1, "v1");
+
+        memtable_snapshot_source underlying(s.schema());
+        underlying.apply(m1);
+
+        cache_tracker tracker;
+        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+
+        auto pr = dht::partition_range::make_singular(pkey);
+
+        // Force k1 into cache without dummy entries before k1.
+        // Needed for later range population to end at k1.
+        {
+            auto slice = partition_slice_builder(*s.schema())
+                    .with_range(query::clustering_range::make_singular(k1))
+                    .build();
+            assert_that(cache.make_reader(s.schema(), semaphore.make_permit(), pr, slice))
+                    .has_monotonic_positions();
+        }
+
+        auto r1 = *position_range_to_clustering_range(position_range(
+                position_in_partition::before_all_clustered_rows(), position_in_partition::before_key(k1)), *s.schema());
+        s.delete_range(m1, r1);
+
+        auto mt2 = make_lw_shared<replica::memtable>(s.schema());
+        mt2->apply(m1);
+        cache.update(row_cache::external_updater([&] {
+            underlying.apply(m1);
+        }), *mt2).get();
+
+        {
+            auto slice = partition_slice_builder(*s.schema()).build();
+            assert_that(cache.make_reader(s.schema(), semaphore.make_permit(), pr, slice))
+                    .produces(m1)
+                    .produces_end_of_stream();
+        }
+
+        // full scan
+        assert_that(cache.make_reader(s.schema(), semaphore.make_permit()))
+            .produces(m1)
+            .produces_end_of_stream();
+    });
+}
+
+SEASTAR_TEST_CASE(test_single_row_query_with_range_tombstone_is_cached) {
+    return seastar::async([] {
+        simple_schema s;
+        tests::reader_concurrency_semaphore_wrapper semaphore;
+
+        auto pkey = s.make_pkey("pk");
+
+        mutation m1(s.schema(), pkey);
+        s.delete_range(m1, query::full_clustering_range);
+        auto k1 = s.make_ckey(7);
+        s.add_row(m1, k1, "v1");
+
+        memtable_snapshot_source underlying(s.schema());
+        underlying.apply(m1);
+
+        cache_tracker tracker;
+        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+
+        auto pr = dht::partition_range::make_singular(pkey);
+
+        {
+            auto slice = partition_slice_builder(*s.schema())
+                    .with_range(query::clustering_range::make_singular(k1))
+                    .build();
+            assert_that(cache.make_reader(s.schema(), semaphore.make_permit(), pr, slice))
+                    .produces(m1, slice.row_ranges(*s.schema(), pkey.key()));
+        }
+
+        auto misses_before = tracker.get_stats().row_misses;
+
+        {
+            auto slice = partition_slice_builder(*s.schema())
+                    .with_range(query::clustering_range::make_singular(k1))
+                    .build();
+            assert_that(cache.make_reader(s.schema(), semaphore.make_permit(), pr, slice))
+                    .produces(m1, slice.row_ranges(*s.schema(), pkey.key()));
+        }
+
+        BOOST_REQUIRE_EQUAL(misses_before, tracker.get_stats().row_misses);
+    });
+}
 
 SEASTAR_TEST_CASE(row_cache_is_populated_using_compacting_sstable_reader) {
     return do_with_cql_env_thread([](cql_test_env& env) {
