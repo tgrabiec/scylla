@@ -1064,6 +1064,289 @@ SEASTAR_TEST_CASE(test_cursor_tracks_continuity_in_reversed_mode) {
     });
 }
 
+struct entry_and_snapshots {
+    partition_entry e;
+    std::vector<partition_snapshot_ptr> snapshots;
+};
+
+struct partition_entry_builder {
+    schema_ptr _schema;
+    cache_tracker* _tracker;
+    logalloc::region& _r;
+    partition_entry _e;
+    std::optional<position_in_partition> _last_key;
+    std::vector<partition_snapshot_ptr> _snapshots;
+private:
+    rows_entry& last_entry() {
+        auto&& p = _snapshots.back()->version()->partition();
+        rows_entry& e = p.clustered_rows_entry(*_schema,
+                                               *_last_key,
+                                               is_dummy(!_last_key->is_clustering_row()),
+                                               is_continuous::no);
+        if (!e.is_linked()) {
+            _tracker->insert(e);
+        }
+        return e;
+    }
+public:
+    partition_entry_builder(schema_ptr s, cache_tracker* t, logalloc::region& r)
+            : _schema(s)
+            , _tracker(t)
+            , _r(r)
+            , _e(_tracker ? partition_entry::make_evictable(*_schema, mutation_partition::make_incomplete(*_schema))
+                          : partition_entry(mutation_partition_v2(_schema)))
+    {
+        _tracker->insert(_e);
+    }
+
+    partition_entry_builder& new_version() {
+        _snapshots.emplace_back(_e.read(_r, _tracker->cleaner(), _schema, _tracker, _snapshots.size()));
+        _last_key = {};
+        return *this;
+    }
+
+    partition_entry_builder& add(clustering_key key, is_continuous cont) {
+        return add(position_in_partition::for_key(std::move(key)), cont);
+    }
+
+    partition_entry_builder& add(position_in_partition key, is_continuous cont) {
+        if (_snapshots.empty()) {
+            new_version();
+        }
+        _last_key = std::move(key);
+        last_entry().set_continuous(cont);
+        return *this;
+    }
+
+    // Sets range tombstone on the last added entry
+    partition_entry_builder& set_range_tombstone(tombstone t) {
+        last_entry().set_range_tombstone(t);
+        return *this;
+
+    }
+
+    entry_and_snapshots build() {
+        return {std::move(_e), std::move(_snapshots)};
+    }
+};
+
+SEASTAR_TEST_CASE(test_ensure_in_latest_preserves_range_tombstones) {
+    return seastar::async([] {
+        cache_tracker tracker;
+        auto& r = tracker.region();
+        with_allocator(r.allocator(), [&] {
+            simple_schema table;
+            auto&& s = *table.schema();
+
+            //
+            //  snap2: ===T1==== (3) ------- (6) ---
+            //  snap1: --- (0) ===T0== (4) ---------
+            //
+
+            auto t0 = table.new_tombstone();
+            auto t1 = table.new_tombstone();
+
+            auto [e, snapshots] = partition_entry_builder(table.schema(), &tracker, tracker.region())
+                    .new_version()
+                    .add(table.make_ckey(0), is_continuous::no)
+                    .add(table.make_ckey(4), is_continuous::yes)
+                        .set_range_tombstone(t0)
+                    .new_version()
+                    .add(table.make_ckey(3), is_continuous::yes)
+                        .set_range_tombstone(t1)
+                    .add(table.make_ckey(6), is_continuous::no)
+                    .build();
+
+            auto snap1 = snapshots[0];
+            auto snap2 = snapshots[1];
+            auto snap1_original = snap1->squashed();
+            auto snap2_original = snap2->squashed();
+
+            partition_snapshot_row_cursor cur(s, *snap2);
+            position_in_partition::equal_compare eq(s);
+
+            logalloc::reclaim_lock rl(r); // To make cur stable
+
+            {
+                BOOST_REQUIRE(cur.advance_to(table.make_ckey(4)));
+                BOOST_REQUIRE_EQUAL(cur.range_tombstone(), t0);
+                BOOST_REQUIRE_EQUAL(cur.range_tombstone_for_row(), t0);
+                auto res = cur.ensure_entry_in_latest();
+                BOOST_REQUIRE(res.inserted);
+            }
+
+            BOOST_REQUIRE(cur.next());
+            BOOST_REQUIRE(eq(cur.table_position(), table.make_ckey(6)));
+            BOOST_REQUIRE(!cur.continuous());
+            BOOST_REQUIRE(!cur.range_tombstone());
+
+            {
+                BOOST_REQUIRE(!cur.advance_to(table.make_ckey(5)));
+                auto res = cur.ensure_entry_in_latest();
+                BOOST_REQUIRE(!res.inserted);
+                BOOST_REQUIRE(!cur.continuous());
+                BOOST_REQUIRE(!cur.range_tombstone());
+            }
+
+            {
+                BOOST_REQUIRE(cur.advance_to(table.make_ckey(3)));
+                BOOST_REQUIRE_EQUAL(cur.range_tombstone(), t1);
+                BOOST_REQUIRE_EQUAL(cur.range_tombstone_for_row(), t1);
+                auto res = cur.ensure_entry_in_latest();
+                BOOST_REQUIRE(!res.inserted);
+            }
+
+            BOOST_REQUIRE(cur.next());
+            BOOST_REQUIRE(eq(cur.table_position(), table.make_ckey(4)));
+            BOOST_REQUIRE_EQUAL(cur.range_tombstone(), t0);
+            BOOST_REQUIRE_EQUAL(cur.range_tombstone_for_row(), t0);
+            BOOST_REQUIRE(cur.continuous());
+
+            {
+                BOOST_REQUIRE(!cur.advance_to(table.make_ckey(2)));
+                BOOST_REQUIRE_EQUAL(cur.range_tombstone(), t1);
+                BOOST_REQUIRE_EQUAL(cur.range_tombstone_for_row(), t1);
+                auto res = cur.ensure_entry_if_complete(table.make_ckey(2));
+                BOOST_REQUIRE(res);
+                BOOST_REQUIRE(res->inserted);
+            }
+
+            BOOST_REQUIRE(cur.advance_to(table.make_ckey(2)));
+            BOOST_REQUIRE_EQUAL(cur.range_tombstone(), t1);
+            BOOST_REQUIRE_EQUAL(cur.range_tombstone_for_row(), t1);
+            BOOST_REQUIRE(cur.next());
+
+            BOOST_REQUIRE(eq(cur.table_position(), table.make_ckey(3)));
+            BOOST_REQUIRE_EQUAL(cur.range_tombstone(), t1);
+            BOOST_REQUIRE_EQUAL(cur.range_tombstone_for_row(), t1);
+            BOOST_REQUIRE(cur.continuous());
+
+            {
+                BOOST_REQUIRE(cur.advance_to(table.make_ckey(0)));
+                BOOST_REQUIRE_EQUAL(cur.range_tombstone(), t1);
+                BOOST_REQUIRE_EQUAL(cur.range_tombstone_for_row(), t1);
+                auto res = cur.ensure_entry_in_latest();
+                BOOST_REQUIRE(res.inserted);
+            }
+
+            BOOST_REQUIRE(cur.next());
+            BOOST_REQUIRE(eq(cur.table_position(), table.make_ckey(2)));
+            BOOST_REQUIRE_EQUAL(cur.range_tombstone(), t1);
+            BOOST_REQUIRE_EQUAL(cur.range_tombstone_for_row(), t1);
+            BOOST_REQUIRE(cur.continuous());
+
+            {
+                BOOST_REQUIRE(!cur.advance_to(table.make_ckey(1)));
+                BOOST_REQUIRE_EQUAL(cur.range_tombstone(), t1);
+                BOOST_REQUIRE_EQUAL(cur.range_tombstone_for_row(), t1);
+                auto res = cur.ensure_entry_if_complete(table.make_ckey(1));
+                BOOST_REQUIRE(res);
+                BOOST_REQUIRE(res->inserted);
+            }
+
+            BOOST_REQUIRE(cur.advance_to(table.make_ckey(1)));
+            BOOST_REQUIRE_EQUAL(cur.range_tombstone(), t1);
+            BOOST_REQUIRE_EQUAL(cur.range_tombstone_for_row(), t1);
+            BOOST_REQUIRE(cur.next());
+
+            BOOST_REQUIRE(eq(cur.table_position(), table.make_ckey(2)));
+            BOOST_REQUIRE_EQUAL(cur.range_tombstone(), t1);
+            BOOST_REQUIRE_EQUAL(cur.range_tombstone_for_row(), t1);
+            BOOST_REQUIRE(cur.continuous());
+
+            // Below we check that snap2 version did not lose information.
+            // First, we evict snap1 version, then check that adding snap1_original
+            // gives snap2_original.
+
+            // Simulate eviction of snap1 version.
+            {
+                auto&& p2 = snap1->version()->partition();
+                p2 = mutation_partition_v2::make_incomplete(s);
+                tracker.insert(*snap1->version());
+            }
+
+            {
+                auto m = snap2->squashed();
+                m.make_fully_continuous();
+                mutation_application_stats stats;
+                m.apply(s, snap1_original, s, stats);
+
+                can_gc_fn never_gc = [] (tombstone) { return false; };
+                m.compact_for_compaction(s, never_gc, table.make_pkey(), gc_clock::time_point::min());
+                snap2_original.compact_for_compaction(s, never_gc, table.make_pkey(), gc_clock::time_point::min());
+
+                assert_that(table.schema(), m).is_equal_to(snap2_original);
+            }
+        });
+    });
+}
+
+SEASTAR_TEST_CASE(test_range_tombstone_representation) {
+    return seastar::async([] {
+        cache_tracker tracker;
+        auto& r = tracker.region();
+        with_allocator(r.allocator(), [&] {
+            simple_schema table;
+            auto&& s = *table.schema();
+
+            // v1: === t0 ==== (1, t0) --- (2, t2) ---
+            // v0: --- (0) ============= t1 ==========
+
+            auto t0 = table.new_tombstone();
+            auto t1 = table.new_tombstone();
+            auto t2 = table.new_tombstone();
+
+            auto [e, snapshots] = partition_entry_builder(table.schema(), &tracker, tracker.region())
+                .new_version()
+                .add(table.make_ckey(0), is_continuous::no)
+                .add(position_in_partition::after_all_clustered_rows(), is_continuous::yes)
+                    .set_range_tombstone(t1)
+                .new_version()
+                .add(table.make_ckey(1), is_continuous::yes)
+                    .set_range_tombstone(t0)
+                .add(table.make_ckey(2), is_continuous::no)
+                    .set_range_tombstone(t2)
+                .build();
+
+            auto snap1_original = snapshots[0]->squashed();
+            auto snap2_original = snapshots[1]->squashed();
+
+            partition_snapshot_row_cursor cur(s, *snapshots[1]);
+            position_in_partition::equal_compare eq(s);
+
+            logalloc::reclaim_lock rl(r); // To make cur stable
+
+            cur.advance_to(position_in_partition::before_all_clustered_rows());
+            testlog.trace("{}", cur);
+            BOOST_REQUIRE(eq(cur.table_position(), table.make_ckey(0)));
+            BOOST_REQUIRE_EQUAL(cur.range_tombstone(), t0);
+            BOOST_REQUIRE_EQUAL(cur.range_tombstone_for_row(), t0);
+
+            BOOST_REQUIRE(cur.next());
+            testlog.trace("{}", cur);
+            BOOST_REQUIRE(eq(cur.table_position(), table.make_ckey(1)));
+            BOOST_REQUIRE_EQUAL(cur.range_tombstone(), t1);
+            BOOST_REQUIRE_EQUAL(cur.range_tombstone_for_row(), t1);
+
+            BOOST_REQUIRE(cur.next());
+            testlog.trace("{}", cur);
+            BOOST_REQUIRE(eq(cur.table_position(), table.make_ckey(2)));
+            BOOST_REQUIRE_EQUAL(cur.range_tombstone(), t1);
+            BOOST_REQUIRE_EQUAL(cur.range_tombstone_for_row(), t2);
+
+            BOOST_REQUIRE(cur.next());
+            testlog.trace("{}", cur);
+            BOOST_REQUIRE(eq(cur.table_position(), position_in_partition::after_all_clustered_rows()));
+            BOOST_REQUIRE_EQUAL(cur.range_tombstone(), t1);
+
+            BOOST_REQUIRE(!cur.next());
+
+            // So that partition merging doesn't kick in. The versions violate the "no singular-tombstones" rule.
+            tracker.clear();
+        });
+    });
+}
+
 SEASTAR_TEST_CASE(test_ensure_entry_in_latest_in_reversed_mode) {
     return seastar::async([] {
         cache_tracker tracker;
