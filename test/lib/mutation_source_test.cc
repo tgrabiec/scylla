@@ -2308,7 +2308,7 @@ public:
             abort();
         };
 
-        if (_bool_dist(_gen)) {
+        if (tests::random::with_probability(0.11)) {
             m.partition().apply(random_tombstone(timestamp_level::partition_tombstone));
         }
 
