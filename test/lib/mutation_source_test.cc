@@ -1957,7 +1957,7 @@ class random_mutation_generator::impl {
 
 private:
     // Set to true in order to produce mutations which are easier to work with during debugging.
-    static const bool debuggable = false;
+    static const bool debuggable = true;
 
     // The "333" prefix is so that it's easily distinguishable from other numbers in the printout.
     static const api::timestamp_type min_timestamp = debuggable ? 3330000 : ::api::min_timestamp;
