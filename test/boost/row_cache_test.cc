@@ -13,6 +13,7 @@
 #include <seastar/util/alloc_failure_injector.hh>
 #include <boost/algorithm/cxx11/any_of.hpp>
 #include <seastar/util/closeable.hh>
+#include <fstream>
 
 #include <seastar/testing/test_case.hh>
 #include "test/lib/mutation_assertions.hh"
@@ -3361,10 +3362,12 @@ SEASTAR_TEST_CASE(test_concurrent_reads_and_eviction) {
         auto m0 = gen();
         m0.partition().make_fully_continuous();
         circular_buffer<mutation> versions;
+        circular_buffer<mutation> muts;
         size_t last_generation = 0;
         size_t cache_generation = 0; // cache contains only versions >= than this
         underlying.apply(m0);
         versions.emplace_back(m0);
+        muts.emplace_back(m0);
 
         cache_tracker tracker;
         row_cache cache(s, snapshot_source([&] { return underlying(); }), tracker);
@@ -3403,6 +3406,8 @@ SEASTAR_TEST_CASE(test_concurrent_reads_and_eviction) {
                         .with_ranges(fwd_ranges)
                         .build();
 
+                    testlog.trace("read {} starts, gen={}", id, cache_generation);
+
                     auto native_slice = slice;
                     if (reversed) {
                         slice = make_legacy_reversed(s, std::move(slice));
@@ -3427,13 +3432,44 @@ SEASTAR_TEST_CASE(test_concurrent_reads_and_eviction) {
                             m2 = reverse(std::move(m2));
                         }
                         m2 = std::move(m2).compacted();
-                        if (n_to_consider == 1) {
-                            assert_that(actual).is_equal_to(m2);
-                        }
                         return m2 == actual;
                     })) {
-                        BOOST_FAIL(format("Mutation read doesn't match any expected version, slice: {}, read: {}\nexpected: [{}]",
-                            slice, actual, ::join(",\n", possible_versions)));
+                        auto path = ".";
+
+                        int i = 0;
+                        for (auto&& m : possible_versions) {
+                            auto m2 = m.sliced(ranges);
+                            std::ofstream of(format("{}/mut{}", path, i++));
+                            of << format("Mutations differ, expected {}\n ...but got: {}", m2, actual) << "\n";
+                            of.close();
+                        }
+                        auto n_versions = i;
+
+                        i = 0;
+                        for (auto&& v : muts) {
+                            std::ofstream of(format("{}/mm{:02d}", path, i++));
+                            of << v << "\n";
+                            of.close();
+                        }
+
+                        {
+                            std::ofstream of(format("{}/cache", path));
+                            of << cache << "\n";
+                            of.close();
+                        }
+
+                        {
+                            std::ofstream of(format("{}/base", path));
+                            if (oldest_generation > 0) {
+                                of << versions[oldest_generation - 1] << "\n";
+                            }
+                            of.close();
+                        }
+
+                        BOOST_FAIL(format("Mutation read doesn't match any expected version (there are {}, mm{}-mm{}), "
+                                          "id: {}, slice: {}, diffs: {}, read: {}\nexpected: [{}]",
+                                          n_versions, oldest_generation, last_generation, id, slice, path, actual,
+                                          ::join(",\n", possible_versions)));
                     }
                 }
             }).finally([&, id] {
@@ -3448,14 +3484,18 @@ SEASTAR_TEST_CASE(test_concurrent_reads_and_eviction) {
 
             auto mt = make_lw_shared<replica::memtable>(m2.schema());
             mt->apply(m2);
+            testlog.trace("Starting gen {}", last_generation + 1);
             cache.update(row_cache::external_updater([&] () noexcept {
                 auto snap = underlying();
                 underlying.apply(m2);
                 auto new_version = versions.back() + m2;
                 versions.emplace_back(std::move(new_version));
+                muts.emplace_back(std::move(m2));
                 ++last_generation;
+                testlog.trace("Updated underlying to gen {}", last_generation);
             }), *mt).get();
             cache_generation = last_generation;
+            testlog.trace("Updated cache to gen {}", cache_generation);
 
             yield().get();
             tracker.region().evict_some();
