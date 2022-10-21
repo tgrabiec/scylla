@@ -1236,6 +1236,7 @@ void rows_entry::on_evicted(cache_tracker& tracker) noexcept {
         mutation_partition_v2::rows_type::key_grabber kg(it);
         kg.release(current_deleter<rows_entry>());
         if (!still_continuous || old_rt != it->range_tombstone()) {
+            clogger.trace("on_evicted: set_continuous({}, false)", it->position());
             it->set_continuous(false);
         }
         tracker.on_row_eviction();

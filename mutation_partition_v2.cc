@@ -359,6 +359,7 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
             }
 
             while (lb_i != i) {
+                assert(lb_i != _rows.end());
                 mplog.trace("lb_i={}", lb_i->position());
                 bool compaction_worthwhile = src_e.range_tombstone() > lb_i->range_tombstone();
 
