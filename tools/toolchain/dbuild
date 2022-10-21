@@ -173,6 +173,10 @@ if [ "$PWD" != "$toplevel" ]; then
      docker_common_args+=(-v "$toplevel:$toplevel")
 fi
 
+if [ -e ~/.gdbinit ]; then
+    docker_common_args+=(-v "$HOME/.gdbinit:$HOME/.gdbinit:ro")
+fi
+
 # podman cannot relabel system directories like /tmp, but it can
 # relable directories we own, so we map a temporary directory to /tmp
 

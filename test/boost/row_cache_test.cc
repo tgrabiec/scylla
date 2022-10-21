@@ -3399,8 +3399,9 @@ SEASTAR_TEST_CASE(test_concurrent_reads_and_eviction) {
                     generations[id] = oldest_generation;
                     gc_versions();
 
-                    bool reversed = tests::random::get_bool();
-
+                    bool reversed = false;
+//                    bool reversed = tests::random::get_bool();
+//
                     auto fwd_ranges = gen.make_random_ranges(1);
                     auto slice = partition_slice_builder(*s)
                         .with_ranges(fwd_ranges)
@@ -3457,14 +3458,12 @@ SEASTAR_TEST_CASE(test_concurrent_reads_and_eviction) {
                             of << cache << "\n";
                             of.close();
                         }
-
-                        {
-                            std::ofstream of(format("{}/base", path));
-                            if (oldest_generation > 0) {
-                                of << versions[oldest_generation - 1] << "\n";
-                            }
-                            of.close();
-                        }
+//
+//                        if (last_generation - oldest_generation >= versions.size() - 1){
+//                            std::ofstream of(format("{}/base", path));
+//                            of << versions[versions.size() - (last_generation - oldest_generation) - 1] << "\n";
+//                            of.close();
+//                        }
 
                         BOOST_FAIL(format("Mutation read doesn't match any expected version (there are {}, mm{}-mm{}), "
                                           "id: {}, slice: {}, diffs: {}, read: {}\nexpected: [{}]",
