@@ -150,7 +150,7 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
     assert(s.version() == _schema_version);
     assert(p._schema_version == _schema_version);
 #endif
-    mplog.trace("apply {}\nto: {}", mutation_partition_v2::printer(s, p), mutation_partition_v2::printer(s, *this));
+//    mplog.trace("apply {}\nto: {}", mutation_partition_v2::printer(s, p), mutation_partition_v2::printer(s, *this));
     _tombstone.apply(p._tombstone);
     _static_row.apply_monotonically(s, column_kind::static_column, std::move(p._static_row));
     _static_row_continuous |= p._static_row_continuous;
@@ -263,7 +263,7 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
     }
 
     bool made_progress = false;
-    mplog.trace("start, res={}", res);
+    mplog.trace("{} {}: start, res={}", fmt::ptr(this), fmt::ptr(&p), res);
 
     // Engaged p_sentinel indicates that information in p up to sentinel->position() was
     // merged into this instance and that flags on the entry pointed to by p_i are
@@ -317,6 +317,8 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
     while (p_i != p._rows.end()) {
         rows_entry& src_e = *p_i;
 
+        mplog.trace("p_i={}", src_e.position());
+
         bool miss = true;
         if (i != _rows.end()) {
             auto x = cmp(*i, src_e);
@@ -356,6 +358,10 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
                 ++lb_i;
             } else {
                 lb_i = _rows.begin();
+            }
+
+            if (lb_i != _rows.end() && i != _rows.end()) {
+                assert(cmp(lb_i->position(), i->position()) <= 0);
             }
 
             while (lb_i != i) {
