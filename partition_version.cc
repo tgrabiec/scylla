@@ -181,6 +181,7 @@ stop_iteration partition_snapshot::merge_partition_versions(mutation_application
             current = current->next();
             ++version_no;
             _version = partition_version_ref(*current);
+            _version_merging_state.reset();
         }
         while (auto prev = current->prev()) {
             region().allocator().invalidate_references();
@@ -190,7 +191,7 @@ stop_iteration partition_snapshot::merge_partition_versions(mutation_application
             // number did not change then we're looking at the same version object.
             // If the version number changed, it means we now work with a different "current"
             // due to different conditions of is_referenced() within the version chain.
-            if (!_version_merging_state || version_no != _version_merging_state->first) {
+            if (!_version_merging_state) {
                 _version_merging_state = std::make_pair(version_no, apply_resume());
             }
             const auto do_stop_iteration = current->partition().apply_monotonically(*schema(),
