@@ -164,6 +164,8 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
         rows_entry& e = *i;
         auto next_i = std::next(i);
 
+        mplog.trace("maybe_drop({})", e.position());
+
         if (!e.row().empty() || e.is_last_dummy()) {
             return next_i;
         }
@@ -183,6 +185,8 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
         } else {
             return next_i;
         }
+
+        mplog.trace("drop({})", e.position());
 
         ++app_stats.rows_dropped_by_tombstones; // FIXME: it's more general than that now
 
