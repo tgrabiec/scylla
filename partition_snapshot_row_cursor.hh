@@ -16,6 +16,8 @@
 
 class partition_snapshot_row_cursor;
 
+extern seastar::logger mplog;
+
 // A non-owning reference to a row inside partition_snapshot which
 // maintains it's position and thus can be kept across reference invalidation points.
 class partition_snapshot_row_weakref final {
@@ -240,7 +242,9 @@ class partition_snapshot_row_cursor final {
         int version_no = 0;
         bool unique_owner = _unique_owner;
         bool first = true;
+        mplog.trace("advance_to({})", lower_bound);
         for (auto&& v : _snp.versions()) {
+            mplog.trace("v: {}", mutation_partition_v2::printer(*_snp.schema(), v.partition()));
             unique_owner = unique_owner && (first || !v.is_referenced());
             auto rows = v.partition().clustered_rows();
             auto pos = rows.lower_bound(lower_bound, cmp);

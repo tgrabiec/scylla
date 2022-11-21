@@ -150,7 +150,7 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
     assert(s.version() == _schema_version);
     assert(p._schema_version == _schema_version);
 #endif
-//    mplog.trace("apply {}\nto: {}", mutation_partition_v2::printer(s, p), mutation_partition_v2::printer(s, *this));
+    mplog.trace("apply {}\nto: {}", mutation_partition_v2::printer(s, p), mutation_partition_v2::printer(s, *this));
     _tombstone.apply(p._tombstone);
     _static_row.apply_monotonically(s, column_kind::static_column, std::move(p._static_row));
     _static_row_continuous |= p._static_row_continuous;
@@ -562,6 +562,7 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
     if (prev_compacted && lb_i != _rows.end()) {
         maybe_drop(lb_i);
     }
+    mplog.trace("result: {}", mutation_partition_v2::printer(s, *this));
     return stop_iteration::yes;
 }
 
