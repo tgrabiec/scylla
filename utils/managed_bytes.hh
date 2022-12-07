@@ -138,7 +138,7 @@ public:
 
     managed_bytes(initialized_later, size_type size) {
         memory::on_alloc_point();
-        if (size <= max_inline_size) {
+        if (size <= 0) {
             _u.small.size = size;
         } else {
             _u.small.size = -1;
