@@ -144,6 +144,13 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
     return apply_monotonically(s, std::move(p), tracker, app_stats, preemptible ? default_preemption_check() : never_preempt(), res);
 }
 
+inline
+void on_hard_alloc_point() {
+#ifndef SEASTAR_ENABLE_ALLOC_FAILURE_INJECTION
+    seastar::memory::local_failure_injector().on_alloc_point();
+#endif
+}
+
 stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutation_partition_v2&& p, cache_tracker* tracker,
         mutation_application_stats& app_stats, preemption_check need_preempt, apply_resume& res) {
 #ifdef SEASTAR_DEBUG
@@ -390,11 +397,13 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
                 }
 
                 if (need_preempt()) {
+                    on_hard_alloc_point();
                     auto s1 = alloc_strategy_unique_ptr<rows_entry>(
                             current_allocator().construct<rows_entry>(s,
                                  position_in_partition::after_key(s, lb_i->position()), is_dummy::yes, is_continuous::no));
                     alloc_strategy_unique_ptr<rows_entry> s2;
                     if (lb_i->position().is_clustering_row()) {
+                        on_hard_alloc_point();
                         s2 = alloc_strategy_unique_ptr<rows_entry>(
                                 current_allocator().construct<rows_entry>(s, s1->position(), is_dummy::yes, is_continuous::yes));
                         auto lb_i_next = std::next(lb_i);
@@ -433,10 +442,12 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
             alloc_strategy_unique_ptr<rows_entry> s2;
             if (next_interval_loaded) {
                 // FIXME: Avoid reallocation
+                on_hard_alloc_point();
                 s1 = alloc_strategy_unique_ptr<rows_entry>(
                     current_allocator().construct<rows_entry>(s,
                         position_in_partition::after_key(s, src_e.position()), is_dummy::yes, is_continuous::no));
                 if (src_e.position().is_clustering_row()) {
+                    on_hard_alloc_point();
                     s2 = alloc_strategy_unique_ptr<rows_entry>(
                             current_allocator().construct<rows_entry>(s,
                                 s1->position(), is_dummy::yes, is_continuous::yes));
@@ -449,6 +460,7 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
             }
 
             rows_type::key_grabber pi_kg(p_i);
+            on_hard_alloc_point();
             lb_i = _rows.insert_before(i, std::move(pi_kg));
             p_sentinel = std::move(s1);
             this_sentinel = std::move(s2);
@@ -478,10 +490,12 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
 
             if (next_interval_loaded) {
                 // FIXME: Avoid reallocation
+                on_hard_alloc_point();
                 s1 = alloc_strategy_unique_ptr<rows_entry>(
                         current_allocator().construct<rows_entry>(s,
                             position_in_partition::after_key(s, src_e.position()), is_dummy::yes, is_continuous::no));
                 if (src_e.position().is_clustering_row()) {
+                    on_hard_alloc_point();
                     s2 = alloc_strategy_unique_ptr<rows_entry>(
                             current_allocator().construct<rows_entry>(s, s1->position(), is_dummy::yes, is_continuous::yes));
                     auto next_i = std::next(i);
@@ -527,6 +541,7 @@ stop_iteration mutation_partition_v2::apply_monotonically(const schema& s, mutat
                 do_compact = (src_e.range_tombstone() + src_e.row().deleted_at().regular()) >
                             (i->range_tombstone() + i->row().deleted_at().regular());
                 memory::on_alloc_point();
+                on_hard_alloc_point();
                 i->apply_monotonically(s, std::move(src_e));
             }
             ++app_stats.row_hits;
