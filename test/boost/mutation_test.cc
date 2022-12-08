@@ -1051,7 +1051,7 @@ SEASTAR_TEST_CASE(test_v2_apply_monotonically_is_monotonic_on_alloc_failures) {
         auto&& alloc = standard_allocator();
         with_allocator(alloc, [&] {
             mutation_application_stats app_stats;
-            auto&& s = *gen.schema();
+            const schema& s = *gen.schema();
             mutation target = gen();
             mutation second = gen();
 
@@ -1076,34 +1076,49 @@ SEASTAR_TEST_CASE(test_v2_apply_monotonically_is_monotonic_on_alloc_failures) {
             }
 
             auto expected = target + second;
-            auto expected_cont = mutation_partition_v2(*expected.schema(), expected.partition()).get_continuity(s);
+            auto expected_cont = mutation_partition_v2(s, expected.partition()).get_continuity(s);
 
             testlog.trace("target: {}", target);
             testlog.trace("second: {}", target);
             testlog.trace("expected: {}", target);
 
-            auto m = mutation_partition_v2(*target.schema(), target.partition());
-            auto m2 = mutation_partition_v2(*second.schema(), second.partition());
+            auto preempt_check = [] () noexcept {
+                try {
+                    memory::local_failure_injector().on_alloc_point();
+                    return false;
+                } catch (const std::bad_alloc&) {
+                    return true;
+                }
+            };
+
+            auto m = mutation_partition_v2(s, target.partition());
+            auto m2 = mutation_partition_v2(s, second.partition());
             memory::with_allocation_failures([&] {
                 auto reset_m = defer([&] {
-                    m = mutation_partition_v2(*target.schema(), target.partition());
-                    m2 = mutation_partition_v2(*second.schema(), second.partition());
+                    m = mutation_partition_v2(s, target.partition());
+                    m2 = mutation_partition_v2(s, second.partition());
                 });
                 auto check = defer([&] {
-                    auto&& s = *gen.schema();
+                    m.apply_monotonically(s, std::move(m2), no_cache_tracker, app_stats);
+                    assert_that(target.schema(), m).is_equal_to_compacted(expected.partition());
+                });
+                auto continuity_check = defer([&] {
                     auto c1 = m.get_continuity(s);
                     auto c2 = m2.get_continuity(s);
                     clustering_interval_set actual;
                     actual.add(s, c1);
                     actual.add(s, c2);
                     if (!actual.equals(s, expected_cont)) {
+                        testlog.trace("c1: {}", mutation_partition_v2::printer(s, m));
+                        testlog.trace("c2: {}", mutation_partition_v2::printer(s, m2));
                         BOOST_FAIL(format("Continuity should be contained in the expected one, expected {}, got {} ({} + {})",
                                           expected_cont, actual, c1, c2));
                     }
-                    m.apply_monotonically(*target.schema(), std::move(m2), no_cache_tracker, app_stats);
-                    assert_that(target.schema(), m).is_equal_to_compacted(expected.partition());
                 });
-                m.apply_monotonically(*target.schema(), std::move(m2), no_cache_tracker, app_stats);
+                apply_resume res;
+                if (m.apply_monotonically(s, std::move(m2), no_cache_tracker, app_stats, preempt_check, res) == stop_iteration::yes) {
+                    continuity_check.cancel();
+                }
                 reset_m.cancel();
             });
         });
