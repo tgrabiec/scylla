@@ -457,6 +457,10 @@ future<> messaging_service::stop() {
             std::abort();
         }
 
+        if (!_shutting_down) {
+            return shutdown();
+        }
+
         return make_ready_future<>();
     });
 }
