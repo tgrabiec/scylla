@@ -91,6 +91,7 @@ struct experimental_features_t {
         RAFT,
         BROADCAST_TABLES,
         KEYSPACE_STORAGE_OPTIONS,
+        TABLETS,
     };
     static std::map<sstring, feature> map(); // See enum_option.
     static std::vector<enum_option<experimental_features_t>> all();

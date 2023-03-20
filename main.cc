@@ -1185,6 +1185,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                     startlog.error("Bad configuration: RAFT feature has to be enabled if BROADCAST_TABLES is enabled");
                     throw bad_configuration_error();
                 }
+                if (cfg->check_experimental(db::experimental_features_t::feature::TABLETS)) {
+                    startlog.error("Bad configuration: RAFT feature has to be enabled if TABLETS is enabled");
+                    throw bad_configuration_error();
+                }
             }
 
 

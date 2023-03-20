@@ -2815,6 +2815,9 @@ std::vector<schema_ptr> system_keyspace::all_tables(const db::config& cfg) {
             r.insert(r.end(), {broadcast_kv_store()});
         }
     }
+    if (cfg.check_experimental(db::experimental_features_t::feature::TABLETS)) {
+        r.insert(r.end(), {tablets()});
+    }
     // legacy schema
     r.insert(r.end(), {
                     // TODO: once we migrate hints/batchlog and add convertor
