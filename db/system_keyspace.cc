@@ -78,6 +78,7 @@ namespace {
             system_keyspace::GROUP0_HISTORY,
             system_keyspace::DISCOVERY,
             system_keyspace::BROADCAST_KV_STORE,
+            system_keyspace::TABLETS,
         };
         if (ks_name == system_keyspace::NAME && system_ks_null_shard_tables.contains(cf_name)) {
             props.use_null_sharder = true;
@@ -91,7 +92,8 @@ namespace {
             system_keyspace::RAFT_SNAPSHOTS,
             system_keyspace::RAFT_SNAPSHOT_CONFIG,
             system_keyspace::DISCOVERY,
-            system_keyspace::BROADCAST_KV_STORE
+            system_keyspace::BROADCAST_KV_STORE,
+            system_keyspace::TABLETS
         };
         if (ks_name == system_keyspace::NAME && extra_durable_tables.contains(cf_name)) {
             props.wait_for_sync_to_commitlog = true;
@@ -971,6 +973,28 @@ schema_ptr system_keyspace::broadcast_kv_store() {
         return schema_builder(NAME, BROADCAST_KV_STORE, id)
             .with_column("key", utf8_type, column_kind::partition_key)
             .with_column("value", utf8_type)
+            .with_version(generate_schema_version(id))
+            .build();
+    }();
+    return schema;
+}
+
+schema_ptr system_keyspace::tablets() {
+    static thread_local auto schema = [] {
+        // FIXME: Allow UDTs in system keyspace:
+        // CREATE TYPE tablet_replica (replica_id uuid, shard int);
+        // replica_set_type = frozen<set<tablet_replica>>
+        auto replica_set_type = set_type_impl::get_instance(tuple_type_impl::get_instance({uuid_type, int32_type}), true);
+        auto id = generate_legacy_id(NAME, TABLETS);
+        return schema_builder(NAME, TABLETS, id)
+            .with_column("keyspace_name", utf8_type, column_kind::partition_key)
+            .with_column("table_id", uuid_type, column_kind::partition_key)
+            .with_column("tablet_count", int32_type, column_kind::static_column)
+            .with_column("table_name", utf8_type, column_kind::static_column)
+            .with_column("last_token", long_type, column_kind::clustering_key)
+            .with_column("replicas", replica_set_type)
+            .with_column("new_replicas", replica_set_type)
+            .with_column("stage", utf8_type)
             .with_version(generate_schema_version(id))
             .build();
     }();
