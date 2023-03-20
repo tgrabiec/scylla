@@ -145,6 +145,7 @@ public:
     static constexpr auto DISCOVERY = "discovery";
     static constexpr auto BROADCAST_KV_STORE = "broadcast_kv_store";
     static constexpr auto TOPOLOGY = "topology";
+    static constexpr auto TABLETS = "tablets";
 
     struct v3 {
         static constexpr auto BATCHES = "batches";
@@ -226,6 +227,7 @@ public:
     static schema_ptr discovery();
     static schema_ptr broadcast_kv_store();
     static schema_ptr topology();
+    static schema_ptr tablets();
 
     static table_schema_version generate_schema_version(table_id table_id, uint16_t offset = 0);
 

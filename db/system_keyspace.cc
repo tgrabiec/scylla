@@ -64,6 +64,7 @@
 #include <boost/algorithm/cxx11/any_of.hpp>
 #include "client_data.hh"
 #include "service/topology_state_machine.hh"
+#include "replica/tablets.hh"
 
 using days = std::chrono::duration<int, std::ratio<24 * 3600>>;
 
@@ -80,6 +81,7 @@ namespace {
             system_keyspace::DISCOVERY,
             system_keyspace::BROADCAST_KV_STORE,
             system_keyspace::TOPOLOGY,
+            system_keyspace::TABLETS,
         };
         if (ks_name == system_keyspace::NAME && system_ks_null_shard_tables.contains(cf_name)) {
             props.use_null_sharder = true;
@@ -95,6 +97,7 @@ namespace {
             system_keyspace::DISCOVERY,
             system_keyspace::BROADCAST_KV_STORE,
             system_keyspace::TOPOLOGY,
+            system_keyspace::TABLETS,
         };
         if (ks_name == system_keyspace::NAME && extra_durable_tables.contains(cf_name)) {
             props.wait_for_sync_to_commitlog = true;
@@ -106,7 +109,8 @@ namespace {
             system_keyspace::RAFT_SNAPSHOTS,
             system_keyspace::RAFT_SNAPSHOT_CONFIG,
             system_keyspace::GROUP0_HISTORY,
-            system_keyspace::DISCOVERY
+            system_keyspace::DISCOVERY,
+            system_keyspace::TABLETS,
         };
         if (ks_name == system_keyspace::NAME && raft_tables.contains(cf_name)) {
             props.use_schema_commitlog = true;
@@ -1013,6 +1017,11 @@ schema_ptr system_keyspace::broadcast_kv_store() {
             .with_version(generate_schema_version(id))
             .build();
     }();
+    return schema;
+}
+
+schema_ptr system_keyspace::tablets() {
+    static thread_local auto schema = replica::make_tablets_schema();
     return schema;
 }
 
@@ -2821,6 +2830,10 @@ std::vector<schema_ptr> system_keyspace::all_tables(const db::config& cfg) {
 
         if (cfg.check_experimental(db::experimental_features_t::feature::BROADCAST_TABLES)) {
             r.insert(r.end(), {broadcast_kv_store()});
+        }
+
+        if (cfg.check_experimental(db::experimental_features_t::feature::TABLETS)) {
+            r.insert(r.end(), {tablets()});
         }
     }
     // legacy schema
