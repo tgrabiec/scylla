@@ -8,6 +8,14 @@
 
 #include "locator/tablet_replication_strategy.hh"
 #include "locator/tablets.hh"
+#include "types/types.hh"
+#include "types/tuple.hh"
+#include "types/set.hh"
+#include "utils/hash.hh"
+#include "db/system_keyspace.hh"
+#include "cql3/query_processor.hh"
+#include "cql3/untyped_result_set.hh"
+#include "replica/database.hh"
 
 namespace locator {
 

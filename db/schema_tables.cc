@@ -88,12 +88,9 @@ static logging::logger diff_logger("schema_diff");
 namespace db {
 namespace {
     const auto set_null_sharder = schema_builder::register_static_configurator([](const sstring& ks_name, const sstring& cf_name, schema_static_props& props) {
-        if (ks_name == schema_tables::NAME) {
+        if (ks_name == schema_tables::NAME ||
+                (ks_name == system_keyspace::NAME && cf_name == system_keyspace::TABLETS)) {
             props.use_null_sharder = true;
-        }
-    });
-    const auto set_use_schema_commitlog = schema_builder::register_static_configurator([](const sstring& ks_name, const sstring& cf_name, schema_static_props& props) {
-        if (ks_name == schema_tables::NAME) {
             props.use_schema_commitlog = true;
         }
     });

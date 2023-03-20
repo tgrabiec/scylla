@@ -9,10 +9,13 @@
 #pragma once
 
 #include "dht/token.hh"
-#include "utils/small_vector.hh"
+#include "timestamp.hh"
 #include "locator/host_id.hh"
+#include "dht/i_partitioner_fwd.hh"
 #include "schema/schema_fwd.hh"
 #include "utils/chunked_vector.hh"
+#include "utils/hash.hh"
+#include "utils/small_vector.hh"
 
 #include <seastar/core/reactor.hh>
 #include <seastar/util/log.hh>
@@ -152,5 +155,6 @@ struct hash<locator::tablet_replica> {
                 std::hash<shard_id>()(r.shard));
     }
 };
+
 
 }
