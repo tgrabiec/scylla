@@ -1526,9 +1526,11 @@ static inline unsigned get_x_log2_compaction_groups(unsigned x_log2_compaction_g
 }
 
 table::table(schema_ptr schema, config config, lw_shared_ptr<const storage_options> sopts, db::commitlog* cl, compaction_manager& compaction_manager,
-        sstables::sstables_manager& sst_manager, cell_locker_stats& cl_stats, cache_tracker& row_cache_tracker)
+        sstables::sstables_manager& sst_manager, cell_locker_stats& cl_stats, cache_tracker& row_cache_tracker,
+        locator::effective_replication_map_ptr erm)
     : _schema(std::move(schema))
     , _config(std::move(config))
+    , _erm(std::move(erm))
     , _storage_opts(std::move(sopts))
     , _view_stats(format("{}_{}_view_replica_update", _schema->ks_name(), _schema->cf_name()),
                          keyspace_label(_schema->ks_name()),
@@ -1554,6 +1556,10 @@ table::table(schema_ptr schema, config config, lw_shared_ptr<const storage_optio
     set_metrics();
 
     update_optimized_twcs_queries_flag();
+}
+
+void table::update_effective_replication_map(locator::effective_replication_map_ptr erm) {
+    _erm = std::move(erm);
 }
 
 partition_presence_checker
