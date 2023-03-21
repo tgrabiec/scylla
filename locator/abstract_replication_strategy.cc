@@ -368,7 +368,7 @@ token_effective_replication_map::~token_effective_replication_map() {
     }
 }
 
-effective_replication_map::effective_replication_map(abstract_replication_strategy::ptr_type rs,
+effective_replication_map::effective_replication_map(replication_strategy_ptr rs,
                                                      token_metadata_ptr tmptr,
                                                      size_t replication_factor)
         : _rs(std::move(rs))

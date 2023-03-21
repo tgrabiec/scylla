@@ -132,6 +132,9 @@ public:
     future<dht::token_range_vector> get_pending_address_ranges(const token_metadata_ptr tmptr, std::unordered_set<token> pending_tokens, inet_address pending_address, locator::endpoint_dc_rack dr) const;
 };
 
+using replication_strategy_ptr = seastar::shared_ptr<const abstract_replication_strategy>;
+using mutable_replication_strategy_ptr = seastar::shared_ptr<abstract_replication_strategy>;
+
 class dc_aware_replication_strategy : public abstract_replication_strategy {
 protected:
     // map: data centers -> replication factor
@@ -153,11 +156,45 @@ public:
     }
 };
 
+/// \brief Represents effective replication (assignment of replicas to keys).
+///
+/// It's a result of application of a given replication strategy
+/// over a particular token metadata version, for a given table.
+/// Can be shared by multiple tables if they have the same replication.
+///
+/// Immutable, users can assume that it doesn't change.
+///
+/// Holding to this object keeps the associated token_metadata_ptr alive,
+/// keeping the token metadata version alive and seen as in use.
+class effective_replication_map {
+protected:
+    replication_strategy_ptr _rs;
+    token_metadata_ptr _tmptr;
+    size_t _replication_factor;
+public:
+    effective_replication_map(replication_strategy_ptr, token_metadata_ptr, size_t replication_factor);
+    virtual ~effective_replication_map() = default;
+
+    const abstract_replication_strategy& get_replication_strategy() const noexcept { return *_rs; }
+    const token_metadata& get_token_metadata() const noexcept { return *_tmptr; }
+    const token_metadata_ptr& get_token_metadata_ptr() const noexcept { return _tmptr; }
+    const topology& get_topology() const noexcept { return _tmptr->get_topology(); }
+    size_t get_replication_factor() const { return _replication_factor; }
+
+    virtual inet_address_vector_replica_set get_natural_endpoints(const token& search_token) const = 0;
+    virtual inet_address_vector_replica_set get_natural_endpoints_without_node_being_replaced(const token& search_token) const = 0;
+    virtual inet_address_vector_topology_change get_pending_endpoints(const token& search_token, const sstring& ks_name) const = 0;
+};
+
+using effective_replication_map_ptr = seastar::shared_ptr<const effective_replication_map>;
+using mutable_effective_replication_map_ptr = seastar::shared_ptr<effective_replication_map>;
+
 // Holds the full replication_map resulting from applying the
 // effective replication strategy over the given token_metadata
 // and replication_strategy_config_options.
 // Used for token-based replication strategies.
-class token_effective_replication_map : public enable_shared_from_this<token_effective_replication_map> {
+class token_effective_replication_map : public enable_shared_from_this<token_effective_replication_map>
+                                      , public effective_replication_map {
 public:
     struct factory_key {
         replication_strategy_type rs_type;
@@ -180,58 +217,34 @@ public:
     };
 
 private:
-    abstract_replication_strategy::ptr_type _rs;
-    token_metadata_ptr _tmptr;
     replication_map _replication_map;
-    size_t _replication_factor;
     std::optional<factory_key> _factory_key = std::nullopt;
     effective_replication_map_factory* _factory = nullptr;
 
     friend class abstract_replication_strategy;
     friend class effective_replication_map_factory;
+public: // effective_replication_map
+    inet_address_vector_replica_set get_natural_endpoints(const token& search_token) const override;
+    inet_address_vector_replica_set get_natural_endpoints_without_node_being_replaced(const token& search_token) const override;
+    inet_address_vector_topology_change get_pending_endpoints(const token& search_token, const sstring& ks_name) const override;
 public:
     explicit token_effective_replication_map(abstract_replication_strategy::ptr_type rs, token_metadata_ptr tmptr, replication_map replication_map, size_t replication_factor) noexcept
-        : _rs(std::move(rs))
-        , _tmptr(std::move(tmptr))
+        : effective_replication_map(std::move(rs), std::move(tmptr), replication_factor)
         , _replication_map(std::move(replication_map))
-        , _replication_factor(replication_factor)
     { }
     token_effective_replication_map() = delete;
     token_effective_replication_map(token_effective_replication_map&&) = default;
-    ~token_effective_replication_map();
-
-    const token_metadata& get_token_metadata() const noexcept {
-        return *_tmptr;
-    }
-
-    const token_metadata_ptr& get_token_metadata_ptr() const noexcept {
-        return _tmptr;
-    }
-
-    const locator::abstract_replication_strategy& get_replication_strategy() const noexcept {
-        return *_rs;
-    }
+    ~token_effective_replication_map() override;
 
     const replication_map& get_replication_map() const noexcept {
         return _replication_map;
-    }
-
-    const topology& get_topology() const noexcept {
-        return _tmptr->get_topology();
-    }
-
-    const size_t get_replication_factor() const noexcept {
-        return _replication_factor;
     }
 
     future<> clear_gently() noexcept;
 
     future<replication_map> clone_endpoints_gently() const;
 
-    inet_address_vector_replica_set get_natural_endpoints(const token& search_token) const;
     stop_iteration for_each_natural_endpoint_until(const token& search_token, const noncopyable_function<stop_iteration(const inet_address&)>& func) const;
-    inet_address_vector_replica_set get_natural_endpoints_without_node_being_replaced(const token& search_token) const;
-    inet_address_vector_replica_set get_pending_endpoints(const token& search_token, const sstring& ks_name) const;
 
     // get_ranges() returns the list of ranges held by the given endpoint.
     // The list is sorted, and its elements are non overlapping and non wrap-around.
@@ -289,8 +302,6 @@ using token_effective_replication_map_ptr = shared_ptr<const token_effective_rep
 using mutable_token_effective_replication_map_ptr = shared_ptr<token_effective_replication_map>;
 using token_erm_ptr = token_effective_replication_map_ptr;
 using mutable_token_erm_ptr = mutable_token_effective_replication_map_ptr;
-using effective_replication_map = token_effective_replication_map_ptr;
-using mutatble_effective_replication_map = mutable_token_effective_replication_map_ptr;
 
 inline mutable_token_erm_ptr make_effective_replication_map(abstract_replication_strategy::ptr_type rs, token_metadata_ptr tmptr, replication_map replication_map, size_t replication_factor) {
     return seastar::make_shared<token_effective_replication_map>(
