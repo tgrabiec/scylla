@@ -57,6 +57,7 @@ class abstract_replication_strategy {
 protected:
     replication_strategy_config_options _config_options;
     replication_strategy_type _my_type;
+    bool _dc_aware = false;
 
     template <typename... Args>
     void err(const char* fmt, Args&&... args) const {
@@ -117,6 +118,9 @@ public:
     replication_strategy_type get_type() const noexcept { return _my_type; }
     const replication_strategy_config_options get_config_options() const noexcept { return _config_options; }
 
+    // Returns true iff this strategy extends dc_aware_replication_strategy.
+    bool is_dc_aware() const { return _dc_aware; }
+
     // Use the token_metadata provided by the caller instead of _token_metadata
     // Note: must be called with initialized, non-empty token_metadata.
     future<dht::token_range_vector> get_ranges(inet_address ep, token_metadata_ptr tmptr) const;
@@ -126,6 +130,27 @@ public:
     future<std::unordered_map<dht::token_range, inet_address_vector_replica_set>> get_range_addresses(const token_metadata& tm) const;
 
     future<dht::token_range_vector> get_pending_address_ranges(const token_metadata_ptr tmptr, std::unordered_set<token> pending_tokens, inet_address pending_address, locator::endpoint_dc_rack dr) const;
+};
+
+class dc_aware_replication_strategy : public abstract_replication_strategy {
+protected:
+    // map: data centers -> replication factor
+    std::unordered_map<sstring, size_t> _dc_rep_factor;
+    std::vector<sstring> _datacenteres;
+public:
+    dc_aware_replication_strategy(const replication_strategy_config_options& opts, replication_strategy_type my_type)
+            : abstract_replication_strategy(opts, my_type) {
+        _dc_aware = true;
+    }
+
+    size_t get_replication_factor(const sstring& dc) const {
+        auto dc_factor = _dc_rep_factor.find(dc);
+        return (dc_factor == _dc_rep_factor.end()) ? 0 : dc_factor->second;
+    }
+
+    const std::vector<sstring>& get_datacenters() const {
+        return _datacenteres;
+    }
 };
 
 // Holds the full replication_map resulting from applying the

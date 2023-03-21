@@ -34,7 +34,7 @@ bool operator==(const endpoint_dc_rack& d1, const endpoint_dc_rack& d2) {
 
 network_topology_strategy::network_topology_strategy(
     const replication_strategy_config_options& config_options) :
-        abstract_replication_strategy(config_options,
+        dc_aware_replication_strategy(config_options,
                                       replication_strategy_type::network_topology) {
     for (auto& config_pair : config_options) {
         auto& key = config_pair.first;

@@ -2312,7 +2312,7 @@ result<storage_proxy::response_id_type> storage_proxy::create_write_response_han
 
     if (db::is_datacenter_local(cl)) {
         h = ::make_shared<datacenter_write_response_handler>(shared_from_this(), std::move(ermp), cl, type, std::move(m), std::move(targets), pending_endpoints, std::move(dead_endpoints), std::move(tr_state), stats, std::move(permit), rate_limit_info);
-    } else if (cl == db::consistency_level::EACH_QUORUM && rs.get_type() == locator::replication_strategy_type::network_topology){
+    } else if (cl == db::consistency_level::EACH_QUORUM && rs.is_dc_aware()) {
         h = ::make_shared<datacenter_sync_write_response_handler>(shared_from_this(), std::move(ermp), cl, type, std::move(m), std::move(targets), pending_endpoints, std::move(dead_endpoints), std::move(tr_state), stats, std::move(permit), rate_limit_info);
     } else if (type == db::write_type::VIEW) {
         h = ::make_shared<view_update_write_response_handler>(shared_from_this(), std::move(ermp), cl, std::move(m), std::move(targets), pending_endpoints, std::move(dead_endpoints), std::move(tr_state), stats, std::move(permit), rate_limit_info);

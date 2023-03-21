@@ -17,22 +17,14 @@
 #include <set>
 
 namespace locator {
-class network_topology_strategy : public abstract_replication_strategy {
+
+class network_topology_strategy : public dc_aware_replication_strategy {
 public:
     network_topology_strategy(
         const replication_strategy_config_options& config_options);
 
     virtual size_t get_replication_factor(const token_metadata&) const override {
         return _rep_factor;
-    }
-
-    size_t get_replication_factor(const sstring& dc) const {
-        auto dc_factor = _dc_rep_factor.find(dc);
-        return (dc_factor == _dc_rep_factor.end()) ? 0 : dc_factor->second;
-    }
-
-    const std::vector<sstring>& get_datacenters() const {
-        return _datacenteres;
     }
 
     virtual bool allow_remove_node_being_replaced_from_natural_endpoints() const override {
@@ -52,10 +44,6 @@ protected:
     virtual std::optional<std::unordered_set<sstring>> recognized_options(const topology&) const override;
 
 private:
-    // map: data centers -> replication factor
-    std::unordered_map<sstring, size_t> _dc_rep_factor;
-
-    std::vector<sstring> _datacenteres;
     size_t _rep_factor;
 };
 } // namespace locator

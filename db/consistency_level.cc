@@ -39,10 +39,9 @@ size_t local_quorum_for(const locator::effective_replication_map& erm, const sst
 
     auto& rs = erm.get_replication_strategy();
 
-    if (rs.get_type() == replication_strategy_type::network_topology) {
-        const network_topology_strategy* nrs =
-            static_cast<const network_topology_strategy*>(&rs);
-        size_t replication_factor = nrs->get_replication_factor(dc);
+    if (rs.is_dc_aware()) {
+        auto dcrs = static_cast<const dc_aware_replication_strategy*>(&rs);
+        size_t replication_factor = dcrs->get_replication_factor(dc);
         return replication_factor ? (replication_factor / 2) + 1 : 0;
     }
 
@@ -68,9 +67,8 @@ size_t block_for_each_quorum(const locator::effective_replication_map& erm) {
 
     auto& rs = erm.get_replication_strategy();
 
-    if (rs.get_type() == replication_strategy_type::network_topology) {
-        const network_topology_strategy* nrs =
-            static_cast<const network_topology_strategy*>(&rs);
+    if (rs.is_dc_aware()) {
+        auto nrs = static_cast<const dc_aware_replication_strategy*>(&rs);
         size_t n = 0;
 
         for (auto& dc : nrs->get_datacenters()) {
@@ -123,8 +121,7 @@ std::unordered_map<sstring, dc_node_count> count_per_dc_endpoints(
     auto& rs = erm.get_replication_strategy();
     const auto& topo = erm.get_topology();
 
-    const network_topology_strategy* nrs =
-            static_cast<const network_topology_strategy*>(&rs);
+    auto nrs = static_cast<const dc_aware_replication_strategy*>(&rs);
 
     std::unordered_map<sstring, dc_node_count> dc_endpoints;
     for (auto& dc : nrs->get_datacenters()) {
@@ -158,7 +155,7 @@ bool assure_sufficient_live_nodes_each_quorum(
 
     auto& rs = erm.get_replication_strategy();
 
-    if (rs.get_type() == replication_strategy_type::network_topology) {
+    if (rs.is_dc_aware()) {
         for (auto& entry : count_per_dc_endpoints(erm, live_endpoints, pending_endpoints)) {
             auto dc_block_for = local_quorum_for(erm, entry.first);
             auto dc_live = entry.second.live;
@@ -372,7 +369,7 @@ is_sufficient_live_nodes(consistency_level cl,
     {
         auto& rs = erm.get_replication_strategy();
 
-        if (rs.get_type() == replication_strategy_type::network_topology) {
+        if (rs.is_dc_aware()) {
             for (auto& entry : count_per_dc_endpoints(erm, live_endpoints)) {
                 if (entry.second.live < local_quorum_for(erm, entry.first)) {
                     return false;
