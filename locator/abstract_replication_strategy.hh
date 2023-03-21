@@ -51,13 +51,16 @@ using endpoint_set = utils::basic_sequenced_set<inet_address, inet_address_vecto
 
 class token_effective_replication_map;
 class effective_replication_map_factory;
+class per_table_replication_strategy;
 
 class abstract_replication_strategy {
     friend class token_effective_replication_map;
+    friend class per_table_replication_strategy;
 protected:
     replication_strategy_config_options _config_options;
     replication_strategy_type _my_type;
     bool _dc_aware = false;
+    bool _per_table = false;
 
     template <typename... Args>
     void err(const char* fmt, Args&&... args) const {
@@ -120,6 +123,15 @@ public:
 
     // Returns true iff this strategy extends dc_aware_replication_strategy.
     bool is_dc_aware() const { return _dc_aware; }
+
+    // If returns true then tables governed by this replication strategy have separate
+    // effective_replication_maps.
+    // If returns false, they share the same effective_replication_map, which is per keyspace.
+    // If returns true, then this replication strategy extends per_table_replication_strategy.
+    // Note, a replication strategy may extend per_table_replication_strategy while !is_per_table(),
+    // depending on actual strategy options.
+    bool is_per_table() const { return _per_table; }
+    const per_table_replication_strategy* maybe_as_per_table() const;
 
     // Use the token_metadata provided by the caller instead of _token_metadata
     // Note: must be called with initialized, non-empty token_metadata.
@@ -188,6 +200,21 @@ public:
 
 using effective_replication_map_ptr = seastar::shared_ptr<const effective_replication_map>;
 using mutable_effective_replication_map_ptr = seastar::shared_ptr<effective_replication_map>;
+
+/// Replication strategies which support per-table replication extend this trait.
+///
+/// It will be accessed only if the replication strategy actually works in per-table mode,
+/// that is after mark_as_per_table() is called, and as a result
+/// abstract_replication_strategy::is_per_table() returns true.
+class per_table_replication_strategy {
+protected:
+    void mark_as_per_table(abstract_replication_strategy& self) {
+        self._per_table = true;
+    }
+public:
+    virtual ~per_table_replication_strategy() = default;
+    virtual effective_replication_map_ptr make_replication_map(table_id, token_metadata_ptr) const = 0;
+};
 
 // Holds the full replication_map resulting from applying the
 // effective replication strategy over the given token_metadata
