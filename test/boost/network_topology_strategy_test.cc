@@ -67,7 +67,7 @@ static void check_ranges_are_sorted(effective_replication_map_ptr erm, gms::inet
 }
 
 void strategy_sanity_check(
-    abstract_replication_strategy::ptr_type ars_ptr,
+    replication_strategy_ptr ars_ptr,
     const token_metadata& tm,
     const std::map<sstring, sstring>& options) {
 
@@ -90,7 +90,7 @@ void strategy_sanity_check(
 }
 
 void endpoints_check(
-    abstract_replication_strategy::ptr_type ars_ptr,
+    replication_strategy_ptr ars_ptr,
     const token_metadata& tm,
     inet_address_vector_replica_set& endpoints,
     const locator::topology& topo) {
@@ -140,7 +140,7 @@ auto d2t = [](double d) -> int64_t {
  */
 void full_ring_check(const std::vector<ring_point>& ring_points,
                      const std::map<sstring, sstring>& options,
-                     abstract_replication_strategy::ptr_type ars_ptr,
+                     replication_strategy_ptr ars_ptr,
                      locator::token_metadata_ptr tmptr,
                      const locator::topology& topo) {
     auto& tm = *tmptr;

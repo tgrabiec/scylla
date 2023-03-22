@@ -303,7 +303,7 @@ abstract_replication_strategy::get_pending_address_ranges(const token_metadata_p
     co_return ret;
 }
 
-future<mutable_token_effective_replication_map_ptr> calculate_effective_replication_map(abstract_replication_strategy::ptr_type rs, token_metadata_ptr tmptr) {
+future<mutable_token_effective_replication_map_ptr> calculate_effective_replication_map(replication_strategy_ptr rs, token_metadata_ptr tmptr) {
     replication_map replication_map;
     const auto& sorted_tokens = tmptr->sorted_tokens();
 
@@ -376,11 +376,11 @@ effective_replication_map::effective_replication_map(replication_strategy_ptr rs
         , _replication_factor(replication_factor)
 { }
 
-token_effective_replication_map::factory_key token_effective_replication_map::make_factory_key(const abstract_replication_strategy::ptr_type& rs, const token_metadata_ptr& tmptr) {
+token_effective_replication_map::factory_key token_effective_replication_map::make_factory_key(const replication_strategy_ptr& rs, const token_metadata_ptr& tmptr) {
     return factory_key(rs->get_type(), rs->get_config_options(), tmptr->get_ring_version());
 }
 
-future<token_effective_replication_map_ptr> effective_replication_map_factory::create_effective_replication_map(abstract_replication_strategy::ptr_type rs, token_metadata_ptr tmptr) {
+future<token_effective_replication_map_ptr> effective_replication_map_factory::create_effective_replication_map(replication_strategy_ptr rs, token_metadata_ptr tmptr) {
     // lookup key on local shard
     auto key = token_effective_replication_map::make_factory_key(rs, tmptr);
     auto erm = find_effective_replication_map(key);

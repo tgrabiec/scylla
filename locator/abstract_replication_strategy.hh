@@ -228,7 +228,7 @@ public: // effective_replication_map
     inet_address_vector_replica_set get_natural_endpoints_without_node_being_replaced(const token& search_token) const override;
     inet_address_vector_topology_change get_pending_endpoints(const token& search_token, const sstring& ks_name) const override;
 public:
-    explicit token_effective_replication_map(abstract_replication_strategy::ptr_type rs, token_metadata_ptr tmptr, replication_map replication_map, size_t replication_factor) noexcept
+    explicit token_effective_replication_map(replication_strategy_ptr rs, token_metadata_ptr tmptr, replication_map replication_map, size_t replication_factor) noexcept
         : effective_replication_map(std::move(rs), std::move(tmptr), replication_factor)
         , _replication_map(std::move(replication_map))
     { }
@@ -278,7 +278,7 @@ private:
     dht::token_range_vector do_get_ranges(noncopyable_function<stop_iteration(bool& add_range, const inet_address& natural_endpoint)> consider_range_for_endpoint) const;
 
 public:
-    static factory_key make_factory_key(const abstract_replication_strategy::ptr_type& rs, const token_metadata_ptr& tmptr);
+    static factory_key make_factory_key(const replication_strategy_ptr& rs, const token_metadata_ptr& tmptr);
 
     const factory_key& get_factory_key() const noexcept {
         return *_factory_key;
@@ -303,13 +303,13 @@ using mutable_token_effective_replication_map_ptr = shared_ptr<token_effective_r
 using token_erm_ptr = token_effective_replication_map_ptr;
 using mutable_token_erm_ptr = mutable_token_effective_replication_map_ptr;
 
-inline mutable_token_erm_ptr make_effective_replication_map(abstract_replication_strategy::ptr_type rs, token_metadata_ptr tmptr, replication_map replication_map, size_t replication_factor) {
+inline mutable_token_erm_ptr make_effective_replication_map(replication_strategy_ptr rs, token_metadata_ptr tmptr, replication_map replication_map, size_t replication_factor) {
     return seastar::make_shared<token_effective_replication_map>(
             std::move(rs), std::move(tmptr), std::move(replication_map), replication_factor);
 }
 
 // Apply the replication strategy over the current configuration and the given token_metadata.
-future<mutable_token_erm_ptr> calculate_effective_replication_map(abstract_replication_strategy::ptr_type rs, token_metadata_ptr tmptr);
+future<mutable_token_erm_ptr> calculate_effective_replication_map(replication_strategy_ptr rs, token_metadata_ptr tmptr);
 
 // Class to hold a coherent view of a keyspace
 // effective replication map on all shards
@@ -410,7 +410,7 @@ public:
     // token_effective_replication_map for the local shard.
     //
     // Therefore create should be called first on shard 0, then on all other shards.
-    future<token_erm_ptr> create_effective_replication_map(abstract_replication_strategy::ptr_type rs, token_metadata_ptr tmptr);
+    future<token_erm_ptr> create_effective_replication_map(replication_strategy_ptr rs, token_metadata_ptr tmptr);
 
     future<> stop() noexcept;
 
