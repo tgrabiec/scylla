@@ -221,5 +221,6 @@ std::ostream& operator<<(std::ostream& out, const token& t);
 uint64_t unbias(const token& t);
 token bias(uint64_t n);
 size_t compaction_group_of(unsigned most_significant_bits, const token& t);
+token last_token_of_compaction_group(unsigned most_significant_bits, size_t group);
 
 } // namespace dht
