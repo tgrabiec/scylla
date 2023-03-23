@@ -11,6 +11,7 @@
 #pragma once
 
 #include "locator/abstract_replication_strategy.hh"
+#include "locator/tablet_replication_strategy.hh"
 #include "exceptions/exceptions.hh"
 
 #include <optional>
@@ -18,7 +19,8 @@
 
 namespace locator {
 
-class network_topology_strategy : public dc_aware_replication_strategy {
+class network_topology_strategy : public dc_aware_replication_strategy
+                                , public tablet_aware_replication_strategy {
 public:
     network_topology_strategy(
         const replication_strategy_config_options& config_options);
@@ -30,6 +32,9 @@ public:
     virtual bool allow_remove_node_being_replaced_from_natural_endpoints() const override {
         return true;
     }
+
+public: // tablet_aware_replication_strategy
+    virtual effective_replication_map_ptr make_replication_map(table_id, token_metadata_ptr) const override;
 
 protected:
     /**
