@@ -14,6 +14,7 @@
 #include <seastar/coroutine/maybe_yield.hh>
 
 #include "locator/network_topology_strategy.hh"
+#include "utils/fb_utilities.hh"
 #include <boost/algorithm/string.hpp>
 #include "utils/hash.hh"
 
@@ -36,9 +37,16 @@ network_topology_strategy::network_topology_strategy(
     const replication_strategy_config_options& config_options) :
         dc_aware_replication_strategy(config_options,
                                       replication_strategy_type::network_topology) {
+    process_tablet_options(*this);
+    auto tablet_opts = recognized_tablet_options();
+
     for (auto& config_pair : config_options) {
         auto& key = config_pair.first;
         auto& val = config_pair.second;
+
+        if (tablet_opts.contains(key)) {
+            continue;
+        }
 
         //
         // FIXME!!!
@@ -255,8 +263,13 @@ network_topology_strategy::calculate_natural_endpoints(
     co_return std::move(tracker.replicas());
 }
 
-void network_topology_strategy::validate_options(const gms::feature_service&) const {
+void network_topology_strategy::validate_options(const gms::feature_service& fs) const {
+    validate_tablet_options(fs, _config_options);
+    auto tablet_opts = recognized_tablet_options();
     for (auto& c : _config_options) {
+        if (tablet_opts.contains(c.first)) {
+            continue;
+        }
         if (c.first == sstring("replication_factor")) {
             throw exceptions::configuration_exception(
                 "replication_factor is an option for simple_strategy, not "
@@ -268,7 +281,31 @@ void network_topology_strategy::validate_options(const gms::feature_service&) co
 
 std::optional<std::unordered_set<sstring>> network_topology_strategy::recognized_options(const topology& topology) const {
     // We only allow datacenter names as options
-    return topology.get_datacenters();
+    auto opts = topology.get_datacenters();
+    opts.merge(recognized_tablet_options());
+    return opts;
+}
+
+effective_replication_map_ptr network_topology_strategy::make_replication_map(table_id table, token_metadata_ptr tm) const {
+    if (!uses_tablets()) {
+        on_internal_error(rslogger, format("make_replication_map() called for table {} but replication strategy not configured to use tablets", table));
+    }
+    return do_make_replication_map(table, shared_from_this(), std::move(tm), _rep_factor);
+}
+
+future<tablet_map> network_topology_strategy::allocate_tablets_for_new_table(schema_ptr s, token_metadata_ptr tm) const {
+    // FIXME: respect _initial_tablets
+    // FIXME: respect strategy constraints
+
+    auto host = tm->get_host_id(utils::fb_utilities::get_broadcast_address());
+
+    tablet_map tablets(1);
+    tablets.set_tablet(0, tablet_info{
+        .replicas = {tablet_replica{host, 0}}
+    });
+
+    tablet_logger.debug("Allocated tablets for {}.{} ({}): {}", s->ks_name(), s->cf_name(), s->id(), tablets);
+    co_return tablets;
 }
 
 using registry = class_registrator<abstract_replication_strategy, network_topology_strategy, const replication_strategy_config_options&>;
