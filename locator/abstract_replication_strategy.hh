@@ -455,4 +455,8 @@ private:
     friend class token_effective_replication_map;
 };
 
+void maybe_remove_node_being_replaced(const token_metadata&,
+                                      const abstract_replication_strategy&,
+                                      inet_address_vector_replica_set& natural_endpoints);
+
 }
