@@ -1,0 +1,143 @@
+/*
+ * Copyright (C) 2023-present ScyllaDB
+ */
+
+/*
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
+#include "locator/tablet_replication_strategy.hh"
+#include "locator/tablets.hh"
+
+namespace locator {
+
+seastar::logger tablet_logger("tablets");
+
+std::ostream& operator<<(std::ostream& out, const tablet_replica& r) {
+    return out << r.host << ":" << r.shard;
+}
+
+const tablet_map& tablet_metadata::get_tablet_map(table_id id) const {
+    try {
+        return _tablets.at(id);
+    } catch (const std::out_of_range&) {
+        throw std::runtime_error(format("Tablet map not found for table {}", id));
+    }
+}
+
+const tablet_info& tablet_map::get_tablet_info(tablet_id id) const {
+    return _tablets[id];
+}
+
+tablet_id tablet_map::get_tablet_id(token t) const {
+    return dht::compaction_group_of(_x_log2_tablets, t);
+}
+
+tablet_map::tablet_map(size_t tablet_count)
+        : _x_log2_tablets(log2ceil(tablet_count)) {
+    tablet_count = 1ul << _x_log2_tablets;
+    _tablets.resize(tablet_count);
+}
+
+const tablet_transition_info* tablet_map::get_tablet_transition_info(tablet_id id) const {
+    if (!_transitions) {
+        return nullptr;
+    }
+    auto i = _transitions->find(id);
+    if (i == _transitions->end()) {
+        return nullptr;
+    }
+    return &i->second;
+}
+
+class tablet_effective_replication_map : public effective_replication_map {
+    table_id _table;
+private:
+    gms::inet_address get_endpoint_for_host_id(host_id host) const {
+        auto endpoint_opt = _tmptr->get_endpoint_for_host_id(host);
+        if (!endpoint_opt) {
+            on_internal_error(tablet_logger, format("Host ID {} not found in the cluster", host));
+        }
+        return *endpoint_opt;
+    }
+    inet_address_vector_replica_set to_replica_set(const tablet_replica_set& replicas) const {
+        inet_address_vector_replica_set result;
+        result.reserve(replicas.size());
+        for (auto&& replica : replicas) {
+            result.emplace_back(get_endpoint_for_host_id(replica.host));
+        }
+        return result;
+    }
+    const tablet_map& get_tablet_map() const {
+        return _tmptr->tablets().get_tablet_map(_table);
+    }
+public:
+    tablet_effective_replication_map(table_id table,
+                                     replication_strategy_ptr rs,
+                                     token_metadata_ptr tmptr,
+                                     size_t replication_factor)
+        : effective_replication_map(std::move(rs), std::move(tmptr), replication_factor)
+        , _table(table)
+    { }
+
+    virtual ~tablet_effective_replication_map() = default;
+
+    virtual inet_address_vector_replica_set get_natural_endpoints(const token& search_token) const override {
+        auto&& tablets = get_tablet_map();
+        auto tablet = tablets.get_tablet_id(search_token);
+        auto&& replicas = tablets.get_tablet_info(tablet).current;
+        tablet_logger.trace("get_natural_endpoints({}): table={}, tablet={}, replicas={}", search_token, _table, tablet, replicas);
+        return to_replica_set(replicas);
+    }
+
+    virtual inet_address_vector_replica_set get_natural_endpoints_without_node_being_replaced(const token& search_token) const override {
+        auto result = get_natural_endpoints(search_token);
+        maybe_remove_node_being_replaced(*_tmptr, *_rs, result);
+        return result;
+    }
+
+    virtual inet_address_vector_topology_change get_pending_endpoints(const token& search_token, const sstring& ks_name) const override {
+        auto&& tablets = get_tablet_map();
+        auto tablet = tablets.get_tablet_id(search_token);
+        auto&& info = tablets.get_tablet_transition_info(tablet);
+        if (!info) {
+            return {};
+        }
+        tablet_logger.trace("get_pending_endpoints({}): table={}, tablet={}, replica={}",
+                            search_token, _table, tablet, info->pending_replica);
+        return {get_endpoint_for_host_id(info->pending_replica)};
+    }
+};
+
+void tablet_aware_replication_strategy::validate_tablet_options(const gms::feature_service& fs,
+                                                                const replication_strategy_config_options& opts) const {
+    for (auto& c: opts) {
+        if (c.first == "tablets") {
+            if (!fs.tablets) {
+                throw exceptions::configuration_exception("Tablet replication is not enabled");
+            }
+        }
+    }
+}
+
+void tablet_aware_replication_strategy::process_tablet_options(abstract_replication_strategy& self) {
+    for (auto& c: self.get_config_options()) {
+        if (c.first == "tablets") {
+            _uses_tablets = true;
+            mark_as_per_table(self);
+        }
+    }
+}
+
+std::unordered_set<sstring> tablet_aware_replication_strategy::recognized_tablet_options() const {
+    std::unordered_set<sstring> opts;
+    opts.insert("tablets");
+    return opts;
+}
+
+effective_replication_map_ptr tablet_aware_replication_strategy::do_make_replication_map(
+        table_id table, replication_strategy_ptr rs, token_metadata_ptr tm, size_t replication_factor) const {
+    return seastar::make_shared<tablet_effective_replication_map>(table, std::move(rs), std::move(tm), replication_factor);
+}
+
+}

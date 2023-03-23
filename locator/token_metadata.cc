@@ -64,6 +64,8 @@ private:
 
     std::vector<token> _sorted_tokens;
 
+    tablet_metadata _tablets;
+
     topology _topology;
 
     long _ring_version = 0;
@@ -73,6 +75,8 @@ private:
     // clone_async() must be updated to copy that member.
 
     void sort_tokens();
+
+    const tablet_metadata& tablets() const { return _tablets; }
 
     struct shallow_copy {};
     token_metadata_impl(shallow_copy, const token_metadata_impl& o) noexcept
@@ -398,6 +402,10 @@ void token_metadata_impl::sort_tokens() {
     std::sort(sorted.begin(), sorted.end());
 
     _sorted_tokens = std::move(sorted);
+}
+
+const tablet_metadata& token_metadata::tablets() const {
+    return _impl->tablets();
 }
 
 const std::vector<token>& token_metadata_impl::sorted_tokens() const {

@@ -24,6 +24,7 @@
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/semaphore.hh>
 
+#include "locator/tablets.hh"
 #include "locator/types.hh"
 #include "locator/topology.hh"
 
@@ -103,6 +104,7 @@ public:
     token_metadata& operator=(token_metadata&&) noexcept;
     ~token_metadata();
     const std::vector<token>& sorted_tokens() const;
+    const tablet_metadata& tablets() const;
     // Update token->endpoint mappings for a given \c endpoint.
     // \c tokens are all the tokens that are now owned by \c endpoint.
     //
