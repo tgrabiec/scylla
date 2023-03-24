@@ -103,6 +103,40 @@ const tablet_transition_info* tablet_map::get_tablet_transition_info(tablet_id i
     return &i->second;
 }
 
+std::ostream& operator<<(std::ostream& out, const tablet_map& r) {
+    if (r.tablet_count() == 0) {
+        return out << "{}";
+    }
+    out << "{";
+    bool first = true;
+    tablet_id tid = 0;
+    for (auto&& tablet : r._tablets) {
+        if (!first) {
+            out << ",";
+        }
+        out << format("\n  [{}]: last_token={}, replicas={}", tid, r.get_last_token(tid), tablet.replicas);
+        if (auto tr = r.get_tablet_transition_info(tid)) {
+            out << format(", new_replicas={}, pending={}", tr->next, tr->pending_replica);
+        }
+        first = false;
+        ++tid;
+    }
+    return out << "\n}";
+}
+
+std::ostream& operator<<(std::ostream& out, const tablet_metadata& tm) {
+    out << "{";
+    bool first = true;
+    for (auto&& [id, map] : tm._tablets) {
+        if (!first) {
+            out << ",";
+        }
+        out << "\n  " << id << ": " << map;
+        first = false;
+    }
+    return out << "\n}";
+}
+
 class tablet_effective_replication_map : public effective_replication_map {
     table_id _table;
 private:

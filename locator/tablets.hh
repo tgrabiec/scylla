@@ -109,6 +109,8 @@ public:
     // Destroys gently.
     // The tablet map is not usable after this call and should be destroyed.
     future<> clear_gently();
+
+    friend std::ostream& operator<<(std::ostream&, const tablet_map&);
 };
 
 /// Holds information about all tablets in the cluster.
@@ -141,6 +143,7 @@ public:
     future<> clear_gently();
 public:
     bool operator==(const tablet_metadata&) const = default;
+    friend std::ostream& operator<<(std::ostream&, const tablet_metadata&);
 };
 
 }
