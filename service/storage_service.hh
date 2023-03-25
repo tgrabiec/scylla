@@ -145,6 +145,7 @@ private:
     gms::gossiper& _gossiper;
     sharded<netw::messaging_service>& _messaging;
     sharded<service::migration_manager>& _migration_manager;
+    cql3::query_processor* _qp = nullptr;
     sharded<repair_service>& _repair;
     sharded<streaming::stream_manager>& _stream_manager;
     sharded<locator::snitch_ptr>& _snitch;
@@ -293,6 +294,10 @@ public:
 
     void register_protocol_server(protocol_server& server) {
         _protocol_servers.push_back(&server);
+    }
+
+    void set_query_processor(cql3::query_processor& qp) {
+        _qp = &qp;
     }
 
     // All pointers are valid.
@@ -487,6 +492,7 @@ public:
     virtual void on_update_function(const sstring& ks_name, const sstring& function_name) override {}
     virtual void on_update_aggregate(const sstring& ks_name, const sstring& aggregate_name) override {}
     virtual void on_update_view(const sstring& ks_name, const sstring& view_name, bool columns_changed) override {}
+    virtual void on_update_tablet_metadata() override;
 
     virtual void on_drop_keyspace(const sstring& ks_name) override { keyspace_changed(ks_name).get(); }
     virtual void on_drop_column_family(const sstring& ks_name, const sstring& cf_name) override {}
