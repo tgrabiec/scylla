@@ -551,12 +551,13 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
     }
 
     slogger.debug("Setting tokens to {}", bootstrap_tokens);
-    co_await mutate_token_metadata([this, &bootstrap_tokens] (mutable_token_metadata_ptr tmptr) {
+    co_await mutate_token_metadata([this, &bootstrap_tokens] (mutable_token_metadata_ptr tmptr) -> future<> {
         // This node must know about its chosen tokens before other nodes do
         // since they may start sending writes to this node after it gossips status = NORMAL.
         // Therefore, in case we haven't updated _token_metadata with our tokens yet, do it now.
         tmptr->update_topology(get_broadcast_address(), _sys_ks.local().local_dc_rack());
-        return tmptr->update_normal_tokens(bootstrap_tokens, get_broadcast_address());
+        co_await tmptr->update_normal_tokens(bootstrap_tokens, get_broadcast_address());
+        tmptr->set_tablets(co_await replica::read_tablet_metadata(*_qp));
     });
 
     if (!_sys_ks.local().bootstrap_complete()) {
