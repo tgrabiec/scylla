@@ -661,6 +661,12 @@ SEASTAR_TEST_CASE(test_notifications) {
             e.execute_cql("alter type tests.type2 rename field2 to field4 and field3 to field5;").get();
 
             BOOST_REQUIRE_EQUAL(listener.update_user_type_count, 3);
+
+            e.execute_cql("create keyspace tablets_ks with replication = { 'class' : 'NetworkTopologyStrategy', 'replication_factor' : 1, 'tablets': 'yes' };").get();
+            e.execute_cql("create table tablets_ks.table1 (pk int primary key, c1 int, c2 int);").get();
+            BOOST_REQUIRE_EQUAL(listener.update_tablets, 1);
+            e.execute_cql("drop table tablets_ks.table1;").get();
+            BOOST_REQUIRE_EQUAL(listener.update_tablets, 2);
         });
     });
 }
