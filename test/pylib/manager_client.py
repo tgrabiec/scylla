@@ -138,17 +138,25 @@ class ManagerClient():
         logger.debug("ManagerClient stopping gracefully %s", server_id)
         await self.client.get_text(f"/cluster/server/{server_id}/stop_gracefully")
 
-    async def server_start(self, server_id: ServerNum, expected_error: Optional[str] = None) -> None:
-        """Start specified server"""
+    async def server_start(self, server_id: ServerNum, expected_error: Optional[str] = None,
+                           wait_for_others: bool = False, others_count = 1) -> None:
+        """Start specified server and optionally wait for it to learn of other servers"""
         logger.debug("ManagerClient starting %s", server_id)
         params = {'expected_error': expected_error} if expected_error is not None else None
         await self.client.get_text(f"/cluster/server/{server_id}/start", params=params)
+        if wait_for_others:
+            server_ip = await self.get_host_ip(server_id)
+            await self.server_sees_others(server_ip, others_count)
         self._driver_update()
 
-    async def server_restart(self, server_id: ServerNum) -> None:
-        """Restart specified server"""
+    async def server_restart(self, server_id: ServerNum, wait_for_others: bool = False,
+                             others_count = 1) -> None:
+        """Restart specified server and optionally wait for it to learn of other servers"""
         logger.debug("ManagerClient restarting %s", server_id)
         await self.client.get_text(f"/cluster/server/{server_id}/restart")
+        if wait_for_others:
+            server_ip = await self.get_host_ip(server_id)
+            await self.server_sees_others(server_ip, others_count)
         self._driver_update()
 
     async def server_add(self, replace_cfg: Optional[ReplaceConfig] = None, cmdline: Optional[List[str]] = None, config: Optional[dict[str, str]] = None, start: bool = True) -> ServerInfo:
@@ -238,3 +246,19 @@ class ManagerClient():
         except Exception as exc:
             raise Exception(f"Failed to get local host id address for server {server_id}") from exc
         return HostID(host_id)
+
+    async def server_sees_others(self, server_ip: IPAddress, count: int):
+        """Wait till a server sees a minimum given count of other servers"""
+        async def _sees_min_others():
+            alive_nodes = await self.api.get_alive_endpoints(server_ip)
+            if len(alive_nodes) > count:
+                return True
+        await wait_for(_sees_min_others, time() + 45, period=.1)
+
+    async def server_sees_other_server(self, server_ip: IPAddress, other_ip: IPAddress):
+        """Wait till a server sees another specific server IP"""
+        async def _sees_another_server():
+            alive_nodes = await self.api.get_alive_endpoints(server_ip)
+            if other_ip in alive_nodes:
+                return True
+        await wait_for(_sees_another_server, time() + 45, period=.1)
