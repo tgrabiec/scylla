@@ -251,9 +251,6 @@ public:
     void sort_by_proximity(inet_address address, inet_address_vector_replica_set& addresses) const;
 
 private:
-    // default constructor for cloning purposes
-    topology() noexcept;
-
     const node* add_node(node_holder node);
     void remove_node(const node* node);
 
@@ -279,6 +276,7 @@ private:
     std::weak_ordering compare_endpoints(const inet_address& address, const inet_address& a1, const inet_address& a2) const;
 
     unsigned _shard;
+    config _cfg;
     std::vector<node_holder> _nodes;
     std::unordered_map<host_id, const node*> _nodes_by_host_id;
     std::unordered_map<inet_address, const node*> _nodes_by_endpoint;
