@@ -503,6 +503,18 @@ std::weak_ordering topology::compare_endpoints(const inet_address& address, cons
     return d1 <=> d2;
 }
 
+std::ostream& operator<<(std::ostream& out, const locator::topology& t) {
+    out << "{this_host_id: " << t._cfg.this_host_id
+        << ", this_endpoint: " << t._cfg.this_endpoint
+        << ", dc: " << t._cfg.local_dc_rack.dc
+        << ", rack: " << t._cfg.local_dc_rack.rack
+        << ", nodes:\n";
+    for (auto&& node : t._nodes) {
+        out << "  " << topology::debug_format(&*node) << "\n";
+    }
+    return out << "}";
+}
+
 } // namespace locator
 
 namespace std {
