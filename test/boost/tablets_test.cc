@@ -124,20 +124,26 @@ SEASTAR_TEST_CASE(test_tablet_metadata_persistence) {
                 tb = *tmap.next_tablet(tb);
 
                 tmap.set_tablet_transition_info(tb, tablet_transition_info{
+                    tablet_transition_stage::allow_write_both_read_old,
                     tablet_replica_set {
                         tablet_replica {h3, 3},
                         tablet_replica {h1, 7},
                     },
-                    tablet_replica {h1, 7}
+                    tablet_replica {h1, 7},
+                    write_replica_set_selector::previous,
+                    read_replica_set_selector::previous
                 });
 
                 tb = *tmap.next_tablet(tb);
                 tmap.set_tablet_transition_info(tb, tablet_transition_info{
+                    tablet_transition_stage::use_new,
                     tablet_replica_set {
                         tablet_replica {h1, 4},
                         tablet_replica {h2, 2},
                     },
-                    tablet_replica {h1, 4}
+                    tablet_replica {h1, 4},
+                    write_replica_set_selector::next,
+                    read_replica_set_selector::next
                 });
             }
 
@@ -243,11 +249,14 @@ SEASTAR_TEST_CASE(test_get_shard) {
                 }
             });
             tmap.set_tablet_transition_info(tid, tablet_transition_info {
+                tablet_transition_stage::allow_write_both_read_old,
                 tablet_replica_set {
                     tablet_replica {h1, 0},
                     tablet_replica {h2, 3},
                 },
-                tablet_replica {h2, 3}
+                tablet_replica {h2, 3},
+                write_replica_set_selector::previous,
+                read_replica_set_selector::previous
             });
             tm.set_tablet_map(table1, std::move(tmap));
         }
@@ -307,11 +316,14 @@ SEASTAR_TEST_CASE(test_sharder) {
                 }
             });
             tmap.set_tablet_transition_info(tid, tablet_transition_info {
+                tablet_transition_stage::use_new,
                 tablet_replica_set {
                     tablet_replica {h1, 1},
                     tablet_replica {h2, 3},
                 },
-                tablet_replica {h2, 3}
+                tablet_replica {h2, 3},
+                write_replica_set_selector::next,
+                read_replica_set_selector::next
             });
 
             tid = *tmap.next_tablet(tid);
