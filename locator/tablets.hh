@@ -80,12 +80,22 @@ enum class tablet_transition_stage {
 sstring tablet_transition_stage_to_string(tablet_transition_stage);
 tablet_transition_stage tablet_transition_stage_from_string(const sstring&);
 
+enum class write_replica_set_selector {
+    previous, both, next
+};
+
+enum class read_replica_set_selector {
+    previous, next
+};
+
 /// Used for storing tablet state transition during topology changes.
 /// Describes transition of a single tablet.
 struct tablet_transition_info {
     tablet_transition_stage stage;
     tablet_replica_set next;
     tablet_replica pending_replica; // Optimization (next - tablet_info::replicas)
+    write_replica_set_selector writes;
+    read_replica_set_selector reads;
 
     bool operator==(const tablet_transition_info&) const = default;
 };

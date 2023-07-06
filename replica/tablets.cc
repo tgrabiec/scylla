@@ -123,6 +123,44 @@ future<> save_tablet_metadata(replica::database& db, const tablet_metadata& tm, 
     co_await db.apply(freeze(muts), db::no_timeout);
 }
 
+static
+write_replica_set_selector get_selector_for_writes(tablet_transition_stage stage) {
+    switch (stage) {
+        case tablet_transition_stage::allow_write_both_read_old:
+            return write_replica_set_selector::previous;
+        case tablet_transition_stage::write_both_read_old:
+            return write_replica_set_selector::both;
+        case tablet_transition_stage::streaming:
+            return write_replica_set_selector::both;
+        case tablet_transition_stage::write_both_read_new:
+            return write_replica_set_selector::both;
+        case tablet_transition_stage::use_new:
+            return write_replica_set_selector::next;
+        case tablet_transition_stage::cleanup:
+            return write_replica_set_selector::next;
+    }
+    on_internal_error(tablet_logger, format("Invalid tablet transition stage", static_cast<int>(stage)));
+}
+
+static
+read_replica_set_selector get_selector_for_reads(tablet_transition_stage stage) {
+    switch (stage) {
+        case tablet_transition_stage::allow_write_both_read_old:
+            return read_replica_set_selector::previous;
+        case tablet_transition_stage::write_both_read_old:
+            return read_replica_set_selector::previous;
+        case tablet_transition_stage::streaming:
+            return read_replica_set_selector::previous;
+        case tablet_transition_stage::write_both_read_new:
+            return read_replica_set_selector::next;
+        case tablet_transition_stage::use_new:
+            return read_replica_set_selector::next;
+        case tablet_transition_stage::cleanup:
+            return read_replica_set_selector::next;
+    }
+    on_internal_error(tablet_logger, format("Invalid tablet transition stage", static_cast<int>(stage)));
+}
+
 future<tablet_metadata> read_tablet_metadata(cql3::query_processor& qp) {
     tablet_metadata tm;
     struct active_tablet_map {
@@ -166,7 +204,10 @@ future<tablet_metadata> read_tablet_metadata(cql3::query_processor& qp) {
                                                 table, current->tid, pending));
             }
             current->map.set_tablet_transition_info(current->tid, tablet_transition_info{stage,
-                    std::move(new_tablet_replicas), *pending.begin()});
+                    std::move(new_tablet_replicas),
+                    *pending.begin(),
+                    get_selector_for_writes(stage),
+                    get_selector_for_reads(stage)});
         }
 
         current->map.set_tablet(current->tid, tablet_info{std::move(tablet_replicas)});

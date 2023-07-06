@@ -267,7 +267,22 @@ public:
     virtual inet_address_vector_replica_set get_natural_endpoints(const token& search_token) const override {
         auto&& tablets = get_tablet_map();
         auto tablet = tablets.get_tablet_id(search_token);
-        auto&& replicas = tablets.get_tablet_info(tablet).replicas;
+        auto* info = tablets.get_tablet_transition_info(tablet);
+        auto&& replicas = std::invoke([&] () -> const tablet_replica_set& {
+            if (!info) {
+                return tablets.get_tablet_info(tablet).replicas;
+            }
+            switch (info->writes) {
+                case write_replica_set_selector::previous:
+                    [[fallthrough]];
+                case write_replica_set_selector::both:
+                    return tablets.get_tablet_info(tablet).replicas;
+                case write_replica_set_selector::next: {
+                    return info->next;
+                }
+            }
+            on_internal_error(tablet_logger, format("Invalid replica selector", static_cast<int>(info->writes)));
+        });
         tablet_logger.trace("get_natural_endpoints({}): table={}, tablet={}, replicas={}", search_token, _table, tablet, replicas);
         return to_replica_set(replicas);
     }
@@ -285,13 +300,40 @@ public:
         if (!info) {
             return {};
         }
-        tablet_logger.trace("get_pending_endpoints({}): table={}, tablet={}, replica={}",
-                            search_token, _table, tablet, info->pending_replica);
-        return {get_endpoint_for_host_id(info->pending_replica.host)};
+        switch (info->writes) {
+            case write_replica_set_selector::previous:
+                return {};
+            case write_replica_set_selector::both:
+                tablet_logger.trace("get_pending_endpoints({}): table={}, tablet={}, replica={}",
+                                    search_token, _table, tablet, info->pending_replica);
+                return {get_endpoint_for_host_id(info->pending_replica.host)};
+            case write_replica_set_selector::next:
+                return {};
+        }
+        on_internal_error(tablet_logger, format("Invalid replica selector", static_cast<int>(info->writes)));
     }
 
     virtual inet_address_vector_replica_set get_endpoints_for_reading(const token& search_token) const override {
-        return get_natural_endpoints_without_node_being_replaced(search_token);
+        auto&& tablets = get_tablet_map();
+        auto tablet = tablets.get_tablet_id(search_token);
+        auto&& info = tablets.get_tablet_transition_info(tablet);
+        auto&& replicas = std::invoke([&] () -> const tablet_replica_set& {
+            if (!info) {
+                return tablets.get_tablet_info(tablet).replicas;
+            }
+            switch (info->reads) {
+                case read_replica_set_selector::previous:
+                    return tablets.get_tablet_info(tablet).replicas;
+                case read_replica_set_selector::next: {
+                    return info->next;
+                }
+            }
+            on_internal_error(tablet_logger, format("Invalid replica selector", static_cast<int>(info->reads)));
+        });
+        tablet_logger.trace("get_endpoints_for_reading({}): table={}, tablet={}, replicas={}", search_token, _table, tablet, replicas);
+        auto result = to_replica_set(replicas);
+        maybe_remove_node_being_replaced(*_tmptr, *_rs, result);
+        return result;
     }
 
     virtual bool has_pending_ranges(inet_address endpoint) const override {
