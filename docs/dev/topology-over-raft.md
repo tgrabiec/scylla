@@ -134,8 +134,10 @@ The invariants of stages, which hold as soon as the stage is committed to group0
 2. write_both_read_old
 
     Precondition: All old and new replicas:
-       a) see the transition info from step 1 via local token metadata and effective replication maps.
-       b) are prepared for receiving writes for the local tablet replica.
+
+    1. see the transition info from step 1 via local token metadata and effective replication maps.
+    
+    2. are prepared for receiving writes for the local tablet replica.
 
 3. streaming
 
