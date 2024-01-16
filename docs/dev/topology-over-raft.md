@@ -229,7 +229,7 @@ stateDiagram-v2
 
 When tablet is not in transition, the following invariants hold:
 
-1. The storage layer (database) on any node contains writes for keys which belong to the tablet only if
+1. [INV-TABL-1] The storage layer (database) on any node contains writes for keys which belong to the tablet only if
     that shard is one of the current tablet replicas.
 
 # Tablet splitting
@@ -272,6 +272,66 @@ doubling tablet count would interfere with the migration process. When the state
 migration track, then finalize can proceed and split each preexisting tablet into two in the topology
 metadata. The replicas  will react to that by remapping its compaction groups into a new set which size
 is equal to the new tablet count.
+
+# Intra-node tablet migration
+
+# Sharding with tablets
+
+Each table can have different shard assignment for a given token computed from the placement of tablet replicas,
+from table's tablet_map.
+
+Generic code should not use static sharders, which only work with vnode-based tables. So it should not use
+schema::get_sharder() or dht::static_shard_of(). It should use erm::get_sharder() instead:
+
+    table& t;
+    auto erm = t.erm();
+    dht::sharder& sharder = erm->get_sharder(); // valid as long as erm is alive
+
+A sharder obtained from effective_replication_map reflects the tablet_map in that particular version of topology.
+
+Since effective_replication_map_ptr blocks topology barriers, it should not be held for long. If the
+code is long-running but doesn't need to work with a particular topology version, it should use auto_refreshing_sharder.
+It is a sharder implementation which automatically switches to the latest effective_replication_map_ptr of the table when it changes.
+
+   dht::auto_refreshing_sharder sharder(table.shared_from_this());
+
+## Handling tablet migration
+
+Do I have to hold erm around reading on the replica side?
+
+Do I have to hold to erm around writing on the replica side? Yes, because topology coordinator needs to wait for
+all writes to a tablet replica before cleaning it up to uphold invariant [INV-TABL-1]. Holding on to effective_replication_map_ptr
+on the coordinator side is not enough since the coordinator may already time-out or restart.
+
+## Important differences from the static sharding
+
+Unlike with static sharding, shard assignment may change during node's life time.
+
+Unlike with static sharding, consecutive tokens are not owned by consecutive shards (modulo shard count).
+
+## Shard assignment stability
+
+When tablet is not in transition, each host may contain at most one tablet replica, so there is a single shard for a given
+token and tablet sharder returns that shard, or shard 0 if there is no replica (for consistency with the current API).
+
+The sharder reports a given shard to be owned by a node as long as either the previous or next replica set has replica
+on that shard for a given token.
+
+This is necessary regardless of what the current read or write selectors in the tablet_transition_info
+tell because the coordinator may use a different version of effective replication map. It may route read request to the leaving
+replica when the leaving replica already sees the write_both_read_new stage. The read should still be served successfully
+from the leaving tablet replica. Because of that, sharder responses should be stable throughout transition as to not
+cause discrepancy between the coordinator-side view of topology and the replica-side view.
+During transitions which are not intra-node migrations the coordinator decisions are varied, affected by read and write
+selectors, but replica-side decisions about shard ownership are constant.
+
+Intra-node migration is the opposite. Coordinator-side decisions are constant but replica-side decisions of the sharder vary.
+A node may have two shard-replicas for a given token, yet we want to read from one of them.
+To solve that, the sharder returns the replica based on the current read selector.
+Similarly for writes, the sharder returns the set of owning shards based on the current write selector. It may return either
+the previous shard, the next shard, or both.
+Since coordinator decisions are not affected by stage changes during intra-node migration, this instability doesn't
+cause discrepancy between coordinator-side decisions and replica-side decisions.
 
 # Topology guards
 

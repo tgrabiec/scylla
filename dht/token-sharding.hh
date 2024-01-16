@@ -28,6 +28,18 @@ struct shard_and_token {
     token token;
 };
 
+// Represents a set of shards that own a given token on a single host.
+// It can be either of: none, single shard (no tablet migration), or two shards (during tablet migration).
+using shard_replica_set = utils::small_vector<unsigned, 2>;
+
+enum class replica_set_kind {
+    for_reads, for_writes
+};
+
+enum class replica_set_selector {
+    previous, next
+};
+
 /**
  * Describes mapping between token space of a given table and owning shards on the local node.
  * The mapping reflected by this instance is constant for the lifetime of this sharder object.
@@ -48,6 +60,9 @@ public:
      * Calculates the shard that handles a particular token.
      */
     virtual unsigned shard_of(const token& t) const;
+
+    virtual shard_replica_set shard_of(const token& t, replica_set_kind) const;
+    virtual std::optional<unsigned> shard_of(const token& t, replica_set_selector) const;
 
     /**
      * Gets the first token greater than `t` that is in shard `shard`, and is a shard boundary (its first token).
@@ -110,5 +125,31 @@ struct fmt::formatter<dht::sharder> {
     auto format(const dht::sharder& sharder, fmt::format_context& ctx) const {
         return fmt::format_to(ctx.out(), "sharder[shard_count={}, ignore_msb_bits={}]",
                               sharder.shard_count(), sharder.sharding_ignore_msb());
+    }
+};
+
+template<>
+struct fmt::formatter<dht::replica_set_selector> {
+    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+    auto format(const dht::replica_set_selector& sel, fmt::format_context& ctx) const {
+        switch (sel) {
+            case dht::replica_set_selector::previous:
+                return fmt::format_to(ctx.out(), "previous");
+            case dht::replica_set_selector::next:
+                return fmt::format_to(ctx.out(), "next");
+        }
+    }
+};
+
+template<>
+struct fmt::formatter<dht::replica_set_kind> {
+    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+    auto format(const dht::replica_set_kind& sel, fmt::format_context& ctx) const {
+        switch (sel) {
+            case dht::replica_set_kind::for_reads:
+                return fmt::format_to(ctx.out(), "for_reads");
+            case dht::replica_set_kind::for_writes:
+                return fmt::format_to(ctx.out(), "for_writes");
+        }
     }
 };

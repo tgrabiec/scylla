@@ -46,6 +46,14 @@ public:
         return _sharder->shard_of(token);
     }
 
+    virtual std::optional<unsigned> shard_of(const token& t, dht::replica_set_selector sel) const override {
+        return _sharder->shard_of(t, sel);
+    }
+
+    virtual dht::shard_replica_set shard_of(const token& t, dht::replica_set_kind kind) const override {
+        return _sharder->shard_of(t, kind);
+    }
+
     virtual std::optional<dht::shard_and_token> next_shard(const dht::token& t) const override {
         return _sharder->next_shard(t);
     }

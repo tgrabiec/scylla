@@ -17,6 +17,7 @@
 #include "schema/schema_fwd.hh"
 #include "utils/chunked_vector.hh"
 #include "utils/hash.hh"
+#include "dht/token-sharding.hh"
 
 #include <boost/range/adaptor/transformed.hpp>
 #include <seastar/core/reactor.hh>
@@ -178,12 +179,22 @@ sstring tablet_transition_kind_to_string(tablet_transition_kind);
 tablet_transition_kind tablet_transition_kind_from_string(const sstring&);
 
 enum class write_replica_set_selector {
-    previous, both, next
+    previous, next, both
 };
 
 enum class read_replica_set_selector {
     previous, next
 };
+
+inline write_replica_set_selector as_write_selector(read_replica_set_selector sel) {
+    switch (sel) {
+        case read_replica_set_selector::previous:
+            return write_replica_set_selector::previous;
+        case read_replica_set_selector::next:
+            return write_replica_set_selector::next;
+    }
+    abort();
+}
 
 /// Used for storing tablet state transition during topology changes.
 /// Describes transition of a single tablet.
