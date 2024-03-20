@@ -20,6 +20,7 @@ class tablet_sharder : public dht::sharder {
     const token_metadata& _tm;
     table_id _table;
     mutable const tablet_map* _tmap = nullptr;
+    host_id _host;
 private:
     // Tablet map is lazily initialized to avoid exceptions during effective_replication_map construction
     // in case tablet mapping is not yet available in token metadata at the time the table is constructed.
@@ -94,9 +95,10 @@ private:
         return get_shard(tinfo.replicas, host);
     }
 public:
-    tablet_sharder(const token_metadata& tm, table_id table)
+    tablet_sharder(const token_metadata& tm, table_id table, std::optional<host_id> host = std::nullopt)
             : _tm(tm)
             , _table(table)
+            , _host(host.value_or(tm.get_my_id()))
     { }
 
     virtual ~tablet_sharder() = default;
@@ -104,7 +106,7 @@ public:
     virtual unsigned shard_of(const dht::token& t) const override {
         ensure_tablet_map();
         auto tid = _tmap->get_tablet_id(t);
-        auto shard = get_shard_for_read(tid, _tm.get_my_id()).value_or(0);
+        auto shard = get_shard_for_read(tid, _host).value_or(0);
         tablet_logger.trace("[{}] shard_of({}) = {}, tablet={}", _table, t, shard, tid);
         return shard;
     }
@@ -112,7 +114,7 @@ public:
     virtual dht::shard_replica_set shard_of(const token& t, dht::replica_set_kind kind) const override {
         ensure_tablet_map();
         auto tid = _tmap->get_tablet_id(t);
-        auto shards = shard_of(tid, _tm.get_my_id(), kind);
+        auto shards = shard_of(tid, _host, kind);
         tablet_logger.trace("[{}] shard_of({}, {}) = {}, tablet={}", _table, t, kind, shards, tid);
         return shards;
     }
@@ -122,7 +124,6 @@ public:
         auto tid = _tmap->get_tablet_id(t);
         auto* trinfo = _tmap->get_tablet_transition_info(tid);
         auto& tinfo = _tmap->get_tablet_info(tid);
-        auto host = _tm.get_my_id();
 
         auto& replicas = std::invoke([&] () -> const tablet_replica_set& {
             if (!trinfo) [[likely]] {
@@ -139,7 +140,7 @@ public:
 
         std::optional<unsigned> res;
         for (auto&& r : replicas) {
-            if (r.host == host) {
+            if (r.host == _host) {
                 res = r.shard;
                 break;
             }
@@ -151,10 +152,9 @@ public:
 
     virtual std::optional<dht::shard_and_token> next_shard(const token& t) const override {
         ensure_tablet_map();
-        auto me = _tm.get_my_id();
         std::optional<tablet_id> tb = _tmap->get_tablet_id(t);
         while ((tb = _tmap->next_tablet(*tb))) {
-            auto r = get_shard_for_read(*tb, me);
+            auto r = get_shard_for_read(*tb, _host);
             auto next = _tmap->get_first_token(*tb);
             tablet_logger.trace("[{}] token_for_next_shard({}) = {{{}, {}}}, tablet={}", _table, t, next, r, *tb);
             return dht::shard_and_token{r.value_or(0), next};
