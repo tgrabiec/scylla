@@ -772,7 +772,7 @@ void apply_plan_as_in_progress(token_metadata& tm, const migration_plan& plan) {
 static
 void rebalance_tablets(tablet_allocator& talloc, shared_token_metadata& stm, locator::load_stats_ptr load_stats = {}, std::unordered_set<host_id> skiplist = {}) {
     while (true) {
-        auto plan = talloc.balance_tablets(stm.get(), load_stats, std::move(skiplist)).get();
+        auto plan = talloc.balance_tablets(stm.get(), load_stats, skiplist).get();
         if (plan.empty()) {
             break;
         }
