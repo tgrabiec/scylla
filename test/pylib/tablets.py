@@ -35,6 +35,23 @@ async def get_all_tablet_replicas(manager: ManagerClient, server: ServerInfo, ke
         replicas=[(HostID(str(host)), shard) for (host, shard) in x.replicas]
     ) for x in rows]
 
+
+async def get_tablet_stage(manager: ManagerClient, server: ServerInfo, keyspace_name: str, table_name: str, token: int) -> str:
+    host = manager.get_cql().cluster.metadata.get_host(server.ip_addr)
+
+    # read_barrier is needed to ensure that local tablet metadata on the queried node
+    # reflects the finalized tablet movement.
+    await read_barrier(manager.api, server.ip_addr)
+
+    table_id = await manager.get_table_id(keyspace_name, table_name)
+    rows = await manager.get_cql().run_async(f"SELECT last_token, stage FROM system.tablets where "
+                                             f"table_id = {table_id}", host=host)
+
+    for row in rows:
+        if row.last_token >= token:
+            return row.stage
+
+
 async def get_tablet_replicas(manager: ManagerClient, server: ServerInfo, keyspace_name: str, table_name: str, token: int) -> list[tuple[HostID, int]]:
     """
     Gets tablet replicas of the tablet which owns a given token of a given table.
