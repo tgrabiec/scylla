@@ -23,13 +23,6 @@ from test.topology_experimental_raft.test_mv_tablets import get_tablet_replicas
 logger = logging.getLogger(__name__)
 
 
-async def find_server_by_host_id(manager: ManagerClient, servers: List[ServerInfo], host_id: HostID) -> ServerInfo:
-    for s in servers:
-        if await manager.get_host_id(s.server_id) == host_id:
-            return s
-    raise Exception(f"Host ID {host_id} not found in {servers}")
-
-
 @pytest.mark.asyncio
 @skip_mode('release', 'error injections are not supported in release mode')
 async def test_tablet_mv_replica_pairing_during_replace(manager: ManagerClient):
@@ -55,15 +48,15 @@ async def test_tablet_mv_replica_pairing_during_replace(manager: ManagerClient):
     logger.info(f'test.test replicas: {base_replicas}')
     view_replicas = await get_tablet_replicas(manager, servers[0], "test", "tv", 0)
     logger.info(f'test.tv replicas: {view_replicas}')
-    server_to_replace = await find_server_by_host_id(manager, servers, HostID(str(view_replicas[0][0])))
-    server_to_down = await find_server_by_host_id(manager, servers, HostID(str(base_replicas[0][0])))
+    server_to_replace = await manager.find_server_by_host_id(HostID(str(view_replicas[0][0])))
+    server_to_down = await manager.find_server_by_host_id(HostID(str(base_replicas[0][0])))
 
     logger.info('Downing a node to be replaced')
     await manager.server_stop(server_to_replace.server_id)
 
     logger.info('Blocking tablet rebuild')
     coord = await get_topology_coordinator(manager)
-    coord_serv = await find_server_by_host_id(manager, servers, coord)
+    coord_serv = await manager.find_server_by_host_id(coord)
     await manager.api.enable_injection(coord_serv.ip_addr, "tablet_transition_updates", one_shot=True)
     coord_log = await manager.server_open_log(coord_serv.server_id)
     coord_mark = await coord_log.mark()

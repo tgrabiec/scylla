@@ -91,6 +91,13 @@ class ManagerClient():
                                      auth_provider if auth_provider else self.auth_provider)
         self.cql = self.ccluster.connect()
 
+    async def find_server_by_host_id(self, host_id: HostID) -> ServerInfo:
+        servers = await self.running_servers()
+        for s in servers:
+            if await self.get_host_id(s.server_id) == host_id:
+                return s
+        raise Exception(f"Host ID {host_id} not found in {servers}")
+
     def driver_close(self) -> None:
         """Disconnect from cluster"""
         if self.ccluster is not None:
