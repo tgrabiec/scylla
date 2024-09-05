@@ -19,6 +19,7 @@
 #include "seastarx.hh"
 
 #include "log.hh"
+#include "db/timeout_clock.hh"
 
 #include <algorithm>
 #include <chrono>
@@ -138,6 +139,7 @@ class error_injection {
         condition_variable received_message_cv;
         error_injection_parameters parameters;
         sstring injection_name;
+        bool canceled = false;
 
         explicit injection_shared_data(error_injection_parameters parameters, std::string_view injection_name)
             : parameters(std::move(parameters))
@@ -198,6 +200,10 @@ public:
 
             try {
                 co_await _shared_data->received_message_cv.wait(timeout, [&] {
+                    if (_shared_data->canceled) {
+                        throw abort_requested_exception();
+                    }
+
                     if (!_share_messages) {
                         bool wakes_up = _shared_data->shared_read_message_count < _shared_data->received_message_count;
                         if (wakes_up) {
@@ -209,8 +215,9 @@ public:
 
                     return _read_messages_counter < _shared_data->received_message_count;
                 });
-            }
-            catch (const std::exception& e) {
+            } catch (const abort_requested_exception&) {
+                throw;
+            } catch (const std::exception& e) {
                 on_internal_error(errinj_logger, "Error injection wait_for_message timeout: " + std::string(e.what()));
             }
             ++_read_messages_counter;
@@ -346,7 +353,12 @@ public:
     }
 
     void disable(const std::string_view& injection_name) {
-        _enabled.erase(injection_name);
+        injection_data* data = get_data(injection_name);
+        if (data) {
+            data->shared_data->canceled = true;
+            data->shared_data->received_message_cv.broadcast();
+            _enabled.erase(injection_name);
+        }
     }
 
     void disable_all() {
@@ -404,6 +416,26 @@ public:
         auto duration = deadline - Clock::now();
         errinj_logger.debug("Triggering sleep injection \"{}\" ({})", name, duration);
         return seastar::sleep<Clock>(duration);
+    }
+
+    // \brief Inject a wait until a message to injection point
+    // Allows external process to trap and later release execution at this injection point.
+    // Works with non-one-shot injections.
+    // Disabling the injection unblocks this injection point so that it proceeds as if messaged.
+    future<> inject_barrier(const std::string_view& name,
+                            db::timeout_clock::time_point deadline = db::timeout_clock::time_point::max()) {
+        bool share_messages = false; // Allows working in multi-shot mode, where we have to wait for new message on each hit.
+        co_await inject(name, [&name, deadline] (auto& handler) -> future<> {
+            auto name_ = name;
+            errinj_logger.info("{}: start", name_);
+            try {
+                co_await handler.wait_for_message(deadline);
+            } catch (const abort_requested_exception&) {
+                errinj_logger.info("{}: canceled", name_);
+                co_return;
+            }
+            errinj_logger.info("{}: released", name_);
+        }, share_messages);
     }
 
     // \brief Inject a sleep to deadline with lambda(timeout)
@@ -622,6 +654,12 @@ public:
     // \param func function returning a future and taking an injection handler
     [[gnu::always_inline]]
     future<> inject(const std::string_view& name, waiting_handler_fun func, bool share_messages = true) {
+        return make_ready_future<>();
+    }
+
+    [[gnu::always_inline]]
+    future<> inject_barrier(const std::string_view& name,
+                            db::timeout_clock::time_point deadline = db::timeout_clock::time_point::min()) {
         return make_ready_future<>();
     }
 

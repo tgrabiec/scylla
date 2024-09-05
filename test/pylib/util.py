@@ -239,3 +239,73 @@ async def wait_for_view(cql: Session, name: str, node_count: int, timeout: int =
         return done[0][0] == node_count or None
     deadline = time.time() + timeout
     await wait_for(view_is_built, deadline)
+
+
+class ErrorInjectionBarrier:
+    """
+    Allows synchronizing server execution with test code via error injection framework.
+
+    The code inside scylla server defines injection point like this:
+
+        co_await utils::get_local_injector().inject_barrier("my_injection_point");
+
+    The code inside test can use ErrorInjectionBarrier to control execution of that injection point:
+
+      barrier = ErrorInjectionBarrier(manager, server, "my_injection_point")
+
+      # After arm(), the server will be trapped when it hits the inject_barrier() call
+      await barrier.arm()
+
+      # Wait for the server to hit the injection point since arm().
+      # If the server already hit it before wait() is called, wait() returns immediately.
+      await barrier.wait()
+      await barrier.release() # Release the server from the injection point
+
+      # Wait for the server to hit the injection point again, since last release()
+      # If the server already hit it after release() but before wait() is called, wait() returns immediately.
+      # This allows the test code to trap each and every injection point hit at the server side
+      # and perform arbitrary action before releasing the server.
+      await barrier.wait()
+
+      # Stops trapping the server and releases any trapped injection points.
+      # The server is guaranteed to not be trapped after this call.
+      await barrier.disarm()
+
+    The server is expected to not hit the injection point concurrently.
+    The barrier can be used in one-shot mode or multi-shot (default) mode.
+    In the one-shot mode, the barrier has to be armed again after wait() returns.
+
+    For correct behavior, the injection point should be controlled only by a single instance of ErrorInjectionBarrier.
+    """
+
+    def __init__(self, manager, server, name, one_shot=False):
+        self.manager = manager
+        self.server = server
+        self.name = name
+        self.one_shot = one_shot
+        self.log = None
+        self.log_mark = None
+
+    async def arm(self):
+        if self.log_mark:
+            raise Exception("Barrier already armed")
+
+        self.log = await self.manager.server_open_log(self.server.server_id)
+        self.log_mark = await self.log.mark()
+        await self.manager.api.enable_injection(self.server.ip_addr, self.name, one_shot=self.one_shot)
+
+    async def disarm(self):
+        await self.manager.api.disable_injection(self.server.ip_addr, self.name)
+        self.log_mark = None
+
+    async def wait(self):
+        if not self.log_mark:
+            raise Exception("Barrier not armed")
+
+        await self.log.wait_for(f'{self.name}: start', from_mark=self.log_mark)
+        self.log_mark = await self.log.mark()
+        if self.one_shot:
+            self.log_mark = None
+
+    async def release(self):
+        await self.manager.api.message_injection(self.server.ip_addr, self.name)
