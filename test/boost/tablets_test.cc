@@ -1458,7 +1458,7 @@ void rebalance_tablets(tablet_allocator& talloc,
 static
 void rebalance_tablets_as_in_progress(tablet_allocator& talloc, shared_token_metadata& stm) {
     while (true) {
-        auto plan = talloc.balance_tablets(stm.get()).get();
+        auto plan = talloc.balance_tablets(stm.get(), {}, {}, true).get();
         if (plan.empty()) {
             break;
         }
@@ -2194,14 +2194,14 @@ SEASTAR_THREAD_TEST_CASE(test_load_balancer_shuffle_mode) {
 
     rebalance_tablets(e.get_tablet_allocator().local(), stm);
 
-    BOOST_REQUIRE(e.get_tablet_allocator().local().balance_tablets(stm.get()).get().empty());
+    BOOST_REQUIRE(e.get_tablet_allocator().local().balance_tablets(stm.get(), {}, {}, true).get().empty());
 
     utils::get_local_injector().enable("tablet_allocator_shuffle");
     auto disable_injection = seastar::defer([&] {
         utils::get_local_injector().disable("tablet_allocator_shuffle");
     });
 
-    BOOST_REQUIRE(!e.get_tablet_allocator().local().balance_tablets(stm.get()).get().empty());
+    BOOST_REQUIRE(!e.get_tablet_allocator().local().balance_tablets(stm.get(), {}, {}, true).get().empty());
   }).get();
 }
 #endif
@@ -2377,7 +2377,7 @@ SEASTAR_THREAD_TEST_CASE(test_load_balancer_disabling) {
         }).get();
 
         {
-            auto plan = e.get_tablet_allocator().local().balance_tablets(stm.get()).get();
+            auto plan = e.get_tablet_allocator().local().balance_tablets(stm.get(), {}, {}, true).get();
             BOOST_REQUIRE(!plan.empty());
         }
 
@@ -2388,7 +2388,7 @@ SEASTAR_THREAD_TEST_CASE(test_load_balancer_disabling) {
         }).get();
 
         {
-            auto plan = e.get_tablet_allocator().local().balance_tablets(stm.get()).get();
+            auto plan = e.get_tablet_allocator().local().balance_tablets(stm.get(), {}, {}, true).get();
             BOOST_REQUIRE(plan.empty());
         }
 
@@ -2398,7 +2398,7 @@ SEASTAR_THREAD_TEST_CASE(test_load_balancer_disabling) {
         }).get();
 
         {
-            auto plan = e.get_tablet_allocator().local().balance_tablets(stm.get()).get();
+            auto plan = e.get_tablet_allocator().local().balance_tablets(stm.get(), {}, {}, true).get();
             BOOST_REQUIRE(plan.empty());
         }
 
@@ -2409,7 +2409,7 @@ SEASTAR_THREAD_TEST_CASE(test_load_balancer_disabling) {
         }).get();
 
         {
-            auto plan = e.get_tablet_allocator().local().balance_tablets(stm.get()).get();
+            auto plan = e.get_tablet_allocator().local().balance_tablets(stm.get(), {}, {}, true).get();
             BOOST_REQUIRE(!plan.empty());
         }
 
@@ -2419,7 +2419,7 @@ SEASTAR_THREAD_TEST_CASE(test_load_balancer_disabling) {
         }).get();
 
         {
-            auto plan = e.get_tablet_allocator().local().balance_tablets(stm.get()).get();
+            auto plan = e.get_tablet_allocator().local().balance_tablets(stm.get(), {}, {}, true).get();
             BOOST_REQUIRE(!plan.empty());
         }
   }).get();
@@ -2466,7 +2466,7 @@ SEASTAR_THREAD_TEST_CASE(test_drained_node_is_not_balanced_internally) {
             co_return;
         }).get();
 
-        migration_plan plan = e.get_tablet_allocator().local().balance_tablets(stm.get()).get();
+        migration_plan plan = e.get_tablet_allocator().local().balance_tablets(stm.get(), {}, {}, true).get();
         BOOST_REQUIRE(plan.has_nodes_to_drain());
         for (auto&& mig : plan.migrations()) {
             BOOST_REQUIRE(mig.kind != tablet_transition_kind::intranode_migration);
