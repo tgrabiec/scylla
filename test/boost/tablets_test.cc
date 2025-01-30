@@ -12,6 +12,8 @@
 #undef SEASTAR_TESTING_MAIN
 #include <seastar/testing/test_case.hh>
 #include "test/lib/random_utils.hh"
+#include "service/topology_mutation.hh"
+#include "service/storage_service.hh"
 #include <fmt/ranges.h>
 #include <seastar/testing/thread_test_case.hh>
 #include "test/lib/cql_test_env.hh"
@@ -56,6 +58,12 @@ static utils::UUID next_uuid() {
     return utils::UUID_gen::get_time_UUID(std::chrono::system_clock::time_point(
             std::chrono::duration_cast<std::chrono::system_clock::duration>(
                     std::chrono::seconds(counter++))));
+}
+
+static
+sstring new_dc() {
+    static int dc_id = 0;
+    return fmt::format("dc{}", ++dc_id);
 }
 
 static
@@ -107,6 +115,66 @@ future<table_id> add_table(cql_test_env& e, sstring test_ks_name = "") {
                 .build();
     });
     co_return id;
+}
+
+// Run in a seastar thread
+static
+sstring add_keyspace(cql_test_env& e, std::unordered_map<sstring, int> dc_rf, int initial_tablets = 0) {
+    static int ks_id = 0;
+    auto ks_name = fmt::format("keyspace{}", ++ks_id);
+    sstring rf_options;
+    for (auto& [dc, rf] : dc_rf) {
+        rf_options += format(", '{}': {}", dc, rf);
+    }
+    e.execute_cql(fmt::format("create keyspace {} with replication = {{'class': 'NetworkTopologyStrategy'{}}}"
+                              " and tablets = {{'enabled': true, 'initial': {}}}",
+                              ks_name, rf_options, initial_tablets)).get();
+    return ks_name;
+}
+
+// Run in a seastar thread
+void mutate_tablets(cql_test_env& e, seastar::noncopyable_function<future<>(tablet_metadata&)> mutator) {
+    abort_source as;
+    auto guard = e.get_raft_group0_client().start_operation(as).get();
+    auto& stm = e.shared_token_metadata().local();
+    stm.mutate_token_metadata([&] (token_metadata& tm) -> future<> {
+        return mutator(tm.tablets());
+    }).get();
+    save_tablet_metadata(e.local_db(), stm.get()->tablets(), guard.write_timestamp()).get();
+}
+
+static
+dht::token next_token() {
+    static int64_t v = 1;
+    return dht::token(v++);
+}
+
+// Adds a new node to topology via group0.
+static
+void add_node(cql_test_env& e, host_id id, inet_address ip, endpoint_dc_rack dc_rack, node_state state, unsigned shard_count) {
+    abort_source as;
+    auto& client = e.get_raft_group0_client();
+    auto guard = client.start_operation(as).get();
+    service::topology_mutation_builder builder(guard.write_timestamp());
+    std::unordered_set<dht::token> tokens;
+    tokens.insert(next_token());
+    builder.with_node(raft::server_id(id.uuid()))
+            .set("datacenter", dc_rack.dc)
+            .set("rack", dc_rack.rack)
+            .set("node_state", state)
+            .set("shard_count", (uint32_t)shard_count)
+            .set("cleanup_status", cleanup_status::clean)
+            .set("release_version", version::release())
+            .set("num_tokens", (uint32_t)1)
+            .set("tokens_string", "0")
+            .set("tokens", tokens)
+            .set("supported_features", std::set<sstring>())
+            .set("request_id", utils::UUID())
+            .set("ignore_msb", (uint32_t)0);
+    topology_change change({builder.build()});
+    group0_command g0_cmd = client.prepare_command(std::move(change), guard, format("adding node {} to topology", id));
+    testlog.info("Adding node {}/{} dc={} rack={} to topology", id, ip, dc_rack.dc, dc_rack.rack);
+    client.add_entry(std::move(g0_cmd), std::move(guard), as).get();
 }
 
 SEASTAR_TEST_CASE(test_tablet_metadata_persistence) {
@@ -1455,6 +1523,29 @@ void rebalance_tablets(tablet_allocator& talloc,
     throw std::runtime_error("rebalance_tablets(): convergence not reached within limit");
 }
 
+// Invokes the tablet scheduler and executes its plan, continuously until it emits an empty plan.
+// Simulates topology coordinator but doesn't perform actual migration,
+// only reflects it in the metadata.
+// Run in a seastar thread.
+void rebalance_tablets(cql_test_env& e) {
+    abort_source as;
+    testlog.debug("rebalance_tablets(): start");
+
+    auto group0_lock = e.get_raft_group0_client().start_operation(as).get();
+    testlog.debug("rebalance_tablets(): took group0 guard");
+
+    auto& stm = e.shared_token_metadata().local();
+    rebalance_tablets(e.get_tablet_allocator().local(), stm);
+    testlog.debug("rebalance_tablets(): rebalanced");
+
+    // We should not introduce inconsistency between on-disk state and in-memory state
+    // as that may violate invariants and cause failures in concurrent group0 operations
+    // causing test flakiness.
+    save_tablet_metadata(e.local_db(), stm.get()->tablets(), guard.write_timestamp()).get();
+
+    testlog.debug("rebalance_tablets(): done");
+}
+
 static
 void rebalance_tablets_as_in_progress(tablet_allocator& talloc, shared_token_metadata& stm) {
     while (true) {
@@ -2085,25 +2176,16 @@ SEASTAR_THREAD_TEST_CASE(test_load_balancing_works_with_in_progress_transitions)
     auto host2 = host_id(next_uuid());
     auto host3 = host_id(next_uuid());
 
-    auto table1 = table_id(next_uuid());
+    auto rack = endpoint_dc_rack{ new_dc(), "rack1" };
 
-    semaphore sem(1);
-    shared_token_metadata stm([&sem] () noexcept { return get_units(sem, 1); }, locator::token_metadata::config{
-        locator::topology::config{
-            .this_endpoint = ip1,
-            .this_host_id = host1,
-            .local_dc_rack = locator::endpoint_dc_rack::default_location
-        }
-    });
+    add_node(e, host1, ip1, rack, node_state::normal, 1);
+    add_node(e, host2, ip2, rack, node_state::normal, 1);
+    add_node(e, host3, ip3, rack, node_state::normal, 2);
 
-    stm.mutate_token_metadata([&] (token_metadata& tm) -> future<> {
-        tm.update_topology(host1, locator::endpoint_dc_rack::default_location, node::state::normal, 1);
-        tm.update_topology(host2, locator::endpoint_dc_rack::default_location, node::state::normal, 1);
-        tm.update_topology(host3, locator::endpoint_dc_rack::default_location, node::state::normal, 2);
-        co_await tm.update_normal_tokens(std::unordered_set{token(tests::d2t(1. / 3))}, host1);
-        co_await tm.update_normal_tokens(std::unordered_set{token(tests::d2t(2. / 3))}, host2);
-        co_await tm.update_normal_tokens(std::unordered_set{token(tests::d2t(3. / 3))}, host3);
+    auto ks_name = add_keyspace(e, {{rack.dc, 2}}, 4);
+    auto table1 = add_table(e, ks_name).get();
 
+    mutate_tablets(e, [&] (tablet_metadata& tmeta) -> future<> {
         tablet_map tmap(4);
         std::optional<tablet_id> tid = tmap.first_tablet();
         for (int i = 0; i < 4; ++i) {
@@ -2124,11 +2206,13 @@ SEASTAR_THREAD_TEST_CASE(test_load_balancing_works_with_in_progress_transitions)
                 },
                 tablet_replica {host3, 0}
         });
-        tablet_metadata tmeta;
         tmeta.set_tablet_map(table1, std::move(tmap));
-        tm.set_tablets(std::move(tmeta));
         co_return;
-    }).get();
+    });
+
+    abort_source as;
+    auto guard = e.get_raft_group0_client().start_operation(as).get();
+    auto& stm = e.shared_token_metadata().local();
 
     rebalance_tablets_as_in_progress(e.get_tablet_allocator().local(), stm);
     execute_transitions(stm);
@@ -2142,6 +2226,8 @@ SEASTAR_THREAD_TEST_CASE(test_load_balancing_works_with_in_progress_transitions)
             BOOST_REQUIRE_EQUAL(load.get_avg_shard_load(h), 2);
         }
     }
+
+    save_tablet_metadata(e.local_db(), stm.get()->tablets(), guard.write_timestamp()).get();
   }).get();
 }
 
@@ -2794,9 +2880,10 @@ using hosts_by_rack_map = std::unordered_map<sstring, std::vector<host_id>>;
 static void do_test_load_balancing_merge_colocation(cql_test_env& e, const int n_racks, const int rf, const int n_hosts,
                                                     const unsigned shard_count, const unsigned initial_tablets,
                                                     std::function<void(token_metadata&, tablet_map&, const rack_vector&, const hosts_by_rack_map&)> set_tablets) {
+    auto dc = new_dc();
     rack_vector racks;
     for (int i = 0; i < n_racks; i++) {
-        racks.push_back(endpoint_dc_rack{"dc1", format("rack-{}", i + 1)});
+        racks.push_back(endpoint_dc_rack{dc, format("rack-{}", i + 1)});
     }
 
     testlog.info("merge colocation test - hosts={}, racks={}, rf={}, shard_count={}, initial_tablets={}", n_hosts, racks.size(), rf, shard_count, initial_tablets);
@@ -2806,30 +2893,25 @@ static void do_test_load_balancing_merge_colocation(cql_test_env& e, const int n
         hosts.push_back(host_id(next_uuid()));
     }
 
-    auto table1 = add_table(e).get();
-
     hosts_by_rack_map hosts_by_rack;
-    semaphore sem(1);
-    shared_token_metadata stm([&sem] () noexcept { return get_units(sem, 1); }, locator::token_metadata::config{
-        locator::topology::config{
-            .this_endpoint = inet_address("192.168.0.1"),
-            .this_host_id = hosts[0],
-            .local_dc_rack = racks[std::min(1, n_racks - 1)]
-        }
-    });
+
+    int i = 0;
+    for (auto h : hosts) {
+        auto ip = inet_address(fmt::format("192.168.0.{}", i + 1));
+        auto rack = racks[++i % racks.size()];
+        hosts_by_rack[rack.rack].push_back(h);
+        add_node(e, h, ip, rack, node_state::normal, shard_count);
+    }
+
+    auto ks_name = add_keyspace(e, {{dc, rf}}, initial_tablets);
+    auto table1 = add_table(e, ks_name).get();
+
+    abort_source as;
+    auto group0_lock = e.get_raft_group0_client().start_operation(as).get();
+    auto& stm = e.shared_token_metadata().local();
 
     stm.mutate_token_metadata([&] (token_metadata& tm) -> future<> {
         tablet_metadata tmeta;
-
-        int i = 0;
-        for (auto h : hosts) {
-            auto rack = racks[++i % racks.size()];
-            hosts_by_rack[rack.rack].push_back(h);
-            tm.update_topology(h, rack, node::state::normal, shard_count);
-            co_await tm.update_normal_tokens(std::unordered_set{token(tests::d2t(float(i) / hosts.size()))}, h);
-            testlog.debug("adding host {}, rack {}, token {}", h, rack.rack, token(tests::d2t(1. / hosts.size())));
-        }
-
         tablet_map tmap(initial_tablets);
         locator::resize_decision decision;
         // leaves growing mode, allowing for merge decision.
@@ -2838,6 +2920,7 @@ static void do_test_load_balancing_merge_colocation(cql_test_env& e, const int n
         set_tablets(tm, tmap, racks, hosts_by_rack);
         tmeta.set_tablet_map(table1, std::move(tmap));
         tm.set_tablets(std::move(tmeta));
+        return make_ready_future<>();
     }).get();
 
     auto tablet_count = [&] {
