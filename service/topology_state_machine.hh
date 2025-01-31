@@ -119,6 +119,7 @@ struct topology {
         tablet_resize_finalization,
         left_token_ring,
         rollback_to_normal,
+        lock, // Blocks the state machine until externally changed.
     };
 
     std::optional<transition_state> tstate;
