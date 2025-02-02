@@ -694,13 +694,13 @@ public:
         , _skiplist(std::move(skiplist))
     { }
 
-    future<migration_plan> make_plan(std::optional<unsigned> initial_scale, bool test_mode) {
+    future<migration_plan> make_plan(std::optional<unsigned> initial_scale) {
         const locator::topology& topo = _tm->get_topology();
         migration_plan plan;
 
         // Prepare plans for each DC separately and combine them to be executed in parallel.
         for (auto&& dc : topo.get_datacenters()) {
-            auto dc_plan = co_await make_plan(dc, initial_scale, test_mode);
+            auto dc_plan = co_await make_plan(dc, initial_scale);
             lblogger.info("Prepared {} migrations in DC {}", dc_plan.size(), dc);
             plan.merge(std::move(dc_plan));
         }
@@ -709,7 +709,7 @@ public:
         plan.set_repair_plan(co_await make_repair_plan(plan));
 
         // Merge table-wide resize decisions, may emit new decisions, revoke or finalize ongoing ones.
-        plan.merge_resize_plan(co_await make_resize_plan(plan, initial_scale, test_mode));
+        plan.merge_resize_plan(co_await make_resize_plan(plan, initial_scale));
 
         lblogger.info("Prepared {} migration plans, out of which there were {} tablet migration(s) and {} resize decision(s) and {} tablet repair(s)",
                 plan.size(), plan.tablet_migration_count(), plan.resize_decision_count(), plan.tablet_repair_count());
@@ -1053,7 +1053,7 @@ public:
         co_return std::move(plan);
     }
 
-    future<table_resize_plan> make_resize_plan(const migration_plan& plan, std::optional<unsigned> initial_scale, bool test_mode) {
+    future<table_resize_plan> make_resize_plan(const migration_plan& plan, std::optional<unsigned> initial_scale) {
         table_resize_plan resize_plan;
 
         if (!_tm->tablets().balancing_enabled()) {
@@ -1086,7 +1086,6 @@ public:
                 .min_tablet_count = 1,
             };
 
-            // FIXME: the table or the replication_strategy might be missing in boost unit tests
             auto t = _db.get_tables_metadata().get_table_if_exists(table);
             if (t) {
                 const auto& erm = t->get_effective_replication_map();
@@ -1095,13 +1094,9 @@ public:
                             rs->calculate_min_tablet_count(t->schema(), erm->get_token_metadata_ptr(), size_desc.target_tablet_size, initial_scale));
                 } else {
                     auto msg = format("Table {}.{} has no tablet_aware_replication_strategy: uses_tablets={}", t->schema()->ks_name(), t->schema()->cf_name(), erm->get_replication_strategy().uses_tablets());
-                    if (!test_mode) {
-                        on_internal_error(lblogger, msg);
-                    } else {
-                        lblogger.debug("{}", msg);
-                    }
+                    on_internal_error(lblogger, msg);
                 }
-            } else if (!test_mode) {
+            } else {
                 on_internal_error(lblogger, format("Table {} does not exist", table));
             }
 
@@ -2410,7 +2405,7 @@ public:
         }
     };
 
-    future<migration_plan> make_plan(dc_name dc, std::optional<unsigned> initial_scale, bool test_mode) {
+    future<migration_plan> make_plan(dc_name dc, std::optional<unsigned> initial_scale) {
         migration_plan plan;
 
         _dc = dc;
@@ -2723,10 +2718,10 @@ public:
         _stopped = true;
     }
 
-    future<migration_plan> balance_tablets(token_metadata_ptr tm, locator::load_stats_ptr table_load_stats, std::unordered_set<host_id> skiplist, bool test_mode) {
+    future<migration_plan> balance_tablets(token_metadata_ptr tm, locator::load_stats_ptr table_load_stats, std::unordered_set<host_id> skiplist) {
         load_balancer lb(_db, tm, std::move(table_load_stats), _load_balancer_stats, _db.get_config().target_tablet_size_in_bytes(), std::move(skiplist));
         lb.set_use_table_aware_balancing(_use_tablet_aware_balancing);
-        co_return co_await lb.make_plan(_config.initial_tablets_scale, test_mode);
+        co_return co_await lb.make_plan(_config.initial_tablets_scale);
     }
 
     void set_use_tablet_aware_balancing(bool use_tablet_aware_balancing) {
@@ -2875,8 +2870,8 @@ future<> tablet_allocator::stop() {
     return impl().stop();
 }
 
-future<migration_plan> tablet_allocator::balance_tablets(locator::token_metadata_ptr tm, locator::load_stats_ptr load_stats, std::unordered_set<host_id> skiplist, bool test_mode) {
-    return impl().balance_tablets(std::move(tm), std::move(load_stats), std::move(skiplist), test_mode);
+future<migration_plan> tablet_allocator::balance_tablets(locator::token_metadata_ptr tm, locator::load_stats_ptr load_stats, std::unordered_set<host_id> skiplist) {
+    return impl().balance_tablets(std::move(tm), std::move(load_stats), std::move(skiplist));
 }
 
 void tablet_allocator::set_use_table_aware_balancing(bool use_tablet_aware_balancing) {
