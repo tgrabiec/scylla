@@ -22,6 +22,7 @@
 #include "cdc/cdc_partitioner.hh"
 #include "bytes.hh"
 #include "index/vector_index.hh"
+#include "locator/topology.hh"
 #include "replica/database.hh"
 #include "db/schema_tables.hh"
 #include "schema/schema.hh"
@@ -165,7 +166,7 @@ public:
             auto logname = log_name(schema.cf_name());
             check_that_cdc_log_table_does_not_exist(db, schema, logname);
             ensure_that_table_has_no_counter_columns(schema);
-            ensure_that_table_uses_vnodes(ksm, schema);
+            ensure_that_table_uses_vnodes(ksm, schema, db.get_token_metadata().get_topology());
 
             // in seastar thread
             auto log_schema = create_log_schema(schema);
@@ -211,7 +212,7 @@ public:
 
             check_for_attempt_to_create_nested_cdc_log(db, new_schema);
             ensure_that_table_has_no_counter_columns(new_schema);
-            ensure_that_table_uses_vnodes(*keyspace.metadata(), new_schema);
+            ensure_that_table_uses_vnodes(*keyspace.metadata(), new_schema, db.get_token_metadata().get_topology());
 
             auto new_log_schema = create_log_schema(new_schema, log_schema ? std::make_optional(log_schema->id()) : std::nullopt, log_schema);
 
@@ -277,9 +278,9 @@ private:
     // Until we support CDC with tablets (issue #16317), we can't allow this
     // to be attempted - in particular the log table we try to create will not
     // have tablets, and will cause a failure.
-    static void ensure_that_table_uses_vnodes(const keyspace_metadata& ksm, const schema& schema) {
+    static void ensure_that_table_uses_vnodes(const keyspace_metadata& ksm, const schema& schema, const locator::topology& topo) {
         locator::replication_strategy_params params(ksm.strategy_options(), ksm.initial_tablets());
-        auto rs = locator::abstract_replication_strategy::create_replication_strategy(ksm.strategy_name(), params);
+        auto rs = locator::abstract_replication_strategy::create_replication_strategy(ksm.strategy_name(), params, topo);
         if (rs->uses_tablets()) {
             throw exceptions::invalid_request_exception(format("Cannot create CDC log for a table {}.{}, because keyspace uses tablets. See issue #16317.",
                 schema.ks_name(), schema.cf_name()));
