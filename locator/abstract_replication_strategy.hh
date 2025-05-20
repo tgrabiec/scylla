@@ -109,6 +109,21 @@ private:
     void parse(const replication_strategy_config_option& rf, const std::unordered_set<sstring>& allowed_racks);
 };
 
+struct rack_diff {
+    rack_list added;
+    rack_list removed;
+
+    bool empty() const {
+        return added.empty() && removed.empty();
+    }
+
+    operator bool() const {
+        return !empty();
+    }
+};
+
+rack_diff diff_racks(const rack_list& old_racks, const rack_list& new_racks);
+
 class abstract_replication_strategy : public seastar::enable_shared_from_this<abstract_replication_strategy> {
     friend class vnode_effective_replication_map;
     friend class per_table_replication_strategy;
