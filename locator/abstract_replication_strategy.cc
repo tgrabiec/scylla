@@ -209,6 +209,15 @@ size_t get_replication_factor(const replication_strategy_config_option& opt) {
     }, opt);
 }
 
+rack_diff diff_racks(const rack_list& old_racks, const rack_list& new_racks) {
+    rack_diff diff;
+    std::set_difference(new_racks.begin(), new_racks.end(), old_racks.begin(), old_racks.end(),
+                        std::back_inserter(diff.added));
+    std::set_difference(old_racks.begin(), old_racks.end(), new_racks.begin(), new_racks.end(),
+                        std::back_inserter(diff.removed));
+    return diff;
+}
+
 static
 void
 insert_token_range_to_sorted_container_while_unwrapping(
