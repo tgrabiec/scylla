@@ -12,6 +12,7 @@
 
 #include "locator/abstract_replication_strategy.hh"
 #include "locator/tablet_replication_strategy.hh"
+#include "seastar/util/backtrace.hh"
 
 #include <optional>
 #include <unordered_set>
