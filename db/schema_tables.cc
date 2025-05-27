@@ -1960,7 +1960,7 @@ static void make_update_indices_mutations(
             }
         }
 
-        db.get_notifier().before_create_column_family(*ksm, *view, mutations, timestamp);
+        db.get_notifier().before_create_column_family(db, *ksm, *view, mutations, timestamp);
     }
 
     mutations.emplace_back(std::move(indices_mutation));
