@@ -30,14 +30,15 @@ static locator::replication_strategy_config_options prepare_options(
         const locator::token_metadata& tm,
         bool rf_rack_valid_keyspaces,
         locator::replication_strategy_config_options options,
-        const locator::replication_strategy_config_options& old_options = {}) {
+        const locator::replication_strategy_config_options& old_options,
+        bool uses_tablets) {
     options.erase(ks_prop_defs::REPLICATION_STRATEGY_CLASS_KEY);
 
     auto is_nts = locator::abstract_replication_strategy::to_qualified_class_name(strategy_class) == "org.apache.cassandra.locator.NetworkTopologyStrategy";
     const auto& all_dcs = tm.get_datacenter_racks_token_owners();
     auto force_racks = uses_tablets && rf_rack_valid_keyspaces;
 
-    logger.info("prepare_options: {}: is_nts={} rf_rack_valid_keyspaces={} {{{}}}: all_dcs={}", strategy_class, is_nts, rf_rack_valid_keyspaces,
+    logger.info("prepare_options: {}: is_nts={} force_racks={} {{{}}}: all_dcs={}", strategy_class, is_nts, force_racks,
             fmt::join(options | std::views::transform([] (auto& x) {
                             return fmt::format("{}:{}", x.first, x.second);
                     }),
@@ -71,22 +72,41 @@ static locator::replication_strategy_config_options prepare_options(
         }
     }
 
-    auto expand_dc_racks = [&] (const sstring& dc, const locator::replication_strategy_config_option& rf, bool rf_rack_valid_keyspaces) {
-        logger.info("expand_dc_racks: dc={} rf={} rf_rack_valid_keyspaces={} all_dcs={}", dc, rf, rf_rack_valid_keyspaces, all_dcs);
-        auto it = all_dcs.find(dc);
-        if (it == all_dcs.end()) {
-            return;
-        }
+    auto expand_dc_racks = [&] (const sstring& dc, const locator::replication_strategy_config_option& rf) {
+        logger.info("expand_dc_racks: dc={} rf={} all_dcs={}", dc, rf, all_dcs);
         auto opt = options.find(dc);
-        if (opt != options.end() && (std::holds_alternative<locator::rack_list>(opt->second) || !rf_rack_valid_keyspaces)) {
+        if (opt != options.end() && (std::holds_alternative<locator::rack_list>(opt->second) || !force_racks)) {
             return;
         }
-        auto dc_racks = it->second | std::views::keys | std::ranges::to<std::vector<sstring>>();
-        auto data = locator::abstract_replication_strategy::parse_replication_factor(rf, dc_racks | std::ranges::to<std::unordered_set<sstring>>());
+        std::unordered_set<sstring> allowed_racks;
+        std::vector<sstring> dc_racks;
+        auto it = all_dcs.find(dc);
+        if (it != all_dcs.end()) {
+            dc_racks = it->second | std::views::keys | std::ranges::to<std::vector<sstring>>();
+            allowed_racks = std::ranges::to<std::unordered_set<sstring>>(dc_racks);
+        } else if (!tm.get_topology().get_datacenters().contains(dc)) {
+            throw exceptions::configuration_exception(fmt::format("Unrecognized datacenter name '{}'", dc));
+        }
+
+        auto data = locator::abstract_replication_strategy::parse_replication_factor(rf, allowed_racks);
 
         if (data.is_rack_based()) {
             options[dc] = data.get_rack_list();
-        } else if (rf_rack_valid_keyspaces) {
+        } else if (data.count() == 0) {
+            options.emplace(dc, "0");
+        } else if (force_racks) {
+            if (data.count() > dc_racks.size()) {
+                throw exceptions::configuration_exception(fmt::format(
+                        "Replication factor {} exceeds the number of racks ({}) in dc {}", data.count(), dc_racks.size(), dc));
+            }
+            if (old_options.count(dc)) {
+                auto& old_rf_val = old_options.at(dc);
+                auto old_rf = locator::abstract_replication_strategy::parse_replication_factor(old_rf_val, allowed_racks);
+                if (old_rf.is_rack_based() && old_rf.count() == data.count()) {
+                    options[dc] = old_rf_val;
+                    return;
+                }
+            }
             // If the replication factor is less than the number of racks, pick rf racks at random.
             if (data.count() < dc_racks.size()) {
                 static thread_local auto gen = std::default_random_engine(std::random_device{}());
@@ -100,20 +120,23 @@ static locator::replication_strategy_config_options prepare_options(
     };
 
     if (rf.has_value()) {
-
+        for (const auto& dc : tm.get_topology().get_datacenters()) {
+            auto i = options.find(dc);
+            if (i != options.end()) {
+                expand_dc_racks(dc, i->second);
+            } else if (!old_options.contains(dc)) {
+                expand_dc_racks(dc, *rf);
+            }
+        }
         // We keep previously specified DC factors for safety.
         for (const auto& opt : old_options) {
             if (opt.first != ks_prop_defs::REPLICATION_FACTOR_KEY) {
                 options.insert(opt);
             }
         }
-
-        for (const auto& dc : all_dcs | std::views::keys) {
-            expand_dc_racks(dc, *rf, rf_rack_valid_keyspaces);
-        }
-    } else if (rf_rack_valid_keyspaces) {
+    } else if (force_racks) {
         for (const auto& [dc, dc_rf] : options) {
-            expand_dc_racks(dc, dc_rf, true);
+            expand_dc_racks(dc, dc_rf);
         }
     }
 
@@ -257,7 +280,7 @@ lw_shared_ptr<data_dictionary::keyspace_metadata> ks_prop_defs::as_ks_metadata(s
     std::optional<unsigned> default_initial_tablets = enable_tablets && locator::abstract_replication_strategy::to_qualified_class_name(sc) == "org.apache.cassandra.locator.NetworkTopologyStrategy"
             ? std::optional<unsigned>(0) : std::nullopt;
     auto initial_tablets = get_initial_tablets(default_initial_tablets, cfg.enforce_tablets());
-    auto options = prepare_options(sc, tm, cfg.rf_rack_valid_keyspaces(), get_replication_options());
+    auto options = prepare_options(sc, tm, cfg.rf_rack_valid_keyspaces(), get_replication_options(), {}, initial_tablets.has_value());
     return data_dictionary::keyspace_metadata::new_keyspace(ks_name, sc,
             std::move(options), initial_tablets, get_boolean(KW_DURABLE_WRITES, true), get_storage_options());
 }
@@ -272,13 +295,12 @@ lw_shared_ptr<data_dictionary::keyspace_metadata> ks_prop_defs::as_ks_metadata_u
     }
     auto sc = get_replication_strategy_class();
     if (sc) {
-        options = prepare_options(*sc, tm, cfg.rf_rack_valid_keyspaces(), get_replication_options(), old_options);
+        options = prepare_options(*sc, tm, cfg.rf_rack_valid_keyspaces(), get_replication_options(), old_options, uses_tablets);
     } else {
         sc = old->strategy_name();
         options = old_options;
     }
     // if tablets options have not been specified, inherit them if it's tablets-enabled KS
-    auto initial_tablets = get_initial_tablets(old->initial_tablets());
     return data_dictionary::keyspace_metadata::new_keyspace(old->name(), *sc, options, initial_tablets, get_boolean(KW_DURABLE_WRITES, true), get_storage_options());
 }
 
