@@ -232,12 +232,13 @@ def testAlterKeyspaceWithNTSOnlyAcceptsConfiguredDataCenterNames(cql, test_keysp
         # Mix valid and invalid, should throw an exception
         assert_invalid_throw_message_re(cql, ks, pattern, ConfigurationException, "ALTER KEYSPACE %s WITH replication={ 'class' : 'NetworkTopologyStrategy', '" + this_dc + "' : 1 , 'INVALID_DC': 1}")
 
-def testAlterKeyspaceWithMultipleInstancesOfSameDCThrowsSyntaxException(cql, test_keyspace, this_dc):
+def testAlterKeyspaceWithMultipleInstancesOfSameDCThrowsSyntaxException(cql, test_keyspace, this_dc, uses_forced_rack_list):
     # Create a keyspace
     with create_keyspace(cql, "replication={ 'class' : 'NetworkTopologyStrategy', '" + this_dc + "' : 1 }") as ks:
         # try modifying the keyspace
         assert_invalid_throw(cql, ks, SyntaxException, "ALTER KEYSPACE %s WITH replication = {'class' : 'NetworkTopologyStrategy', '" + this_dc + "' : 2, '" + this_dc + "' : 1 }")
-        execute(cql, ks, "ALTER KEYSPACE %s WITH replication = {'class' : 'NetworkTopologyStrategy', '" + this_dc + "' : 1}")
+        if not uses_forced_rack_list:
+            execute(cql, ks, "ALTER KEYSPACE %s WITH replication = {'class' : 'NetworkTopologyStrategy', '" + this_dc + "' : 1}")
 
 # Test for bug of CASSANDRA-5232,
 # migrated from cql_tests.py:TestCQL.alter_bug_test()

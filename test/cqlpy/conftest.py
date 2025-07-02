@@ -293,6 +293,15 @@ def compact_storage(cql):
         # This is fine since compact storage is enabled there by default.
         yield
 
+@pytest.fixture(scope="function")
+def uses_forced_rack_list(cql):
+    return cql.execute("SELECT value FROM system.config WHERE name='rf_rack_valid_keyspaces'").one().value == "true"
+
+@pytest.fixture(scope="function")
+def skip_with_forced_rack_list(scylla_only, uses_forced_rack_list):
+    if uses_forced_rack_list:
+        pytest.skip("Test needs rf_rack_valid_keyspaces=false")
+
 # Skip tests that require a running Minio server if the --no-minio option is set, intended to be set from test/cqlpy/run
 # Otherwise, use the provided minio server to run all S3 related tests
 @pytest.fixture
