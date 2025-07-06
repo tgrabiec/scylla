@@ -230,6 +230,11 @@ lw_shared_ptr<data_dictionary::keyspace_metadata> ks_prop_defs::as_ks_metadata(s
 lw_shared_ptr<data_dictionary::keyspace_metadata> ks_prop_defs::as_ks_metadata_update(lw_shared_ptr<data_dictionary::keyspace_metadata> old, const locator::token_metadata& tm, const gms::feature_service& feat) {
     locator::replication_strategy_config_options options;
     const auto& old_options = old->strategy_options();
+    auto initial_tablets = get_initial_tablets(old->initial_tablets());
+    auto uses_tablets = initial_tablets.has_value();
+    if (old->uses_tablets() != uses_tablets) {
+        throw exceptions::invalid_request_exception("Cannot alter replication strategy vnode/tablets flavor");
+    }
     auto sc = get_replication_strategy_class();
     if (sc) {
         options = prepare_options(*sc, tm, get_replication_options(), old_options);
