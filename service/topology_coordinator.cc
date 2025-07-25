@@ -938,19 +938,19 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
             utils::chunked_vector<canonical_mutation> updates;
             sstring error;
             if (_db.has_keyspace(ks_name)) {
-                auto& ks = _db.find_keyspace(ks_name);
-                auto tmptr = get_token_metadata_ptr();
-                cql3::statements::ks_prop_defs new_ks_props{std::map<sstring, sstring>{saved_ks_props.begin(), saved_ks_props.end()}};
-                new_ks_props.validate();
-                auto ks_md = new_ks_props.as_ks_metadata_update(ks.metadata(), *tmptr, _db.features(), _db.get_config());
-                size_t unimportant_init_tablet_count = 2; // must be a power of 2
-                locator::tablet_map new_tablet_map{unimportant_init_tablet_count};
+                try {
+                    auto& ks = _db.find_keyspace(ks_name);
+                    auto tmptr = get_token_metadata_ptr();
+                    cql3::statements::ks_prop_defs new_ks_props{std::map<sstring, sstring>{saved_ks_props.begin(), saved_ks_props.end()}};
+                    new_ks_props.validate();
+                    auto ks_md = new_ks_props.as_ks_metadata_update(ks.metadata(), *tmptr, _db.features(), _db.get_config());
+                    size_t unimportant_init_tablet_count = 2; // must be a power of 2
+                    locator::tablet_map new_tablet_map{unimportant_init_tablet_count};
 
-                auto tables_with_mvs = ks.metadata()->tables();
-                auto views = ks.metadata()->views();
-                tables_with_mvs.insert(tables_with_mvs.end(), views.begin(), views.end());
-                for (const auto& table_or_mv : tables_with_mvs) {
-                    try {
+                    auto tables_with_mvs = ks.metadata()->tables();
+                    auto views = ks.metadata()->views();
+                    tables_with_mvs.insert(tables_with_mvs.end(), views.begin(), views.end());
+                    for (const auto& table_or_mv : tables_with_mvs) {
                         if (!tmptr->tablets().is_base_table(table_or_mv->id())) {
                             // Apply the transition only on base tables.
                             // If this table has a base table then the transition will be applied on the base table, and
@@ -961,34 +961,31 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                         locator::replication_strategy_params params{ks_md->strategy_options(), old_tablets.tablet_count()};
                         auto new_strategy = locator::abstract_replication_strategy::create_replication_strategy("NetworkTopologyStrategy", params, tmptr->get_topology());
                         new_tablet_map = co_await new_strategy->maybe_as_tablet_aware()->reallocate_tablets(table_or_mv, tmptr, old_tablets);
-                    } catch (const std::exception& e) {
-                        error = e.what();
-                        rtlogger.error("Couldn't process global_topology_request::keyspace_rf_change, error: {},"
-                                       "desired new ks opts: {}", error, new_ks_props.get_replication_options());
-                        updates.clear(); // remove all tablets mutations ...
-                        break;           // ... and only create mutations deleting the global req
+
+                        replica::tablet_mutation_builder tablet_mutation_builder(guard.write_timestamp(), table_or_mv->id());
+                        co_await new_tablet_map.for_each_tablet([&](locator::tablet_id tablet_id, const locator::tablet_info& tablet_info) -> future<> {
+                            auto last_token = new_tablet_map.get_last_token(tablet_id);
+                            updates.emplace_back(co_await make_canonical_mutation_gently(
+                                    replica::tablet_mutation_builder(guard.write_timestamp(), table_or_mv->id())
+                                            .set_new_replicas(last_token, tablet_info.replicas)
+                                            .set_stage(last_token, locator::tablet_transition_stage::allow_write_both_read_old)
+                                            .set_transition(last_token, locator::choose_rebuild_transition_kind(_feature_service))
+                                            .build()
+                            ));
+                            co_await coroutine::maybe_yield();
+                        });
                     }
 
-                    replica::tablet_mutation_builder tablet_mutation_builder(guard.write_timestamp(), table_or_mv->id());
-                    co_await new_tablet_map.for_each_tablet([&](locator::tablet_id tablet_id, const locator::tablet_info& tablet_info) -> future<> {
-                        auto last_token = new_tablet_map.get_last_token(tablet_id);
-                        updates.emplace_back(co_await make_canonical_mutation_gently(
-                                replica::tablet_mutation_builder(guard.write_timestamp(), table_or_mv->id())
-                                        .set_new_replicas(last_token, tablet_info.replicas)
-                                        .set_stage(last_token, locator::tablet_transition_stage::allow_write_both_read_old)
-                                        .set_transition(last_token, locator::choose_rebuild_transition_kind(_feature_service))
-                                        .build()
-                        ));
-                        co_await coroutine::maybe_yield();
-                    });
-                }
-
-                if (error.empty()) {
                     const sstring strategy_name = "NetworkTopologyStrategy";
                     auto schema_muts = prepare_keyspace_update_announcement(_db, ks_md, guard.write_timestamp());
                     for (auto& m: schema_muts) {
                         updates.emplace_back(m);
                     }
+                } catch (const std::exception& e) {
+                    error = e.what();
+                    rtlogger.error("Couldn't process global_topology_request::keyspace_rf_change, desired new ks opts: {}, error: {}",
+                                   saved_ks_props, std::current_exception());
+                    updates.clear(); // remove all tablets mutations and only create mutations deleting the global req
                 }
             } else {
                 error = "Can't ALTER keyspace " + ks_name + ", keyspace doesn't exist";
