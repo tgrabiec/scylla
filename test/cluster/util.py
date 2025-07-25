@@ -595,3 +595,22 @@ def disable_schema_agreement_wait(cql: Session):
         yield
     finally:
         cql.cluster.max_schema_agreement_wait = old_value
+
+
+def parse_replication_options(replication_column) -> dict:
+    """
+    Parses the value of the "replication" column from system_schema.keyspaces, which is a flattened map of options,
+     into an expanded map.
+    Expands a flattened map like {"dc0:0": "r1", "dc0:1": "r2"} into {"dc0": ["r1", "r2"]}.
+    """
+    result = {}
+    for key, value in replication_column.items():
+        if ':' in key:
+            sub_key, index = key.split(':', 1)
+            if sub_key not in result:
+                result[sub_key] = []
+            result[sub_key].append(value)
+            assert len(result[sub_key]) == int(index) + 1
+        else:
+            result[key] = value
+    return result
