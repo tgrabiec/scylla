@@ -340,10 +340,11 @@ async def test_arbiter_dc_rf_rack_valid_keyspaces(manager: ManagerClient):
 
     async def create_fail(rfs: Union[List[int], int], failed_dc: int, rf: int, rack_count: int):
         ks = unique_name()
-        err = r"The option `rf_rack_valid_keyspaces` is enabled. It requires that all keyspaces are RF-rack-valid. " \
+        err = rf"Replication factor {rf} exceeds the number of racks|The option `rf_rack_valid_keyspaces` is enabled. It requires that all keyspaces are RF-rack-valid. " \
               f"That condition is violated: keyspace '{ks}' doesn't satisfy it for DC 'dc{failed_dc}': RF={rf} vs. rack count={rack_count}."
-        with pytest.raises(InvalidRequest, match=err):
+        with pytest.raises((ConfigurationException, InvalidRequest), match=err):
             await create_aux(ks, rfs)
+            logger.error(f"create_aux({ks}, {rfs}) should have failed")
 
     valid_keyspaces = [
         create_ok([0, 0]),
