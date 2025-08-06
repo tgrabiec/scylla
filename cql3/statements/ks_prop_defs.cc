@@ -65,6 +65,16 @@ static locator::replication_strategy_config_options prepare_options(
         }
     }
 
+    // #22688 / #20039 - check for illegal, empty options
+    // moved to here. We want to be able to remove dc:s once rf=0,
+    // in which case, the options actually serialized in result mutations
+    // will in extreme cases in fact be empty -> cannot do this check in
+    // verify_options. We only want to apply this constraint on the input
+    // provided by the user
+    if (!rf && options.empty() && !tm.get_topology().get_datacenters().empty()) {
+        throw exceptions::configuration_exception("Configuration for at least one datacenter must be present");
+    }
+
     if (!rack_list_enabled) {
         for (const auto& opt: options) {
             if (std::holds_alternative<locator::rack_list>(opt.second)) {
@@ -101,14 +111,13 @@ static locator::replication_strategy_config_options prepare_options(
         }
     }
 
-    // #22688 / #20039 - check for illegal, empty options (after above expand)
-    // moved to here. We want to be able to remove dc:s once rf=0,
-    // in which case, the options actually serialized in result mutations
-    // will in extreme cases in fact be empty -> cannot do this check in
-    // verify_options. We only want to apply this constraint on the input
-    // provided by the user
-    if (options.empty() && !tm.get_topology().get_datacenters().empty()) {
-        throw exceptions::configuration_exception("Configuration for at least one datacenter must be present");
+    if (uses_tablets) {
+        // We keep previously specified DC factors for safety.
+        for (const auto& opt: old_options) {
+            if (opt.first != ks_prop_defs::REPLICATION_FACTOR_KEY) {
+                options.insert(opt);
+            }
+        }
     }
 
     return options;
