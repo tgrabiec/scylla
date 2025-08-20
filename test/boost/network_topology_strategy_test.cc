@@ -623,6 +623,11 @@ static void test_random_balancing(sharded<snitch_ptr>& snitch, gms::inet_address
         .build();
 
     auto rf_per_dc = tests::random::get_int<size_t>(1, nodes_per_dc, rand);
+    std::vector<sstring> rf_racks;
+    rf_racks.reserve(rf_per_dc);
+    for (size_t i = 0; i < rf_per_dc; ++i) {
+        rf_racks.emplace_back(fmt::format("rack{}", 10 + (i % num_racks)));
+    }
 
     auto make_options = [&] (size_t rf_per_dc) {
         replication_strategy_config_options options;
@@ -845,7 +850,7 @@ static locator::host_id_set calculate_natural_endpoints(
 }
 
 // Called in a seastar thread.
-static void test_equivalence(const shared_token_metadata& stm, const locator::topology& topo, const std::unordered_map<sstring, size_t>& datacenters) {
+static void test_equivalence(const shared_token_metadata& stm, const locator::topology& topo, std::unordered_map<sstring, size_t>& datacenters) {
     class my_network_topology_strategy : public network_topology_strategy {
     public:
         using network_topology_strategy::network_topology_strategy;
@@ -1266,11 +1271,9 @@ SEASTAR_THREAD_TEST_CASE(tablets_simple_rack_aware_view_pairing_test) {
     tm_cfg.topo_cfg.this_endpoint = my_address;
     tm_cfg.topo_cfg.local_dc_rack = { snitch.local()->get_datacenter(), snitch.local()->get_rack() };
 
-    std::map<sstring, size_t> node_count_per_dc;
-    std::map<sstring, std::map<sstring, size_t>> node_count_per_rack;
+    std::map<sstring, size_t> rack_count_per_dc;
     std::vector<ring_point> ring_points;
 
-    auto& random_engine = seastar::testing::local_random_engine;
     unsigned shard_count = 2;
     size_t num_dcs = 1 + tests::random::get_int(3);
 
@@ -1279,19 +1282,18 @@ SEASTAR_THREAD_TEST_CASE(tablets_simple_rack_aware_view_pairing_test) {
     for (size_t dc = 0; dc < num_dcs; ++dc) {
         sstring dc_name = fmt::format("{}", 100 + dc);
         size_t num_racks = 1 + tests::random::get_int(5);
+        rack_count_per_dc[dc_name] = num_racks;
         for (size_t rack = 0; rack < num_racks; ++rack) {
             sstring rack_name = fmt::format("{}", 10 + rack);
             size_t rack_nodes = 1 + tests::random::get_int(2);
             for (size_t i = 1; i <= rack_nodes; ++i) {
                 ring_points.emplace_back(point, inet_address(format("192.{}.{}.{}", dc_name, rack_name, i)));
-                node_count_per_dc[dc_name]++;
-                node_count_per_rack[dc_name][rack_name]++;
                 point++;
             }
         }
     }
 
-    testlog.debug("node_count_per_rack={}", node_count_per_rack);
+    testlog.debug("rack_count_per_dc={}", rack_count_per_dc);
 
     // Initialize the token_metadata
     locator::shared_token_metadata stm([] () noexcept { return db::schema_tables::hold_merge_lock(); }, tm_cfg);
@@ -1319,20 +1321,7 @@ SEASTAR_THREAD_TEST_CASE(tablets_simple_rack_aware_view_pairing_test) {
     auto tmptr = stm.get();
 
     // Create the replication strategy
-    auto make_random_options = [&] () {
-        auto option_dcs = node_count_per_dc | std::views::keys | std::ranges::to<std::vector>();
-        std::shuffle(option_dcs.begin(), option_dcs.end(), random_engine);
-        std::map<sstring, sstring> options;
-        for (const auto& dc : option_dcs) {
-            auto num_racks = node_count_per_rack.at(dc).size();
-            auto max_rf_factor = std::ranges::min(std::ranges::views::transform(node_count_per_rack.at(dc), [] (auto& x) { return x.second; }));
-            auto rf = num_racks * tests::random::get_int(1UL, max_rf_factor);
-            options.emplace(dc, fmt::to_string(rf));
-        }
-        return options;
-    };
-
-    auto options = make_random_options();
+    auto options = make_random_options(rack_count_per_dc);
     size_t tablet_count = 1 + tests::random::get_int(99);
     testlog.debug("tablet_count={} rf_options={}", tablet_count, options);
     locator::replication_strategy_params params(options, tablet_count);
@@ -1402,7 +1391,7 @@ SEASTAR_THREAD_TEST_CASE(tablets_simple_rack_aware_view_pairing_test) {
 }
 
 // Called in a seastar thread
-void test_complex_rack_aware_view_pairing_test(bool more_or_less) {
+void test_complex_rack_aware_view_pairing_test() {
     auto my_address = gms::inet_address("localhost");
 
     // Create the RackInferringSnitch
@@ -1419,11 +1408,9 @@ void test_complex_rack_aware_view_pairing_test(bool more_or_less) {
     tm_cfg.topo_cfg.this_endpoint = my_address;
     tm_cfg.topo_cfg.local_dc_rack = { snitch.local()->get_datacenter(), snitch.local()->get_rack() };
 
-    std::map<sstring, size_t> node_count_per_dc;
-    std::map<sstring, std::map<sstring, size_t>> node_count_per_rack;
+    std::map<sstring, size_t> rack_count_per_dc;
     std::vector<ring_point> ring_points;
 
-    auto& random_engine = seastar::testing::local_random_engine;
     unsigned shard_count = 2;
     size_t num_dcs = 1 + tests::random::get_int(3);
 
@@ -1432,19 +1419,18 @@ void test_complex_rack_aware_view_pairing_test(bool more_or_less) {
     for (size_t dc = 0; dc < num_dcs; ++dc) {
         sstring dc_name = fmt::format("{}", 100 + dc);
         size_t num_racks = 2 + tests::random::get_int(4);
+        rack_count_per_dc[dc_name] = num_racks;
         for (size_t rack = 0; rack < num_racks; ++rack) {
             sstring rack_name = fmt::format("{}", 10 + rack);
             size_t rack_nodes = 1 + tests::random::get_int(2);
             for (size_t i = 1; i <= rack_nodes; ++i) {
                 ring_points.emplace_back(point, inet_address(format("192.{}.{}.{}", dc_name, rack_name, i)));
-                node_count_per_dc[dc_name]++;
-                node_count_per_rack[dc_name][rack_name]++;
                 point++;
             }
         }
     }
 
-    testlog.debug("node_count_per_rack={}", node_count_per_rack);
+    testlog.debug("rack_count_per_dc={}", rack_count_per_dc);
 
     // Initialize the token_metadata
     locator::shared_token_metadata stm([] () noexcept { return db::schema_tables::hold_merge_lock(); }, tm_cfg);
@@ -1472,21 +1458,7 @@ void test_complex_rack_aware_view_pairing_test(bool more_or_less) {
     auto tmptr = stm.get();
 
     // Create the replication strategy
-    auto make_random_options = [&] () {
-        auto option_dcs = node_count_per_dc | std::views::keys | std::ranges::to<std::vector>();
-        std::shuffle(option_dcs.begin(), option_dcs.end(), random_engine);
-        std::map<sstring, sstring> options;
-        for (const auto& dc : option_dcs) {
-            auto num_racks = node_count_per_rack.at(dc).size();
-            auto rf = more_or_less ?
-                    tests::random::get_int(num_racks, node_count_per_dc[dc]) :
-                    tests::random::get_int(1UL, num_racks);
-            options.emplace(dc, fmt::to_string(rf));
-        }
-        return options;
-    };
-
-    auto options = make_random_options();
+    auto options = make_random_options(rack_count_per_dc);
     size_t tablet_count = 1 + tests::random::get_int(99);
     testlog.debug("tablet_count={} rf_options={}", tablet_count, options);
     locator::replication_strategy_params params(options, tablet_count);
@@ -1564,17 +1536,13 @@ void test_complex_rack_aware_view_pairing_test(bool more_or_less) {
         }
     }
     for (const auto& [dc, rf_opt] : options) {
-        auto rf = std::stol(rf_opt);
-        BOOST_REQUIRE_EQUAL(same_rack_pairs[dc] + cross_rack_pairs[dc], rf);
+        auto rf = locator::replication_factor_data(rf_opt, {});
+        BOOST_REQUIRE_EQUAL(same_rack_pairs[dc] + cross_rack_pairs[dc], rf.count());
     }
 }
 
 SEASTAR_THREAD_TEST_CASE(tablets_complex_rack_aware_view_pairing_test_rf_lt_racks) {
-    test_complex_rack_aware_view_pairing_test(false);
-}
-
-SEASTAR_THREAD_TEST_CASE(tablets_complex_rack_aware_view_pairing_test_rf_gt_racks) {
-    test_complex_rack_aware_view_pairing_test(true);
+    test_complex_rack_aware_view_pairing_test();
 }
 
 BOOST_AUTO_TEST_SUITE_END()
