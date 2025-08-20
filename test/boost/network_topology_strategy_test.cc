@@ -11,6 +11,7 @@
 #include "db/tablet_options.hh"
 #include "gms/inet_address.hh"
 #include "inet_address_vectors.hh"
+#include "locator/abstract_replication_strategy.hh"
 #include "locator/host_id.hh"
 #include "locator/types.hh"
 #include "locator/snitch_base.hh"
@@ -94,10 +95,10 @@ void strategy_sanity_check(
     //
     size_t total_rf = 0;
     for (auto& val : options) {
-        size_t rf = std::stol(val.second);
-        BOOST_CHECK(nts_ptr->get_replication_factor(val.first) == rf);
+        auto rf = locator::replication_factor_data(val.second, {});
+        BOOST_CHECK(nts_ptr->get_replication_factor(val.first) == rf.count());
 
-        total_rf += rf;
+        total_rf += rf.count();
     }
 
     BOOST_CHECK(ars_ptr->get_replication_factor(*tm) == total_rf);

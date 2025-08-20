@@ -160,23 +160,39 @@ const tablet_aware_replication_strategy* abstract_replication_strategy::maybe_as
     return dynamic_cast<const tablet_aware_replication_strategy*>(this);
 }
 
-void replication_factor_data::parse(const sstring& rf) {
-    if (rf.empty() || std::any_of(rf.begin(), rf.end(), [] (char c) {return !isdigit(c);})) {
-        throw exceptions::configuration_exception(
-                format("Replication factor must be numeric and non-negative, found '{}'", rf));
-    }
-    try {
-        _count = std::stol(rf);
-    } catch (...) {
-        throw exceptions::configuration_exception(
-            sstring("Replication factor must be numeric; found ") + rf);
-    }
+void replication_factor_data::parse(const replication_strategy_config_option& rf, const std::unordered_set<sstring>& allowed_racks) {
+    std::visit(overloaded_functor {
+        [&] (const sstring& rf) {
+            if (rf.empty()) {
+                throw exceptions::configuration_exception("Replication factor must be non-empty");
+            }
+            ssize_t rf_value = 0;
+            char* endptr = nullptr;
+            rf_value = std::strtol(rf.c_str(), &endptr, 0);
+            if (endptr && *endptr) {
+                throw exceptions::configuration_exception(format("Replication factor must be numeric: found '{}'", rf));
+            }
+            if (rf_value < 0) {
+                throw exceptions::configuration_exception(format("Replication factor must greater than or equal to 0: found '{}'", rf));
+            }
+            _data.emplace<size_t>(rf_value);
+            _count = rf_value;
+        },
+        [&] (const std::vector<sstring>& racks) {
+            for (const auto& rack : racks) {
+                if (!allowed_racks.contains(rack) && !allowed_racks.empty()) {
+                    throw exceptions::configuration_exception(
+                            fmt::format("Unrecognized rack name '{}'. allowed_racks={}", rack, allowed_racks));
+                }
+            }
+            _data.emplace<std::vector<sstring>>(racks);
+            _count = racks.size();
+        }
+    }, rf);
 }
 
-replication_factor_data abstract_replication_strategy::parse_replication_factor(const replication_strategy_config_option& rf)
-{
-    // FIXME: Store rack list. This is temporary.
-    return replication_factor_data(to_sstring(locator::get_replication_factor(rf)));
+replication_factor_data abstract_replication_strategy::parse_replication_factor(const replication_strategy_config_option& rf, const std::unordered_set<sstring>& racks) {
+    return replication_factor_data(rf, racks);
 }
 
 size_t get_replication_factor(const replication_strategy_config_option& opt) {
