@@ -69,20 +69,45 @@ class tablet_aware_replication_strategy;
 class effective_replication_map;
 
 class replication_factor_data {
-    size_t _count = 0;
+    std::variant<size_t, std::vector<sstring>> _data;
+    size_t _count;
 
 public:
-    explicit replication_factor_data(const sstring& rf)
-        : _count(parse(rf))
+    explicit replication_factor_data(const replication_strategy_config_option& rf, const std::unordered_set<sstring>& allowed_racks) {
+        parse(rf, allowed_racks);
+    }
+
+    explicit replication_factor_data(const replication_strategy_config_option& rf) {
+        parse(rf, {});
+    }
+
+    explicit replication_factor_data(size_t rf)
+        : _data(rf)
+        , _count(rf)
+    { }
+
+    explicit replication_factor_data(rack_list rf)
+        : _data(std::move(rf))
+        , _count(rf.size())
     { }
 
     size_t count() const noexcept {
         return _count;
     }
 
-public:
+    bool is_rack_based() const noexcept {
+        return std::holds_alternative<rack_list>(_data);
+    }
+
+    const rack_list& get_rack_list() const {
+        return std::get<rack_list>(_data);
+    }
+
     // Parses a numeric replication factor.
     static size_t parse(const sstring& rf);
+
+private:
+    void parse(const replication_strategy_config_option& rf, const std::unordered_set<sstring>& allowed_racks);
 };
 
 class abstract_replication_strategy : public seastar::enable_shared_from_this<abstract_replication_strategy> {
@@ -137,7 +162,7 @@ public:
     static ptr_type create_replication_strategy(const sstring& strategy_name, replication_strategy_params params, const locator::topology& topo) {
         return create_replication_strategy(strategy_name, std::move(params), &topo);
     }
-    static replication_factor_data parse_replication_factor(const replication_strategy_config_option& rf);
+    static replication_factor_data parse_replication_factor(const replication_strategy_config_option& rf, const std::unordered_set<sstring>& racks);
 
     static sstring to_qualified_class_name(std::string_view strategy_class_name);
 

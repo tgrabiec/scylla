@@ -631,3 +631,53 @@ async def test_warn_create_and_alter_rf_rack_invalid_ks(manager: ManagerClient):
     await do_alter_test(3, 2, "true", True)
     # OK: RF=#racks for DC1, RF=1 is always accepted.
     await do_alter_test(3, 1, "true", True)
+
+async def test_create_keyspace_with_rack_names(manager: ManagerClient):
+    """
+    This test verifies that rack names can be specified for NetworkTopologyStrategy replication options.
+    """
+
+    cfg_false = {"rf_rack_valid_keyspaces": "false", "tablets_mode_for_new_keyspaces": "enabled"}
+
+    s1 = await manager.server_add(config=cfg_false, property_file={"dc": "dc1", "rack": "r1"})
+    _ = await manager.server_add(config=cfg_false, property_file={"dc": "dc1", "rack": "r2"})
+    _ = await manager.server_add(config=cfg_false, property_file={"dc": "dc1", "rack": "r3"})
+    _ = await manager.server_add(config=cfg_false, property_file={"dc": "dc2", "rack": "r4"})
+    _ = await manager.server_add(config=cfg_false, property_file={"dc": "dc2", "rack": "r5"})
+
+    cql = manager.get_cql()
+
+    def format_rf(rf: Union[List[str], str]) -> str:
+        if isinstance(rf, list):
+            return "[" + ', '.join([f"'{rack}'" for rack in rf]) + "]"
+        return f"'{rf}'"
+
+    async def create_keyspace(rfs: List[List[str] | str]) -> str:
+        dcs = ", ".join([f"'dc{i + 1}': {format_rf(rf)}" for i, rf in enumerate(rfs)])
+        name = unique_name()
+        stmt = f"CREATE KEYSPACE {name} WITH REPLICATION = {{'class': 'NetworkTopologyStrategy', {dcs}}}"
+        logger.info(stmt)
+        await cql.run_async(stmt)
+        res = await cql.run_async(f"DESCRIBE KEYSPACE {name}")
+        cr_stmt = res[0].create_statement
+        desc_dcs = ", ".join([f"'dc{i + 1}': {format_rf(rf)}" for i, rf in enumerate(rfs) if rf])
+        assert desc_dcs in cr_stmt
+        return name
+
+    valid_keyspaces = [
+        # For each DC: RF \in {0, 1, #racks}.
+        ([['r1']]),
+        ([['r1'], []]),
+        ([['r1'], 1]),
+        ([['r1', 'r2']]),
+        ([['r1', 'r3']]),
+        ([['r1', 'r2', 'r3']]),
+        ([['r1'], ['r4']]),
+        ([3, ['r4']]),
+        ([['r2', 'r3'], ['r4', 'r5']]),
+    ]
+
+    # Populate valid keyspaces.
+    async with asyncio.TaskGroup() as tg:
+        for rfs in valid_keyspaces:
+            _ = tg.create_task(create_keyspace(rfs))

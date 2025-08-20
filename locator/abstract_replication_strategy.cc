@@ -174,10 +174,28 @@ size_t replication_factor_data::parse(const sstring& rf) {
     }
 }
 
-replication_factor_data abstract_replication_strategy::parse_replication_factor(const replication_strategy_config_option& rf)
-{
-    // FIXME: Store rack list. This is temporary.
-    return replication_factor_data(to_sstring(locator::get_replication_factor(rf)));
+void replication_factor_data::parse(const replication_strategy_config_option& rf, const std::unordered_set<sstring>& allowed_racks) {
+    std::visit(overloaded_functor {
+        [&] (const sstring& rf) {
+            auto rf_value = parse(rf);
+            _data.emplace<size_t>(rf_value);
+            _count = rf_value;
+        },
+        [&] (const std::vector<sstring>& racks) {
+            for (const auto& rack : racks) {
+                if (!allowed_racks.contains(rack) && !allowed_racks.empty()) {
+                    throw exceptions::configuration_exception(
+                            fmt::format("Unrecognized rack name '{}'. allowed_racks={}", rack, allowed_racks));
+                }
+            }
+            _data.emplace<std::vector<sstring>>(racks);
+            _count = racks.size();
+        }
+    }, rf);
+}
+
+replication_factor_data abstract_replication_strategy::parse_replication_factor(const replication_strategy_config_option& rf, const std::unordered_set<sstring>& racks) {
+    return replication_factor_data(rf, racks);
 }
 
 size_t get_replication_factor(const replication_strategy_config_option& opt) {
