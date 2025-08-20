@@ -284,6 +284,10 @@ void network_topology_strategy::validate_options(const gms::feature_service& fs,
     auto dcs = topology.get_datacenters();
     validate_tablet_options(*this, fs, _config_options);
     for (auto& c : _config_options) {
+        if (c.first == sstring("class")) {
+            on_internal_error(rslogger, fmt::format("'class' tag should be dropped by now."
+                                                    "_config_options:{}", _config_options));
+        }
         if (c.first == sstring("replication_factor")) {
             on_internal_error(rslogger, fmt::format("'replication_factor' tag should be unrolled into a list of DC:RF by now."
                                                     "_config_options:{}", _config_options));
