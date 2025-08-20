@@ -386,7 +386,7 @@ void heavy_origin_test() {
     auto token_point_iterator = token_points.begin();
     for (size_t dc = 0; dc < dc_racks.size(); ++dc) {
         config_options.emplace(to_sstring(dc),
-                                to_sstring(dc_replication[dc]));
+                               to_sstring(dc_replication[dc]));
         for (int rack = 0; rack < dc_racks[dc]; ++rack) {
             for (int ep = 1; ep <= dc_endpoints[dc]/dc_racks[dc]; ++ep) {
                 double token_point = *token_point_iterator++;
@@ -474,10 +474,8 @@ SEASTAR_THREAD_TEST_CASE(NetworkTopologyStrategy_tablets_test) {
     tm_cfg.topo_cfg.local_dc_rack = { snitch.local()->get_datacenter(), snitch.local()->get_rack() };
 
     // Generate a random cluster
-    auto& random_engine = seastar::testing::local_random_engine;
     for (unsigned shard_count = 1; shard_count <= 4; ++shard_count) {
-        std::map<sstring, size_t> node_count_per_dc;
-        std::map<sstring, std::map<sstring, size_t>> node_count_per_rack;
+        std::map<sstring, size_t> rack_count_per_dc;
         std::vector<ring_point> ring_points;
 
         double point = 1;
@@ -485,19 +483,18 @@ SEASTAR_THREAD_TEST_CASE(NetworkTopologyStrategy_tablets_test) {
         for (size_t dc = 0; dc < num_dcs; ++dc) {
             sstring dc_name = fmt::format("{}", 100 + dc);
             size_t num_racks = 1 + tests::random::get_int(5);
+            rack_count_per_dc[dc_name] = num_racks;
             for (size_t rack = 0; rack < num_racks; ++rack) {
                 sstring rack_name = fmt::format("{}", 10 + rack);
                 size_t rack_nodes = 1 + tests::random::get_int(2);
                 for (size_t i = 1; i <= rack_nodes; ++i) {
                     ring_points.emplace_back(point, inet_address(format("192.{}.{}.{}", dc_name, rack_name, i)));
-                    node_count_per_dc[dc_name]++;
-                    node_count_per_rack[dc_name][rack_name]++;
                     point++;
                 }
             }
         }
 
-        testlog.debug("node_count_per_rack={}", node_count_per_rack);
+        testlog.debug("rack_count_per_dc={}", rack_count_per_dc);
 
         // Initialize the token_metadata
         locator::shared_token_metadata stm([] () noexcept { return db::schema_tables::hold_merge_lock(); }, tm_cfg);
@@ -520,21 +517,8 @@ SEASTAR_THREAD_TEST_CASE(NetworkTopologyStrategy_tablets_test) {
             .with_column("v", utf8_type)
             .build();
 
-        auto make_random_options = [&] () {
-            auto option_dcs = node_count_per_dc | std::views::keys | std::ranges::to<std::vector>();
-            std::map<sstring, sstring> options;
-            std::shuffle(option_dcs.begin(), option_dcs.end(), random_engine);
-            size_t num_option_dcs = 1 + tests::random::get_int(option_dcs.size() - 1);
-            for (size_t i = 0; i < num_option_dcs; ++i) {
-                const auto& dc = option_dcs[i];
-                size_t node_count = tests::random::get_int(node_count_per_dc[dc]);
-                options.emplace(dc, fmt::to_string(node_count));
-            }
-            return options;
-        };
-
         // Create the replication strategy
-        auto options = make_random_options();
+        auto options = make_random_options(rack_count_per_dc);
         size_t tablet_count = 1 + tests::random::get_int(99);
         testlog.debug("tablet_count={} rf_options={}", tablet_count, options);
         locator::replication_strategy_params params(options, tablet_count);
@@ -546,7 +530,7 @@ SEASTAR_THREAD_TEST_CASE(NetworkTopologyStrategy_tablets_test) {
         full_ring_check(tmap, ars_ptr, stm.get());
 
         // Test reallocate_tablets after randomizing a different set of options
-        auto realloc_options = make_random_options();
+        auto realloc_options = make_random_options(rack_count_per_dc);
         locator::replication_strategy_params realloc_params(realloc_options, tablet_count);
         auto realloc_ars_ptr = abstract_replication_strategy::create_replication_strategy(
                 "NetworkTopologyStrategy", params, topo);
