@@ -3755,8 +3755,8 @@ struct calculate_tablet_replicas_for_new_rf_config
         host_id id = host_id::create_random_id();
     };
     std::vector<ring_point> ring_points;
-    std::map<sstring, sstring> options;
-    std::map<sstring, sstring> new_dc_rep_factor;
+    replication_strategy_config_options options;
+    replication_strategy_config_options new_dc_rep_factor;
     std::map<sstring, size_t> expected_rep_factor;
 };
 
@@ -3838,7 +3838,7 @@ static void execute_tablet_for_new_rf_test(calculate_tablet_replicas_for_new_rf_
 
     std::map<sstring, size_t> initial_rep_factor;
     for (auto const& [dc, shard_count] : test_config.options) {
-        initial_rep_factor[dc] = std::stoul(shard_count);
+        initial_rep_factor[dc] = locator::get_replication_factor(shard_count);
     }
 
     auto tablets = stm.get()->tablets().get_tablet_map(s->id());

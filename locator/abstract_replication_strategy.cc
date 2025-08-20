@@ -10,6 +10,8 @@
 #include "locator/tablet_replication_strategy.hh"
 #include "utils/class_registrator.hh"
 #include "exceptions/exceptions.hh"
+#include <algorithm>
+#include <exception>
 #include <fmt/ranges.h>
 #include <seastar/core/coroutine.hh>
 #include <seastar/coroutine/maybe_yield.hh>
@@ -19,6 +21,9 @@
 
 #include <boost/icl/interval.hpp>
 #include <boost/icl/interval_map.hpp>
+#include <stdexcept>
+#include <sys/types.h>
+#include <variant>
 
 namespace locator {
 
@@ -168,9 +173,21 @@ void replication_factor_data::parse(const sstring& rf) {
     }
 }
 
-replication_factor_data abstract_replication_strategy::parse_replication_factor(sstring rf)
+replication_factor_data abstract_replication_strategy::parse_replication_factor(const replication_strategy_config_option& rf)
 {
-    return replication_factor_data(rf);
+    // FIXME: Store rack list. This is temporary.
+    return replication_factor_data(to_sstring(locator::get_replication_factor(rf)));
+}
+
+size_t get_replication_factor(const replication_strategy_config_option& opt) {
+    return std::visit(overloaded_functor{
+        [&] (const sstring& s) -> size_t {
+            return std::stoul(s);
+        },
+        [&] (const std::vector<sstring>& v) -> size_t {
+            return v.size();
+        }
+    }, opt);
 }
 
 static

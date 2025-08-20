@@ -83,7 +83,7 @@ static future<> check_ranges_are_sorted(vnode_effective_replication_map_ptr erm,
 void strategy_sanity_check(
     replication_strategy_ptr ars_ptr,
     const token_metadata_ptr& tm,
-    const std::map<sstring, sstring>& options) {
+    const replication_strategy_config_options& options) {
 
     const network_topology_strategy* nts_ptr =
         dynamic_cast<const network_topology_strategy*>(ars_ptr.get());
@@ -156,7 +156,7 @@ void endpoints_check(
  * Run in a seastar thread.
  */
 void full_ring_check(const std::vector<ring_point>& ring_points,
-                     const std::map<sstring, sstring>& options,
+                     replication_strategy_config_options& options,
                      replication_strategy_ptr ars_ptr,
                      locator::token_metadata_ptr tmptr) {
     auto& tm = *tmptr;
@@ -309,10 +309,10 @@ void simple_test() {
 
     /////////////////////////////////////
     // Create the replication strategy
-    std::map<sstring, sstring> options323 = {
-        {"100", "3"},
-        {"101", "2"},
-        {"102", "3"}
+    replication_strategy_config_options options323 = {
+        {"dc100", std::vector<sstring>{"rack10", "rack20", "rack30"}},
+        {"dc101", std::vector<sstring>{"rack10", "rack20"}},
+        {"dc102", std::vector<sstring>{"rack10", "rack20", "rack30"}}
     };
     locator::replication_strategy_params params323(options323, std::nullopt);
 
@@ -323,10 +323,10 @@ void simple_test() {
 
     ///////////////
     // Create the replication strategy
-    std::map<sstring, sstring> options320 = {
-        {"100", "3"},
-        {"101", "2"},
-        {"102", "0"}
+    replication_strategy_config_options options320 = {
+        {"dc100", std::vector<sstring>{"rack10", "rack20", "rack30"}},
+        {"dc101", std::vector<sstring>{"rack10", "rack20"}},
+        {"dc102", "0"}
     };
     locator::replication_strategy_params params320(options320, std::nullopt);
 
@@ -368,9 +368,13 @@ void heavy_origin_test() {
 
     std::vector<int> dc_racks = {2, 4, 8};
     std::vector<int> dc_endpoints = {128, 256, 512};
-    std::vector<int> dc_replication = {2, 6, 6};
+    std::vector<std::vector<sstring>> dc_replication = {
+        {"rack0", "rack1"},
+        {"rack0", "rack1", "rack2", "rack3"},
+        {"rack0", "rack1", "rack2", "rack3", "rack4", "rack5"}
+    };
 
-    std::map<sstring, sstring> config_options;
+    replication_strategy_config_options config_options;
     std::unordered_map<inet_address, std::unordered_set<token>> tokens;
     std::vector<ring_point> ring_points;
 
@@ -432,6 +436,31 @@ SEASTAR_THREAD_TEST_CASE(NetworkTopologyStrategy_simple) {
 SEASTAR_THREAD_TEST_CASE(NetworkTopologyStrategy_heavy) {
     return heavy_origin_test();
 }
+
+namespace {
+
+auto& random_engine = seastar::testing::local_random_engine;
+
+replication_strategy_config_options make_random_options(const std::map<sstring, size_t>& rack_count_per_dc) {
+    auto option_dcs = rack_count_per_dc | std::views::keys | std::ranges::to<std::vector>();
+    replication_strategy_config_options options;
+    std::ranges::shuffle(option_dcs, random_engine);
+    size_t num_option_dcs = 1 + tests::random::get_int(option_dcs.size() - 1);
+    for (size_t i = 0; i < num_option_dcs; ++i) {
+        const auto& dc = option_dcs[i];
+        std::vector<sstring> racks;
+        size_t num_racks = rack_count_per_dc.at(dc);
+        racks.reserve(num_racks);
+        for (size_t rack = 0; rack < num_racks; ++rack) {
+            racks.emplace_back(fmt::format("rack{}", 10 + rack));
+        }
+        std::ranges::shuffle(racks, random_engine);
+        options.emplace(fmt::format("dc{}", dc), racks);
+    }
+    return options;
+};
+
+} // namespace
 
 SEASTAR_THREAD_TEST_CASE(NetworkTopologyStrategy_tablets_test) {
     auto my_address = gms::inet_address("localhost");
@@ -595,9 +624,9 @@ static void test_random_balancing(sharded<snitch_ptr>& snitch, gms::inet_address
     auto rf_per_dc = tests::random::get_int<size_t>(1, nodes_per_dc, rand);
 
     auto make_options = [&] (size_t rf_per_dc) {
-        std::map<sstring, sstring> options;
+        replication_strategy_config_options options;
         for (const auto& dc : dcs) {
-            options.emplace(dc, fmt::to_string(rf_per_dc));
+            options.emplace(fmt::format("dc{}", dc), std::move(rf_racks));
         }
         return options;
     };
@@ -822,12 +851,16 @@ static void test_equivalence(const shared_token_metadata& stm, const locator::to
         using network_topology_strategy::calculate_natural_endpoints;
     };
 
-    my_network_topology_strategy nts(replication_strategy_params(
-                                    datacenters | std::views::transform(
-                                                                    [](const std::pair<sstring, size_t>& p) {
-                                                                        return std::make_pair(p.first, to_sstring(p.second));
-                                                                    })
-                                                | std::ranges::to<std::map<sstring, sstring>>(),
+    replication_strategy_config_options rf_options;
+    const auto& dc_racks = topo.get_datacenter_racks();
+    for (auto& [dc, dc_rf] : datacenters) {
+        auto racks = dc_racks.at(dc) | std::views::keys | std::ranges::to<std::vector<sstring>>();
+        dc_rf = std::min(dc_rf, racks.size());
+        racks.resize(dc_rf);
+        rf_options.emplace(dc, racks);
+    }
+
+    my_network_topology_strategy nts(replication_strategy_params(rf_options,
                                     std::nullopt),
                                     &topo);
 

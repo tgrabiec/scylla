@@ -24,11 +24,11 @@ namespace statements {
 
 static logging::logger logger("ks_prop_defs");
 
-static std::map<sstring, sstring> prepare_options(
+static locator::replication_strategy_config_options prepare_options(
         const sstring& strategy_class,
         const locator::token_metadata& tm,
-        std::map<sstring, sstring> options,
-        const std::map<sstring, sstring>& old_options = {}) {
+        locator::replication_strategy_config_options options,
+        const locator::replication_strategy_config_options& old_options = {}) {
     options.erase(ks_prop_defs::REPLICATION_STRATEGY_CLASS_KEY);
 
     auto is_nts = locator::abstract_replication_strategy::to_qualified_class_name(strategy_class) == "org.apache.cassandra.locator.NetworkTopologyStrategy";
@@ -52,21 +52,23 @@ static std::map<sstring, sstring> prepare_options(
     auto it = options.find(ks_prop_defs::REPLICATION_FACTOR_KEY);
     if (it != options.end()) {
         // Expand: the user explicitly provided a 'replication_factor'.
-        rf = it->second;
+        try {
+            rf = std::get<sstring>(it->second);
+            (void)std::stol(*rf);
+        } catch (...) {
+            throw exceptions::configuration_exception(fmt::format("Invalid replication factor: {}: must be a string holding a numerical value", it->second));
+        }
         options.erase(it);
     } else if (options.empty()) {
         auto it = old_options.find(ks_prop_defs::REPLICATION_FACTOR_KEY);
         if (it != old_options.end()) {
             // Expand: the user switched from another strategy that specified a 'replication_factor'
             // and didn't provide any additional options.
-            rf = it->second;
+            rf = std::get<sstring>(it->second);
         }
     }
 
     if (rf.has_value()) {
-        // The code below may end up not using "rf" at all (if all the DCs
-        // already have rf settings), so let's validate it once (#8880).
-        locator::abstract_replication_strategy::parse_replication_factor(*rf);
 
         // We keep previously specified DC factors for safety.
         for (const auto& opt : old_options) {
@@ -113,7 +115,7 @@ ks_prop_defs::ks_prop_defs(std::map<sstring, sstring> options) {
     }
 
     if (!replication_opts.empty())
-        add_property(KW_REPLICATION, replication_opts);
+        add_property(KW_REPLICATION, from_flat_map(replication_opts));
     if (!storage_opts.empty())
         add_property(KW_STORAGE, storage_opts);
     if (!tablets_opts.empty())
@@ -134,16 +136,20 @@ void ks_prop_defs::validate() {
 
     auto replication_options = get_replication_options();
     if (replication_options.contains(REPLICATION_STRATEGY_CLASS_KEY)) {
-        _strategy_class = replication_options[REPLICATION_STRATEGY_CLASS_KEY];
+        const auto& class_name = replication_options[REPLICATION_STRATEGY_CLASS_KEY];
+        if (!std::holds_alternative<sstring>(class_name)) {
+            throw exceptions::configuration_exception(seastar::format("Invalid replication strategy class: {}", class_name));
+        }
+        _strategy_class = std::get<sstring>(class_name);
     }
 }
 
-std::map<sstring, sstring> ks_prop_defs::get_replication_options() const {
-    auto replication_options = get_map(KW_REPLICATION);
+locator::replication_strategy_config_options ks_prop_defs::get_replication_options() const {
+    auto replication_options = get_extended_map(KW_REPLICATION);
     if (replication_options) {
         return replication_options.value();
     }
-    return std::map<sstring, sstring>{};
+    return {};
 }
 
 data_dictionary::storage_options ks_prop_defs::get_storage_options() const {
@@ -222,7 +228,7 @@ lw_shared_ptr<data_dictionary::keyspace_metadata> ks_prop_defs::as_ks_metadata(s
 }
 
 lw_shared_ptr<data_dictionary::keyspace_metadata> ks_prop_defs::as_ks_metadata_update(lw_shared_ptr<data_dictionary::keyspace_metadata> old, const locator::token_metadata& tm, const gms::feature_service& feat) {
-    std::map<sstring, sstring> options;
+    locator::replication_strategy_config_options options;
     const auto& old_options = old->strategy_options();
     auto sc = get_replication_strategy_class();
     if (sc) {
