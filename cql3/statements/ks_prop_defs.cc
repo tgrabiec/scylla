@@ -65,6 +65,42 @@ static locator::replication_strategy_config_options prepare_options(
         }
     }
 
+    // Validate options.
+    for (auto&& [dc, opt] : options) {
+        locator::replication_factor_data rf(opt);
+        if (!rf.is_rack_based()) {
+            if (old_options.contains(dc)) {
+                auto old_rf = locator::replication_factor_data(old_options.at(dc));
+                if (old_rf.is_rack_based() && rf.count() != 0 && old_rf.count() != rf.count()) {
+                    throw exceptions::configuration_exception(fmt::format(
+                            "Cannot change replication factor for '{}' from {} to {} when the old value was a rack list",
+                            dc, old_options.at(dc), opt));
+                }
+            }
+            continue;
+        }
+        if (!rack_list_enabled) {
+            throw exceptions::configuration_exception(fmt::format(
+                    "Using rack list for '{}' is not allowed because the 'rf_rack_list' feature is disabled", dc));
+        }
+        if (!uses_tablets) {
+            throw exceptions::configuration_exception(fmt::format(
+                    "Using rack list for '{}' is not allowed because the keyspace is not using tablets", dc));
+        }
+        auto& racks = rf.get_rack_list();
+        if (std::unordered_set<sstring>(racks.begin(), racks.end()).size() != rf.count()) {
+            throw exceptions::configuration_exception(fmt::format(
+                    "Rack list for '{}' contains duplicate entries", dc));
+        }
+        if (old_options.contains(dc)) {
+            auto old_rf = locator::replication_factor_data(old_options.at(dc));
+            if (!old_rf.is_rack_based() && old_rf.count() != 0) {
+                throw exceptions::configuration_exception(fmt::format(
+                        "Cannot change replication factor from numeric to rack list for '{}'", dc));
+            }
+        }
+    }
+
     // #22688 / #20039 - check for illegal, empty options
     // moved to here. We want to be able to remove dc:s once rf=0,
     // in which case, the options actually serialized in result mutations
@@ -73,15 +109,6 @@ static locator::replication_strategy_config_options prepare_options(
     // provided by the user
     if (!rf && options.empty() && !tm.get_topology().get_datacenters().empty()) {
         throw exceptions::configuration_exception("Configuration for at least one datacenter must be present");
-    }
-
-    if (!rack_list_enabled) {
-        for (const auto& opt: options) {
-            if (std::holds_alternative<locator::rack_list>(opt.second)) {
-                throw exceptions::configuration_exception(fmt::format(
-                        "Specifying rack list in '{}' is not allowed since the `rf_rack_list` feature is disabled.", opt.first));
-            }
-        }
     }
 
     if (rf.has_value()) {

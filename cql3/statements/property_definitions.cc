@@ -204,14 +204,15 @@ void property_definitions::remove_from_map_if_exists(const sstring& name, const 
 ///
 /// Values which are lists are represented as multiple entries in the map
 /// with the list index appended to the key, with ':' as a separator.
+/// Empty list is represented as a single entry with index -1 and empty string as value.
 ///
 /// For example:
 ///
-///    {'dc1': '3', 'dc2': ['rack1', 'rack2']}
+///    {'dc1': '3', 'dc2': ['rack1', 'rack2'], 'dc3': []}
 ///
 /// has a flattened representation of:
 ///
-///   {'dc1': '3', 'dc2:0': 'rack1', 'dc2:1': 'rack2'}
+///   {'dc1': '3', 'dc2:0': 'rack1', 'dc2:1': 'rack2', 'dc3:-1': ''}
 ///
 property_definitions::map_type to_flattened_map(const property_definitions::extended_map_type& in) {
     property_definitions::map_type out;
@@ -225,7 +226,7 @@ property_definitions::map_type to_flattened_map(const property_definitions::exte
             },
             [&] (const std::vector<sstring>& list) {
                 if (list.empty()) {
-                    throw_with_backtrace<std::runtime_error>(fmt::format("empty list for key '{}'", in_key));
+                    out[fmt::format("{}:{}", in_key, -1)] = "";
                 } else {
                     // flatten the rack list in multiple entries
                     for (size_t i = 0; i < list.size(); ++i) {
@@ -247,13 +248,15 @@ property_definitions::extended_map_type from_flattened_map(const property_defini
             out.emplace(key, value);
         } else {
             auto dc = key.substr(0, pos);
-            auto index = std::stoul(key.substr(pos + 1));
+            auto index = std::stol(key.substr(pos + 1));
             auto [it, empty] = out.try_emplace(dc, std::vector<sstring>());
             auto& vec = std::get<std::vector<sstring>>(it->second);
-            if (vec.size() <= index) {
-                vec.resize(index + 1);
+            if (index >= 0) {
+                if (vec.size() <= size_t(index)) {
+                    vec.resize(index + 1);
+                }
+                vec[index] = value;
             }
-            vec[index] = value;
         }
     }
     return out;
