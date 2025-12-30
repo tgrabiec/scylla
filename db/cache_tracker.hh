@@ -101,12 +101,15 @@ public:
     ~cache_tracker();
     void clear();
     void touch(rows_entry&);
+    void touch(single_row_partition&);
     template <partition_format F> void insert(cache_entry<F>&);
     void insert(partition_entry&) noexcept;
     void insert(partition_version&) noexcept;
     void insert(mutation_partition_v2&) noexcept;
     void insert(rows_entry&) noexcept;
+    void insert(single_row_partition&) noexcept;
     void remove(rows_entry&) noexcept;
+    void remove(single_row_partition&) noexcept;
     // Inserts e such that it will be evicted right before more_recent in the absence of later touches.
     void insert(rows_entry& more_recent, rows_entry& e) noexcept;
     void clear_continuity(cache_entry_base& ce) noexcept;
@@ -155,6 +158,22 @@ void cache_tracker::remove(rows_entry& entry) noexcept {
 
 inline
 void cache_tracker::insert(rows_entry& entry) noexcept {
+    ++_stats.row_insertions;
+    ++_stats.rows;
+    _lru.add(entry);
+}
+
+inline
+void cache_tracker::remove(single_row_partition& entry) noexcept {
+    --_stats.rows;
+    ++_stats.row_removals;
+    if (entry.is_linked()) {
+        _lru.remove(entry);
+    }
+}
+
+inline
+void cache_tracker::insert(single_row_partition& entry) noexcept {
     ++_stats.row_insertions;
     ++_stats.rows;
     _lru.add(entry);

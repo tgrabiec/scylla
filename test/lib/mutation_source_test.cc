@@ -1928,6 +1928,86 @@ static mutation_sets generate_mutation_sets() {
         }
     }
 
+    {
+        // Single-row schema: no clustering key and no static columns, which selects
+        // the single_row partition format. Its only row lives under an empty
+        // clustering key. Exercise it explicitly so that the mutation source tests
+        // cover this storage format deterministically.
+        auto common_schema = schema_builder(this_smp_shard_count(), "ks", "test_single_row")
+                .with_column("pk_col", bytes_type, column_kind::partition_key)
+                .with_column("regular_col_1", bytes_type)
+                .with_column("regular_col_2", bytes_type);
+
+        auto s1 = common_schema
+                .with_column("regular_col_1_s1", bytes_type) // will have id in between common columns
+                .build();
+
+        auto s2 = common_schema
+                .with_column("regular_col_1_s2", bytes_type) // will have id in between common columns
+                .build();
+
+        SCYLLA_ASSERT(s1->clustering_key_size() == 0 && !s1->has_static_columns());
+
+        auto local_keys = tests::generate_partition_keys(2, s1); // s1 and s2 don't differ in key representation
+        auto& key1 = local_keys[0];
+        auto& key2 = local_keys[1];
+
+        const auto ck = clustering_key::make_empty();
+        auto ttl = gc_clock::duration(10000);   // Note: large value to avoid deletion on tests ignoring query time
+
+        // Differing keys
+        result.unequal.emplace_back(mutations{
+            mutation(s1, key1),
+            mutation(s2, key2)
+        });
+
+        auto m1 = mutation(s1, key1);
+        auto m2 = mutation(s2, key1);
+        result.equal.emplace_back(mutations{m1, m2});
+
+        {
+            auto tomb = new_tombstone();
+            m1.partition().apply(tomb);
+            result.unequal.emplace_back(mutations{m1, m2});
+            m2.partition().apply(tomb);
+            result.equal.emplace_back(mutations{m1, m2});
+        }
+
+        {
+            // Row marker on the single (empty-key) row.
+            auto ts = new_timestamp();
+            m1.partition().apply_insert(*s1, ck, ts);
+            result.unequal.emplace_back(mutations{m1, m2});
+            m2.partition().apply_insert(*s2, ck, ts);
+            result.equal.emplace_back(mutations{m1, m2});
+        }
+
+        {
+            auto ts = new_timestamp();
+            m1.set_clustered_cell(ck, "regular_col_1", data_value(bytes("regular_col_value")), ts, ttl);
+            result.unequal.emplace_back(mutations{m1, m2});
+            m2.set_clustered_cell(ck, "regular_col_1", data_value(bytes("regular_col_value")), ts, ttl);
+            result.equal.emplace_back(mutations{m1, m2});
+        }
+
+        {
+            auto ts = new_timestamp();
+            m1.set_clustered_cell(ck, "regular_col_2", data_value(bytes("regular_col_value")), ts, ttl);
+            result.unequal.emplace_back(mutations{m1, m2});
+            m2.set_clustered_cell(ck, "regular_col_2", data_value(bytes("regular_col_value")), ts, ttl);
+            result.equal.emplace_back(mutations{m1, m2});
+        }
+
+        {
+            // Columns existing only in one of the schemas keep the mutations unequal.
+            auto ts = new_timestamp();
+            m1.set_clustered_cell(ck, "regular_col_1_s1", data_value(bytes("x")), ts);
+            result.unequal.emplace_back(mutations{m1, m2});
+            m2.set_clustered_cell(ck, "regular_col_1_s2", data_value(bytes("x")), ts);
+            result.unequal.emplace_back(mutations{m1, m2});
+        }
+    }
+
     static constexpr auto rmg_iterations = 10;
 
     {
@@ -1936,6 +2016,26 @@ static mutation_sets generate_mutation_sets() {
                 std::nullopt, "ks", "cf",
                 random_mutation_generator::compress::yes,
                 random_mutation_generator::maybe_without_clustering::yes);
+        for (int i = 0; i < rmg_iterations; ++i) {
+            auto m = gen();
+            result.unequal.emplace_back(mutations{m, gen()}); // collision unlikely
+            result.equal.emplace_back(mutations{m, m});
+        }
+    }
+
+    {
+        // Like the block above but guaranteeing a schema without clustering
+        // columns (the single_row partition format). maybe_without_clustering::yes
+        // only drops the clustering key for some seeds, so retry until it does.
+        std::optional<random_mutation_generator> gen_opt;
+        do {
+            gen_opt.emplace(random_mutation_generator::generate_counters::no, local_shard_only::yes,
+                    random_mutation_generator::generate_uncompactable::yes,
+                    std::nullopt, "ks", "cf",
+                    random_mutation_generator::compress::yes,
+                    random_mutation_generator::maybe_without_clustering::yes);
+        } while (gen_opt->schema()->clustering_key_size() != 0);
+        auto& gen = *gen_opt;
         for (int i = 0; i < rmg_iterations; ++i) {
             auto m = gen();
             result.unequal.emplace_back(mutations{m, gen()}); // collision unlikely

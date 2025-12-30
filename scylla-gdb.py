@@ -4587,8 +4587,9 @@ class scylla_cache(gdb.Command):
         gdb.Command.__init__(self, 'scylla cache', gdb.COMMAND_USER, gdb.COMPLETE_COMMAND)
 
     def __partitions(self, table):
-        # _partitions is a std::variant with a single alternative for now:
-        # double_decker<generic>. std_variant decodes the active alternative.
+        # _partitions is a std::variant<double_decker<generic>, double_decker<single_row>>.
+        # The active alternative corresponds to get_partition_format(schema); there is no
+        # separate discriminator. std_variant decodes the active alternative.
         partitions = table['_cache']['_partitions']
         return double_decker(std_variant(partitions).get())
 

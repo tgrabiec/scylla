@@ -37,6 +37,7 @@ namespace replica {
 // Templatized on partition_format so that the embedded storage is statically
 // sized for the format the table uses:
 //  - generic:     partition_entry (24 bytes)
+//  - single_row:  single_row_partition (56 bytes)
 //
 // The partition_format doesn't change for a given table inside a given server.
 // If memtable_entry is using a given format, row_cache must also use it for a
@@ -92,6 +93,9 @@ public:
             return p.get_schema();
         });
     }
+
+    // Call only when format() == partition_format::single_row.
+    single_row_partition& get_single_row_partition() requires (F == partition_format::single_row) { return _storage; }
 
     // Call only when format() == partition_format::generic.
     partition_entry& get_partition_entry() requires (F == partition_format::generic) { return _storage; }
@@ -155,7 +159,8 @@ public:
     // selected from the (format-invariant) schema at construction; std::variant manages
     // its lifetime. There is no separate discriminator: get_partition_format(*_schema)
     // is authoritative (see set_schema(), which asserts the flavor never changes).
-    using partitions_variant = std::variant<partitions_type<partition_format::generic>>;
+    using partitions_variant = std::variant<partitions_type<partition_format::generic>,
+                                            partitions_type<partition_format::single_row>>;
 private:
     dirty_memory_manager& _dirty_mgr;
     mutation_cleaner _cleaner;
@@ -260,6 +265,8 @@ private:
         switch (f) {
         case partition_format::generic:
             return partitions_variant(std::in_place_index<0>, less);
+        case partition_format::single_row:
+            return partitions_variant(std::in_place_index<1>, less);
         }
         abort();
     }
@@ -279,6 +286,8 @@ private:
         switch (::get_partition_format(*_schema)) {
         case partition_format::generic:
             return func(std::integral_constant<partition_format, partition_format::generic>{}, partitions<partition_format::generic>());
+        case partition_format::single_row:
+            return func(std::integral_constant<partition_format, partition_format::single_row>{}, partitions<partition_format::single_row>());
         }
         abort();
     }
@@ -287,6 +296,8 @@ private:
         switch (::get_partition_format(*_schema)) {
         case partition_format::generic:
             return func(std::integral_constant<partition_format, partition_format::generic>{}, partitions<partition_format::generic>());
+        case partition_format::single_row:
+            return func(std::integral_constant<partition_format, partition_format::single_row>{}, partitions<partition_format::single_row>());
         }
         abort();
     }
