@@ -4587,11 +4587,11 @@ class scylla_cache(gdb.Command):
         gdb.Command.__init__(self, 'scylla cache', gdb.COMMAND_USER, gdb.COMPLETE_COMMAND)
 
     def __partitions(self, table):
-        try:
-            return double_decker(table['_cache']['_partitions'])
-        except gdb.error:
-            # Compatibility, the row-cache was switched to B+ tree at some point
-            return intrusive_set(table['_cache']['_partitions'])
+        # _partitions is a std::variant<double_decker<generic>, double_decker<single_row>>.
+        # The active alternative corresponds to get_partition_format(schema); there is no
+        # separate discriminator. std_variant decodes the active alternative.
+        partitions = table['_cache']['_partitions']
+        return double_decker(std_variant(partitions).get())
 
     def invoke(self, arg, from_tty):
         schema_ptr_type = gdb.lookup_type('schema').pointer()
@@ -4600,8 +4600,8 @@ class scylla_cache(gdb.Command):
             name = '%s.%s' % (schema['_raw']['_ks_name'], schema['_raw']['_cf_name'])
             gdb.write("%s:\n" % (name))
             for e in self.__partitions(table):
-                gdb.write('  (cache_entry*) 0x%x {_key=%s, _flags=%s, _pe=%s}\n' % (
-                    int(e.address), e['_key'], e['_flags'], e['_pe']))
+                gdb.write('  (cache_entry*) 0x%x {_key=%s, _flags=%s, _storage=%s}\n' % (
+                    int(e.address), e['_key'], e['_flags'], e['_storage']))
             gdb.write("\n")
 
 

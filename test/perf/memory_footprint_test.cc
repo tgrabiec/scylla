@@ -45,10 +45,12 @@ class size_calculator {
     }
 public:
     static void print_cache_entry_size() {
-        std::cout << prefix() << "sizeof(cache_entry) = " << sizeof(cache_entry) << "\n";
-        std::cout << prefix() << "sizeof(memtable_entry) = " << sizeof(replica::memtable_entry) << "\n";
-        std::cout << prefix() << "sizeof(bptree::node) = " << sizeof(row_cache::partitions_type::outer_tree::node) << "\n";
-        std::cout << prefix() << "sizeof(bptree::data) = " << sizeof(row_cache::partitions_type::outer_tree::data) << "\n";
+        std::cout << prefix() << "sizeof(cache_entry<generic>) = " << sizeof(cache_entry<partition_format::generic>) << "\n";
+        std::cout << prefix() << "sizeof(cache_entry<single_row>) = " << sizeof(cache_entry<partition_format::single_row>) << "\n";
+        std::cout << prefix() << "sizeof(memtable_entry<generic>) = " << sizeof(replica::memtable_entry<partition_format::generic>) << "\n";
+        std::cout << prefix() << "sizeof(memtable_entry<single_row>) = " << sizeof(replica::memtable_entry<partition_format::single_row>) << "\n";
+        std::cout << prefix() << "sizeof(bptree::node) = " << sizeof(row_cache::partitions_type<partition_format::generic>::outer_tree::node) << "\n";
+        std::cout << prefix() << "sizeof(bptree::data) = " << sizeof(row_cache::partitions_type<partition_format::generic>::outer_tree::data) << "\n";
 
         {
             nest n;
@@ -60,6 +62,8 @@ public:
 
         std::cout << prefix() << "sizeof(rows_entry) = " << sizeof(rows_entry) << "\n";
         std::cout << prefix() << "sizeof(evictable) = " << sizeof(evictable) << "\n";
+        std::cout << prefix() << "sizeof(partition_entry) = " << sizeof(partition_entry) << "\n";
+        std::cout << prefix() << "sizeof(single_row_partition) = " << sizeof(single_row_partition) << "\n";
         std::cout << prefix() << "sizeof(deletable_row) = " << sizeof(deletable_row) << "\n";
         std::cout << prefix() << "sizeof(row) = " << sizeof(row) << "\n";
         std::cout << prefix() << "radix_tree::inner_node::node_sizes = ";

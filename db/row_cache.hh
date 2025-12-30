@@ -10,12 +10,15 @@
 
 #include <boost/intrusive/parent_from_member.hpp>
 
+#include <variant>
+
 #include <seastar/util/noncopyable_function.hh>
 
 #include "mutation/mutation_partition.hh"
 #include "utils/phased_barrier.hh"
 #include "utils/histogram.hh"
 #include "mutation/partition_version.hh"
+#include "mutation/single_row_partition.hh"
 #include "utils/double-decker.hh"
 #include "utils/chunked_vector.hh"
 #include "db/cache_tracker.hh"
@@ -28,7 +31,7 @@ class cache_tracker;
 class mutation_reader;
 
 namespace replica {
-class memtable_entry;
+template <partition_format F> class memtable_entry;
 }
 
 namespace tracing { class trace_state_ptr; }
@@ -42,12 +45,18 @@ class lsa_manager;
 
 }
 
-// Intrusive set entry which holds partition data.
+// Format-independent base of the intrusive set entry which holds partition data.
 //
-// TODO: Make memtables use this format too.
-class cache_entry {
+// The entry is templatized on partition_format (see cache_entry below) so that
+// each table instantiates a minimally-sized entry, embedding only the partition
+// storage of the format it actually uses. cache_entry_base holds the state and
+// behavior which doesn't depend on the format, so that code which doesn't care
+// about the format can operate on a cache_entry_base& without instantiating per
+// format.
+class cache_entry_base {
+protected:
     dht::decorated_key _key;
-    partition_entry _pe;
+
     // True when we know that there is nothing between this entry and the previous one in cache
     struct {
         bool _continuous : 1;
@@ -55,14 +64,20 @@ class cache_entry {
         bool _head : 1;
         bool _tail : 1;
         bool _train : 1;
+        bool _single_row_partition : 1;
     } _flags{};
-    friend class size_calculator;
 
-    mutation_reader do_read(row_cache&, cache::read_context& ctx, std::unique_ptr<cache::read_context> ctx_holder);
-    mutation_reader do_read(row_cache&, std::unique_ptr<cache::read_context> unique_ctx);
+    explicit cache_entry_base(dht::decorated_key key) noexcept
+        : _key(std::move(key))
+    { }
+    cache_entry_base(cache_entry_base&&) noexcept = default;
+    ~cache_entry_base() = default;
+
+    friend class size_calculator;
 public:
-    friend class row_cache;
-    friend class cache_tracker;
+    partition_format format() const noexcept {
+        return _flags._single_row_partition ? partition_format::single_row : partition_format::generic;
+    }
 
     bool is_head() const noexcept { return _flags._head; }
     void set_head(bool v) noexcept { _flags._head = v; }
@@ -70,29 +85,6 @@ public:
     void set_tail(bool v) noexcept { _flags._tail = v; }
     bool with_train() const noexcept { return _flags._train; }
     void set_train(bool v) noexcept { _flags._train = v; }
-
-    struct dummy_entry_tag{};
-    struct evictable_tag{};
-
-    cache_entry(dummy_entry_tag);
-    cache_entry(schema_ptr s, const dht::decorated_key& key, const mutation_partition& p);
-    cache_entry(schema_ptr s, dht::decorated_key&& key, mutation_partition&& p);
-    // It is assumed that pe is fully continuous
-    // pe must be evictable.
-    cache_entry(evictable_tag, schema_ptr s, dht::decorated_key&& key, partition_entry&& pe) noexcept;
-    cache_entry(cache_entry&&) noexcept;
-    ~cache_entry();
-
-    static cache_entry& container_of(partition_entry& pe) {
-        return *boost::intrusive::get_parent_from_member(&pe, &cache_entry::_pe);
-    }
-
-    // Called when all contents have been evicted.
-    // This object should unlink and destroy itself from the container.
-    void on_evicted(cache_tracker&) noexcept;
-    // Evicts contents of this entry.
-    // The caller is still responsible for unlinking and destroying this entry.
-    void evict(cache_tracker&) noexcept;
 
     const dht::decorated_key& key() const noexcept { return _key; }
     dht::ring_position_view position() const noexcept {
@@ -102,20 +94,92 @@ public:
         return _key;
     }
 
-    friend dht::ring_position_view ring_position_view_to_compare(const cache_entry& ce) noexcept { return ce.position(); }
-
-    const partition_entry& partition() const noexcept { return _pe; }
-    partition_entry& partition() { return _pe; }
-    const schema_ptr& schema() const noexcept { return _pe.get_schema(); }
-    mutation_reader read(row_cache&, cache::read_context&);
-    mutation_reader read(row_cache&, std::unique_ptr<cache::read_context>);
-    mutation_reader read(row_cache&, cache::read_context&, utils::phased_barrier::phase_type);
-    mutation_reader read(row_cache&, std::unique_ptr<cache::read_context>, utils::phased_barrier::phase_type);
     bool continuous() const noexcept { return _flags._continuous; }
     void set_continuous(bool value) noexcept { _flags._continuous = value; }
 
     bool is_dummy_entry() const noexcept { return _flags._dummy_entry; }
+
+    // Call only when format() == partition_format::generic.
+    // Defined out-of-line below, forwards to the generic cache_entry.
+    partition_entry& get_partition_entry();
+
+    // Found by ADL on cache_entry<F> through its cache_entry_base subobject.
+    friend dht::ring_position_view ring_position_view_to_compare(const cache_entry_base& ce) noexcept { return ce.position(); }
 };
+
+// Intrusive set entry which holds partition data.
+//
+// Templatized on partition_format so that the embedded storage is statically
+// sized for the format the table uses:
+//  - generic:     partition_entry (24 bytes)
+//  - single_row:  single_row_partition (56 bytes)
+//
+// TODO: Make memtables use this format too.
+template <partition_format F>
+class cache_entry final : public cache_entry_base {
+public:
+    using storage_type = partition_storage_t<F>;
+private:
+    storage_type _storage;
+
+    mutation_reader do_read(row_cache&, cache::read_context& ctx, std::unique_ptr<cache::read_context> ctx_holder);
+    mutation_reader do_read(row_cache&, std::unique_ptr<cache::read_context> unique_ctx);
+
+    static storage_type make_storage(const schema_ptr& s, const mutation_partition& p);
+    static storage_type make_storage(const schema_ptr& s, mutation_partition&& p);
+    static storage_type make_dummy_storage(schema_ptr s);
+public:
+    friend class row_cache;
+    friend class cache_tracker;
+
+    struct dummy_entry_tag{};
+    struct evictable_tag{};
+
+    cache_entry(dummy_entry_tag, schema_ptr s);
+    cache_entry(schema_ptr s, const dht::decorated_key& key, const mutation_partition& p);
+    cache_entry(schema_ptr s, dht::decorated_key&& key, mutation_partition&& p);
+    cache_entry(schema_ptr s, dht::decorated_key&& key, single_row_partition&& p) requires (F == partition_format::single_row);
+    // It is assumed that pe is fully continuous
+    // pe must be evictable.
+    cache_entry(evictable_tag, schema_ptr s, dht::decorated_key&& key, partition_entry&& pe) noexcept requires (F == partition_format::generic);
+    cache_entry(cache_entry&&) noexcept;
+
+    static cache_entry& container_of(storage_type& s) {
+        return *boost::intrusive::get_parent_from_member(&s, &cache_entry::_storage);
+    }
+
+    // Called when all contents have been evicted.
+    // This object should unlink and destroy itself from the container.
+    void on_evicted(cache_tracker&) noexcept;
+    // Evicts contents of this entry.
+    // The caller is still responsible for unlinking and destroying this entry.
+    void evict(cache_tracker&) noexcept;
+
+    // Call only when format() == partition_format::generic.
+    partition_entry& get_partition_entry() requires (F == partition_format::generic) { return _storage; }
+    // Call only when format() == partition_format::single_row.
+    single_row_partition& get_single_row_partition() requires (F == partition_format::single_row) { return _storage; }
+
+    template <typename Visitor>
+    decltype(auto) accept(Visitor&& v) { return v(_storage); }
+    template <typename Visitor>
+    decltype(auto) accept(Visitor&& v) const { return v(_storage); }
+
+    const schema_ptr& schema() const noexcept {
+        return accept([] (const auto& p) -> const schema_ptr& {
+            return p.get_schema();
+        });
+    }
+
+    mutation_reader read(row_cache&, cache::read_context&);
+    mutation_reader read(row_cache&, std::unique_ptr<cache::read_context>);
+    mutation_reader read(row_cache&, cache::read_context&, utils::phased_barrier::phase_type);
+    mutation_reader read(row_cache&, std::unique_ptr<cache::read_context>, utils::phased_barrier::phase_type);
+};
+
+inline partition_entry& cache_entry_base::get_partition_entry() {
+    return static_cast<cache_entry<partition_format::generic>&>(*this).get_partition_entry();
+}
 
 using cache_invalidation_filter = std::function<bool(const dht::decorated_key&)>;
 
@@ -134,17 +198,26 @@ using cache_invalidation_filter = std::function<bool(const dht::decorated_key&)>
 class row_cache final {
 public:
     using phase_type = utils::phased_barrier::phase_type;
-    using partitions_type = double_decker<int64_t, cache_entry,
+    // The partition container, one instantiation per partition_format. A given
+    // row_cache uses exactly one (selected by its schema, see get_partition_format()).
+    template <partition_format F>
+    using partitions_type = double_decker<int64_t, cache_entry<F>,
                             dht::raw_token_less_comparator, dht::ring_position_comparator,
                             16, bplus::key_search::linear>;
     static_assert(bplus::SimpleLessCompare<int64_t, dht::raw_token_less_comparator>);
+    // Holds the partition container for the active format. The active alternative is
+    // selected from the (format-invariant) schema at construction; std::variant manages
+    // its lifetime. There is no separate discriminator: get_partition_format(*_schema)
+    // is authoritative (see set_schema(), which asserts the flavor never changes).
+    using partitions_variant = std::variant<partitions_type<partition_format::generic>,
+                                            partitions_type<partition_format::single_row>>;
     friend class cache::autoupdating_underlying_reader;
     friend class single_partition_populating_reader;
-    friend class cache_entry;
+    template <partition_format F> friend class cache_entry;
     friend class cache::cache_mutation_reader;
     friend class cache::lsa_manager;
     friend class cache::read_context;
-    friend class partition_range_cursor;
+    template <partition_format F> friend class partition_range_cursor;
     friend class cache_tester;
 
     // A function which adds new writes to the underlying mutation source.
@@ -199,7 +272,50 @@ private:
     cache_tracker& _tracker;
     stats _stats{};
     schema_ptr _schema;
-    partitions_type _partitions; // Cached partitions are complete.
+    partitions_variant _partitions; // Cached partitions are complete.
+
+    // Builds the partition container for the format selected by the schema. Used to
+    // initialize _partitions; the empty container is moved into the variant (noexcept).
+    static partitions_variant make_partitions(partition_format f, dht::raw_token_less_comparator less) {
+        switch (f) {
+        case partition_format::generic:
+            return partitions_variant(std::in_place_index<0>, less);
+        case partition_format::single_row:
+            return partitions_variant(std::in_place_index<1>, less);
+        }
+        abort();
+    }
+
+    // Accessors for the partition container.
+    // partitions<F>() is used where the active format is statically known, e.g. inside
+    // a cache_entry<F> code path or after dispatching on the format.
+    // with_partitions() dispatches on the active format at run time, invoking
+    //   func(std::integral_constant<partition_format, F>{}, partitions_type<F>&)
+    // so the body can recover F via if constexpr / decltype.
+    template <partition_format F>
+    partitions_type<F>& partitions() noexcept { return *std::get_if<partitions_type<F>>(&_partitions); }
+    template <partition_format F>
+    const partitions_type<F>& partitions() const noexcept { return *std::get_if<partitions_type<F>>(&_partitions); }
+    template <typename Func>
+    decltype(auto) with_partitions(Func&& func) {
+        switch (::get_partition_format(*_schema)) {
+        case partition_format::generic:
+            return func(std::integral_constant<partition_format, partition_format::generic>{}, partitions<partition_format::generic>());
+        case partition_format::single_row:
+            return func(std::integral_constant<partition_format, partition_format::single_row>{}, partitions<partition_format::single_row>());
+        }
+        abort();
+    }
+    template <typename Func>
+    decltype(auto) with_partitions(Func&& func) const {
+        switch (::get_partition_format(*_schema)) {
+        case partition_format::generic:
+            return func(std::integral_constant<partition_format, partition_format::generic>{}, partitions<partition_format::generic>());
+        case partition_format::single_row:
+            return func(std::integral_constant<partition_format, partition_format::single_row>{}, partitions<partition_format::single_row>());
+        }
+        abort();
+    }
 
     // The snapshots used by cache are versioned. The version number of a snapshot is
     // called the "population phase", or simply "phase". Between updates, cache
@@ -250,7 +366,7 @@ private:
     void on_row_miss();
     void on_static_row_insert();
     void on_mispopulate();
-    void upgrade_entry(cache_entry&);
+    template <partition_format F> void upgrade_entry(cache_entry<F>&);
     void invalidate_locked(const dht::decorated_key&);
     void clear_now() noexcept;
     void clear_on_destruction() noexcept;
@@ -264,13 +380,13 @@ private:
         // TODO: store iterator here to avoid key comparison
     };
 
-    template<typename CreateEntry, typename VisitEntry>
-    requires requires(CreateEntry create, VisitEntry visit, partitions_type::iterator it, partitions_type::bound_hint hint) {
-        { create(it, hint) } -> std::same_as<partitions_type::iterator>;
+    template<typename Container, typename CreateEntry, typename VisitEntry>
+    requires requires(CreateEntry create, VisitEntry visit, typename Container::iterator it, typename Container::bound_hint hint) {
+        { create(it, hint) } -> std::same_as<typename Container::iterator>;
         { visit(it) } -> std::same_as<void>;
     }
     // Must be run under reclaim lock
-    cache_entry& do_find_or_create_entry(const dht::decorated_key& key, const previous_entry_pointer* previous,
+    auto& do_find_or_create_entry(Container& parts, const dht::decorated_key& key, const previous_entry_pointer* previous,
                                  CreateEntry&& create_entry, VisitEntry&& visit_entry);
 
     // Ensures that partition entry for given key exists in cache and returns a reference to it.
@@ -280,14 +396,17 @@ private:
     // The entry which is returned will have the tombstone applied to it.
     //
     // Must be run under reclaim lock
-    cache_entry& find_or_create_incomplete(const partition_start& ps, row_cache::phase_type phase, const previous_entry_pointer* previous = nullptr);
+    //
+    // Can be called only when cache is using partition_format::generic.
+    cache_entry<partition_format::generic>& find_or_create_incomplete(const partition_start& ps, row_cache::phase_type phase, const previous_entry_pointer* previous = nullptr);
 
     // Creates (or touches) a cache entry for missing partition so that sstables are not
     // poked again for it.
-    cache_entry& find_or_create_missing(const dht::decorated_key& key);
+    cache_entry_base& find_or_create_missing(const dht::decorated_key& key);
 
-    partitions_type::iterator partitions_end() {
-        return std::prev(_partitions.end());
+    template <partition_format F>
+    typename partitions_type<F>::iterator partitions_end() {
+        return std::prev(partitions<F>().end());
     }
 
     // Only active phases are accepted.
@@ -342,9 +461,16 @@ private:
 public:
     ~row_cache();
     row_cache(schema_ptr, snapshot_source, cache_tracker&, is_continuous = is_continuous::no);
-    row_cache(row_cache&&) = default;
+    // Non-movable: _partitions is a std::variant of non-relocatable B+ tree
+    // containers, and row_cache owns LSA region/tracker state, so it is only
+    // ever constructed in place.
+    row_cache(row_cache&&) = delete;
     row_cache(const row_cache&) = delete;
 public:
+    partition_format get_partition_format() const {
+        return ::get_partition_format(*_schema);
+    }
+
     // Implements mutation_source for this cache, see mutation_reader.hh
     // User needs to ensure that the row_cache object stays alive
     // as long as the reader is used.
@@ -399,9 +525,14 @@ public:
     // Can only be called prior to any reads.
     void populate(const mutation& m, const previous_entry_pointer* previous = nullptr);
 
+    // Populate cache from given mutation, which must be fully continuous.
+    // If previous != nullptr and it is still a predecessor of the inserted key,
+    // the range between previous and the inserted entry is marked as continuous.
+    void try_populate(const mutation& m, const previous_entry_pointer* previous = nullptr);
+
     // Finds the entry in cache for a given key.
     // Intended to be used only in tests.
-    cache_entry& lookup(const dht::decorated_key& key);
+    cache_entry_base& lookup(const dht::decorated_key& key);
 
     // Synchronizes cache with the underlying data source from a memtable which
     // has just been flushed to the underlying data source.
@@ -463,8 +594,8 @@ public:
     friend std::ostream& operator<<(std::ostream&, row_cache&);
 
     friend class just_cache_scanning_reader;
-    friend class scanning_and_populating_reader;
-    friend class range_populating_reader;
+    template <partition_format F> friend class scanning_and_populating_reader;
+    template <partition_format F> friend class range_populating_reader;
     friend class cache_tracker;
     friend class mark_end_as_continuous;
 };
@@ -506,6 +637,6 @@ public:
 
 }
 
-template <> struct fmt::formatter<cache_entry> : fmt::formatter<string_view> {
-    auto format(const cache_entry&, fmt::format_context& ctx) const -> decltype(ctx.out());
+template <partition_format F> struct fmt::formatter<cache_entry<F>> : fmt::formatter<string_view> {
+    auto format(const cache_entry_base&, fmt::format_context& ctx) const -> decltype(ctx.out());
 };

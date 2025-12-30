@@ -19,6 +19,7 @@
 #include <boost/intrusive/parent_from_member.hpp>
 
 class static_row;
+enum class partition_format;
 
 // This is MVCC implementation for mutation_partitions.
 //
@@ -525,7 +526,7 @@ class partition_entry {
     partition_version_ref _version;
 
     friend class partition_snapshot;
-    friend class cache_entry;
+    template <partition_format F> friend class cache_entry;
 private:
     void set_version(partition_version*);
 public:
@@ -571,6 +572,22 @@ public:
     // Snapshots will be unlinked and evicted independently by reclaimer.
     // This entry is invalid after this and can only be destroyed.
     void evict(mutation_cleaner&) noexcept;
+
+    // Like evict(mutation_cleaner&), but takes the cache_tracker which owns this
+    // entry. Provided so that the partition storage types expose a uniform
+    // interface to row_cache.
+    void evict(cache_tracker&) noexcept;
+
+    // Moves all rows of this entry to the front of the tracker's LRU.
+    void touch(cache_tracker&);
+
+    // Detaches all rows of this entry from the tracker's LRU, so that they are
+    // not evicted by the memory reclaimer.
+    void unlink_from_lru(cache_tracker&);
+
+    // Memory occupied by this entry's versions in the given allocator,
+    // excluding memory taken directly by this object.
+    size_t external_memory_usage(allocation_strategy&);
 
     partition_version_ref& version() {
         return _version;

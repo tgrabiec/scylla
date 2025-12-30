@@ -9,6 +9,7 @@
 #pragma once
 
 #include <fmt/core.h>
+#include <variant>
 #include "replica/database_fwd.hh"
 #include "dht/decorated_key.hh"
 #include "dht/ring_position.hh"
@@ -19,6 +20,7 @@
 #include "db/commitlog/rp_set.hh"
 #include "utils/extremum_tracking.hh"
 #include "mutation/mutation_cleaner.hh"
+#include "mutation/single_row_partition.hh"
 #include "utils/double-decker.hh"
 #include "readers/empty.hh"
 #include "readers/mutation_source.hh"
@@ -30,15 +32,38 @@ namespace bi = boost::intrusive;
 
 namespace replica {
 
+// Intrusive set entry which holds partition data in a memtable.
+//
+// Templatized on partition_format so that the embedded storage is statically
+// sized for the format the table uses:
+//  - generic:     partition_entry (24 bytes)
+//  - single_row:  single_row_partition (56 bytes)
+//
+// The partition_format doesn't change for a given table inside a given server.
+// If memtable_entry is using a given format, row_cache must also use it for a
+// matching partition.
+template <partition_format F>
 class memtable_entry {
+public:
+    using storage_type = partition_storage_t<F>;
+private:
     dht::decorated_key _key;
-    partition_entry _pe;
+
+    // The partition data, statically sized for the format F that the owning
+    // table uses, so that a table pays only for the format it actually uses.
+    storage_type _storage;
+
     struct {
         bool _head : 1;
         bool _tail : 1;
         bool _train : 1;
     } _flags{};
+
+    static storage_type make_storage(const schema_ptr& s);
 public:
+    // Always consistent with get_partition_format(*get_schema()).
+    static constexpr partition_format format() noexcept { return F; }
+
     bool is_head() const noexcept { return _flags._head; }
     void set_head(bool v) noexcept { _flags._head = v; }
     bool is_tail() const noexcept { return _flags._tail; }
@@ -48,17 +73,35 @@ public:
 
     friend class memtable;
 
-    memtable_entry(schema_ptr s, dht::decorated_key key, mutation_partition p);
+    memtable_entry(schema_ptr s, dht::decorated_key key);
     memtable_entry(memtable_entry&& o) noexcept;
+    // The destructor is implicit; _storage is a real member.
+
     // Frees elements of the entry in batches.
     // Returns stop_iteration::yes iff there are no more elements to free.
     stop_iteration clear_gently() noexcept;
     const dht::decorated_key& key() const { return _key; }
     dht::decorated_key& key() { return _key; }
-    const partition_entry& partition() const { return _pe; }
-    partition_entry& partition() { return _pe; }
-    const schema_ptr& schema() const { return _pe.get_schema(); }
-    partition_snapshot_ptr snapshot(memtable& mtbl);
+
+    template <typename Visitor>
+    decltype(auto) accept(Visitor&& v) { return v(_storage); }
+    template <typename Visitor>
+    decltype(auto) accept(Visitor&& v) const { return v(_storage); }
+
+    const schema_ptr& schema() const {
+        return accept([] (const auto& p) -> const schema_ptr& {
+            return p.get_schema();
+        });
+    }
+
+    // Call only when format() == partition_format::single_row.
+    single_row_partition& get_single_row_partition() requires (F == partition_format::single_row) { return _storage; }
+
+    // Call only when format() == partition_format::generic.
+    partition_entry& get_partition_entry() requires (F == partition_format::generic) { return _storage; }
+
+    // Call only when format() == partition_format::generic.
+    partition_snapshot_ptr snapshot(memtable& mtbl) requires (F == partition_format::generic);
 
     // Makes the entry conform to given schema.
     // Must be called under allocating section of the region which owns the entry.
@@ -76,9 +119,9 @@ public:
 
     size_t size_in_allocator(allocation_strategy& allocator) {
         auto size = size_in_allocator_without_rows(allocator);
-        for (auto&& v : _pe.versions()) {
-            size += v.size_in_allocator(allocator);
-        }
+        size += accept([&] (auto& storage) {
+            return storage.external_memory_usage(allocator);
+        });
         return size;
     }
 
@@ -106,16 +149,25 @@ class memtable final
     , private dirty_memory_manager_logalloc::size_tracked_region
     , public logalloc::region_listener {
 public:
-    using partitions_type = double_decker<int64_t, memtable_entry,
+    // The partition container, one instantiation per partition_format. A given
+    // memtable uses exactly one (selected by its schema, see get_partition_format()).
+    template <partition_format F>
+    using partitions_type = double_decker<int64_t, memtable_entry<F>,
                             dht::raw_token_less_comparator, dht::ring_position_comparator,
                             16, bplus::key_search::linear>;
+    // Holds the partition container for the active format. The active alternative is
+    // selected from the (format-invariant) schema at construction; std::variant manages
+    // its lifetime. There is no separate discriminator: get_partition_format(*_schema)
+    // is authoritative (see set_schema(), which asserts the flavor never changes).
+    using partitions_variant = std::variant<partitions_type<partition_format::generic>,
+                                            partitions_type<partition_format::single_row>>;
 private:
     dirty_memory_manager& _dirty_mgr;
     mutation_cleaner _cleaner;
     memtable_list *_memtable_list;
     schema_ptr _schema;
     memtable_table_shared_data& _table_shared_data;
-    partitions_type partitions;
+    partitions_variant _partitions;
     size_t nr_partitions = 0;
     db::replay_position _replay_position;
     db::rp_set _rp_set;
@@ -202,15 +254,60 @@ private:
 
     void update(db::rp_handle&&);
     friend class ::row_cache;
-    friend class memtable_entry;
-    friend class flush_reader;
+    template <partition_format F> friend class memtable_entry;
+    template <partition_format F> friend class flush_reader;
     friend class flush_memory_accounter;
     friend class partition_snapshot_read_accounter;
 private:
-    std::ranges::subrange<partitions_type::const_iterator> slice(const dht::partition_range& r) const;
-    partition_entry& find_or_create_partition(const dht::decorated_key& key);
-    partition_entry& find_or_create_partition_slow(partition_key_view key);
-    void upgrade_entry(memtable_entry&);
+    // Builds the partition container for the format selected by the schema. Used to
+    // initialize _partitions; the empty container is moved into the variant (noexcept).
+    static partitions_variant make_partitions(partition_format f, dht::raw_token_less_comparator less) {
+        switch (f) {
+        case partition_format::generic:
+            return partitions_variant(std::in_place_index<0>, less);
+        case partition_format::single_row:
+            return partitions_variant(std::in_place_index<1>, less);
+        }
+        abort();
+    }
+
+    // Accessors for the partition container.
+    // partitions<F>() is used where the active format is statically known, e.g. inside
+    // a memtable_entry<F> code path or after dispatching on the format.
+    // with_partitions() dispatches on the active format at run time, invoking
+    //   func(std::integral_constant<partition_format, F>{}, partitions_type<F>&)
+    // so the body can recover F via if constexpr / decltype.
+    template <partition_format F>
+    partitions_type<F>& partitions() noexcept { return *std::get_if<partitions_type<F>>(&_partitions); }
+    template <partition_format F>
+    const partitions_type<F>& partitions() const noexcept { return *std::get_if<partitions_type<F>>(&_partitions); }
+    template <typename Func>
+    decltype(auto) with_partitions(Func&& func) {
+        switch (::get_partition_format(*_schema)) {
+        case partition_format::generic:
+            return func(std::integral_constant<partition_format, partition_format::generic>{}, partitions<partition_format::generic>());
+        case partition_format::single_row:
+            return func(std::integral_constant<partition_format, partition_format::single_row>{}, partitions<partition_format::single_row>());
+        }
+        abort();
+    }
+    template <typename Func>
+    decltype(auto) with_partitions(Func&& func) const {
+        switch (::get_partition_format(*_schema)) {
+        case partition_format::generic:
+            return func(std::integral_constant<partition_format, partition_format::generic>{}, partitions<partition_format::generic>());
+        case partition_format::single_row:
+            return func(std::integral_constant<partition_format, partition_format::single_row>{}, partitions<partition_format::single_row>());
+        }
+        abort();
+    }
+
+    template <partition_format F>
+    memtable_entry<F>& find_or_create_partition(const dht::decorated_key& key);
+    template <partition_format F>
+    memtable_entry<F>& find_or_create_partition_slow(partition_key_view key);
+    template <partition_format F>
+    void upgrade_entry(memtable_entry<F>&);
     void add_flushed_memory(uint64_t);
     void remove_flushed_memory(uint64_t);
     void clear() noexcept;
@@ -234,7 +331,8 @@ public:
     void apply(const mutation& m, db::rp_handle&& = {});
     // The mutation is upgraded to current schema.
     void apply(const frozen_mutation& m, const schema_ptr& m_schema, db::rp_handle&& = {});
-    void evict_entry(memtable_entry& e, mutation_cleaner& cleaner) noexcept;
+    template <partition_format F>
+    void evict_entry(memtable_entry<F>& e, mutation_cleaner& cleaner) noexcept;
 
     static memtable& from_region(logalloc::region& r) noexcept {
         return static_cast<memtable&>(r);
@@ -322,7 +420,9 @@ public:
 
     mutation_source as_data_source();
 
-    bool empty() const noexcept { return partitions.empty(); }
+    bool empty() const noexcept {
+        return with_partitions([] (auto, auto& partitions) { return partitions.empty(); });
+    }
     void mark_flushed(mutation_source) noexcept;
     bool is_merging_to_cache() const noexcept;
     bool is_flushed() const noexcept;
@@ -341,7 +441,7 @@ public:
     db::rp_set get_and_discard_rp_set() noexcept {
         return std::exchange(_rp_set, {});
     }
-    friend class iterator_reader;
+    template <partition_format F> friend class iterator_reader;
 
     dirty_memory_manager& get_dirty_memory_manager() noexcept {
         return _dirty_mgr;
@@ -364,9 +464,9 @@ public:
 
 }
 
-template <> struct fmt::formatter<replica::memtable_entry> {
+template <partition_format F> struct fmt::formatter<replica::memtable_entry<F>> {
     constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
-    auto format(const replica::memtable_entry&, fmt::format_context& ctx) const -> decltype(ctx.out());
+    auto format(const replica::memtable_entry<F>&, fmt::format_context& ctx) const -> decltype(ctx.out());
 };
 
 template <> struct fmt::formatter<replica::memtable> {
