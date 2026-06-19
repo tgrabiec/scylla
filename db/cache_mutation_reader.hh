@@ -122,11 +122,7 @@ class cache_mutation_reader final : public mutation_reader::impl {
     mutation_reader* _underlying = nullptr;
     mutation_reader_opt _underlying_holder;
 
-    gc_clock::time_point _read_time;
-    std::optional<gc_clock::time_point> _gc_before;
-
-    std::optional<max_purgeable> _max_purgeable;
-    std::optional<max_purgeable> _max_purgeable_shadowable;
+    partition_gc_context _gc_ctx;
 
     future<> do_fill_buffer();
     future<> ensure_underlying();
@@ -200,18 +196,11 @@ class cache_mutation_reader final : public mutation_reader::impl {
     }
 
     gc_clock::time_point get_gc_before() {
-        if (!_gc_before.has_value()) {
-            _gc_before = _read_context.tombstone_gc_state().with_commitlog_check_disabled().get_gc_before_for_key(_schema, _dk, _read_time);
-        }
-        return *_gc_before;
+        return _gc_ctx.get_gc_before(_read_context, *_schema, _dk);
     }
 
     bool can_gc(tombstone t, is_shadowable is) {
-        auto& max_purgeable = is ? _max_purgeable_shadowable : _max_purgeable;
-        if (!max_purgeable.has_value()) {
-            max_purgeable.emplace(_read_context.get_max_purgeable(_dk, is));
-        }
-        return max_purgeable->can_purge(t);
+        return _gc_ctx.can_gc(_read_context, _dk, t, is);
     }
 
 public:
@@ -234,7 +223,7 @@ public:
         , _read_context_holder(std::move(unique_ctx))
         , _read_context(ctx)    // ctx is owned by the caller, who's responsible for closing it.
         , _next_row(*_schema, *_snp, false, _read_context.is_reversed())
-        , _read_time(gc_clock::now())
+        , _gc_ctx{gc_clock::now()}
     {
         clogger.trace("csm {}: table={}.{}, dk={}, reversed={}, snap={}",
                 fmt::ptr(this),
@@ -787,30 +776,9 @@ void cache_mutation_reader::copy_from_cache_to_buffer() {
             && _snp->at_oldest_version()) {
             deletable_row& row = _next_row.latest_row();
             tombstone range_tomb = _next_row.range_tombstone_for_row();
-            auto t = row.deleted_at();
-            t.apply(range_tomb);
 
-            auto row_tomb_expired = [&](row_tombstone tomb) {
-                return (tomb && tomb.max_deletion_time() < get_gc_before() && can_gc(tomb.tomb(), tomb.is_shadowable()));
-            };
-
-            auto is_row_dead = [&](const deletable_row& row) {
-                auto& m = row.marker();
-                return (!m.is_missing() && m.is_dead(_read_time) && m.deletion_time() < get_gc_before() && can_gc(tombstone(m.timestamp(), m.deletion_time()), is_shadowable::no));
-            };
-
-            if (row_tomb_expired(t) || is_row_dead(row)) {
-                const schema& row_schema = _next_row.latest_row_schema();
-
-                _read_context.cache()._tracker.on_row_compacted();
-
-                auto mutation_can_gc = can_gc_fn([this] (tombstone t, is_shadowable is) { return can_gc(t, is); });
-
-                with_allocator(_snp->region().allocator(), [&] {
-                    deletable_row row_copy(row_schema, row);
-                    row_copy.compact_and_expire(row_schema, t.tomb(), _read_time, mutation_can_gc, get_gc_before(), nullptr);
-                    std::swap(row, row_copy);
-                });
+            const schema& row_schema = _next_row.latest_row_schema();
+            if (maybe_compact_row_on_read(row_schema, _dk, range_tomb, row, _gc_ctx, _read_context, _snp->region())) {
                 remove_row = row.empty();
 
                 auto tomb_expired = [&](tombstone tomb) {
