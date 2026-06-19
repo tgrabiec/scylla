@@ -1751,6 +1751,68 @@ single_row_partition::as_fragments(const dht::decorated_key& key, reader_permit 
     return frags;
 }
 
+namespace cache {
+
+gc_clock::time_point
+partition_gc_context::get_gc_before(read_context& read, const schema& s, const dht::decorated_key& dk) {
+    if (!gc_before.has_value()) {
+        gc_before = read.tombstone_gc_state().with_commitlog_check_disabled()
+                .get_gc_before_for_key(s.shared_from_this(), dk, read_time);
+    }
+    return *gc_before;
+}
+
+bool
+partition_gc_context::can_gc(read_context& read, const dht::decorated_key& dk, tombstone t, is_shadowable is) {
+    auto& max_purgeable = is ? max_purgeable_shadowable : max_purgeable_regular;
+    if (!max_purgeable.has_value()) {
+        max_purgeable.emplace(read.get_max_purgeable(dk, is));
+    }
+    return max_purgeable->can_purge(t);
+}
+
+bool maybe_compact_row_on_read(const schema& s, const dht::decorated_key& dk, tombstone t, deletable_row& row,
+                               partition_gc_context& gc_ctx, read_context& read, logalloc::region& region) {
+    auto get_gc_before = [&] {
+        return gc_ctx.get_gc_before(read, s, dk);
+    };
+
+    auto can_gc = [&] (tombstone t, is_shadowable is) {
+        return gc_ctx.can_gc(read, dk, t, is);
+    };
+
+    auto row_tomb_expired = [&] (row_tombstone tomb) {
+        return tomb && tomb.max_deletion_time() < get_gc_before() && can_gc(tomb.tomb(), tomb.is_shadowable());
+    };
+
+    auto is_row_dead = [&] (const deletable_row& row) {
+        auto& m = row.marker();
+        return !m.is_missing() && m.is_dead(gc_clock::now())
+            && m.deletion_time() < get_gc_before() && can_gc(tombstone(m.timestamp(), m.deletion_time()), is_shadowable::no);
+    };
+
+    auto combined_row_tomb = row.deleted_at();
+    combined_row_tomb.apply(t);
+
+    if (row_tomb_expired(combined_row_tomb) || is_row_dead(row)) {
+        read.cache().get_cache_tracker().on_row_compacted();
+
+        auto mutation_can_gc = can_gc_fn([&] (tombstone t, is_shadowable is) { return can_gc(t, is); });
+
+        with_allocator(region.allocator(), [&] {
+            deletable_row row_copy(s, row);
+            row_copy.compact_and_expire(s, t, gc_ctx.read_time, mutation_can_gc, get_gc_before(), nullptr);
+            std::swap(row, row_copy);
+        });
+
+        return true;
+    }
+
+    return false;
+}
+
+} // namespace cache
+
 auto fmt::formatter<single_row_partition::printer>::format(const single_row_partition::printer& p, fmt::format_context& ctx) const
         -> decltype(ctx.out()) {
     auto& srp = p._srp;

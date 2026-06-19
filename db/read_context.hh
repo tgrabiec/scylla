@@ -234,4 +234,22 @@ public:
     }
 };
 
+/// Cached lazy-populated tombstone GC thresholds for a single partition.
+/// To be reused within a single read.
+struct partition_gc_context {
+    gc_clock::time_point read_time;
+    std::optional<gc_clock::time_point> gc_before;
+    std::optional<max_purgeable> max_purgeable_shadowable;
+    std::optional<max_purgeable> max_purgeable_regular;
+
+    gc_clock::time_point get_gc_before(read_context& read, const schema&, const dht::decorated_key&);
+    bool can_gc(read_context&, const dht::decorated_key&, tombstone, is_shadowable);
+};
+
+/// Compacts "row" in-place if it contains expired tombstone or marker.
+/// "higher_tombstone" is optional, and if passed, it is combined with the row's tombstone on-the-fly.
+/// Returns true if the row was modified (compacted).
+bool maybe_compact_row_on_read(const schema& s, const dht::decorated_key&, tombstone higher_tombstone, deletable_row& row,
+                               partition_gc_context&, read_context&, logalloc::region&);
+
 }
