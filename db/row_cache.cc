@@ -554,6 +554,31 @@ void row_cache::on_static_row_insert() {
     ++_tracker._stats.static_row_insertions;
 }
 
+/// Attempts compaction if there are expired rows / tombstones. Not strict, precise compaction is not guaranteed.
+/// Evicts the entry if it's empty after compaction.
+/// Returns true iff the entry was evicted. The reference to "e" is invalid in this case.
+template<partition_format F>
+bool maybe_compact_and_evict(read_context& read, cache_entry<F>& e) {
+    return e.accept(make_visitor([&] (partition_entry& pe) {
+        return false;
+    }, [&] (single_row_partition& srp) {
+        cache_tracker& tracker = read.cache().get_cache_tracker();
+        auto& region = tracker.region();
+        partition_gc_context gc_ctx{gc_clock::now()};
+        clogger.trace("maybe_compact_and_evict {}: compacting-on-read", e.key());
+        if (maybe_compact_on_read(*e.schema(), e.key(), srp, gc_ctx, read, region) && srp.empty()) {
+            clogger.trace("evicting {}: empty after compaction-on-read", e.key());
+            with_allocator(region.allocator(), [&] {
+                e.on_evicted(tracker);
+            });
+            tracker.on_row_compacted_away();
+            region.allocator().invalidate_references();
+            return true;
+        }
+        return false;
+    }));
+}
+
 template <partition_format F>
 class range_populating_reader {
     row_cache& _cache;
@@ -716,7 +741,9 @@ private:
                 }
                 cache_entry<F>& e = _primary.entry();
                 auto fr = read_from_entry(e);
-                _lower_bound = dht::partition_range::bound{e.key(), false};
+                auto lb = dht::partition_range::bound{e.key(), false};
+                maybe_compact_and_evict(*_read_context, e); // e is invalid after this.
+                _lower_bound = std::move(lb);
                 // Delay the call to next() so that we don't see stale continuity on next invocation.
                 _advance_primary = true;
                 return mutation_reader_opt(std::move(fr));
@@ -867,9 +894,13 @@ row_cache::make_reader_opt(schema_ptr s,
                 auto i = partitions.lower_bound(pos, cmp, hint);
                 if (hint.match) {
                     auto& e = *i;
+                    auto read_ctx = make_context();
+                    if (maybe_compact_and_evict(*read_ctx, e)) {
+                        return {};
+                    }
                     upgrade_entry(e);
                     on_partition_hit();
-                    return e.read(*this, make_context());
+                    return e.read(*this, std::move(read_ctx));
                 } else if (i->continuous()) {
                     return {};
                 } else {
@@ -1809,6 +1840,27 @@ bool maybe_compact_row_on_read(const schema& s, const dht::decorated_key& dk, to
     }
 
     return false;
+}
+
+bool maybe_compact_on_read(const schema& s, const dht::decorated_key& dk, single_row_partition& p,
+                           partition_gc_context& gc_ctx, read_context& read, logalloc::region& region) {
+    auto get_gc_before = [&] {
+        return gc_ctx.get_gc_before(read, s, dk);
+    };
+
+    auto can_gc = [&] (tombstone t, is_shadowable is) {
+        return gc_ctx.can_gc(read, dk, t, is);
+    };
+
+    if (!maybe_compact_row_on_read(s, dk, p.partition_tombstone(), p.row(), gc_ctx, read, region)) {
+        return false;
+    }
+
+    if (p.partition_tombstone() && p.partition_tombstone().deletion_time < get_gc_before() && can_gc(p.partition_tombstone(), is_shadowable::no)) {
+        p.set_partition_tombstone({});
+    }
+
+    return true;
 }
 
 } // namespace cache
