@@ -252,4 +252,9 @@ struct partition_gc_context {
 bool maybe_compact_row_on_read(const schema& s, const dht::decorated_key&, tombstone higher_tombstone, deletable_row& row,
                                partition_gc_context&, read_context&, logalloc::region&);
 
+/// Compacts "partition" in-place if it contains expired tombstone or marker.
+/// Returns true if the partition was modified (compacted).
+bool maybe_compact_on_read(const schema&, const dht::decorated_key&, single_row_partition& partition,
+                           partition_gc_context&, read_context&, logalloc::region&);
+
 }

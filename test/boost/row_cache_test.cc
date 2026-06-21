@@ -4745,6 +4745,66 @@ SEASTAR_TEST_CASE(test_cache_compacts_expired_tombstones_on_read) {
     });
 }
 
+SEASTAR_TEST_CASE(test_cache_compacts_expired_tombstones_on_read_no_ck) {
+    return seastar::async([] {
+        auto s = schema_builder(this_smp_shard_count(), "ks", "cf")
+            .with_column("pk", int32_type, column_kind::partition_key)
+            .with_column("v", int32_type)
+            .build();
+
+        tests::reader_concurrency_semaphore_wrapper semaphore;
+        auto pkeys = tests::generate_partition_keys(3, s);
+        auto ck = clustering_key::make_empty(*s);
+
+        auto now = gc_clock::now();
+        auto dt_noexp = now;
+        auto dt_exp = now - std::chrono::seconds(s->gc_grace_seconds().count() + 700);
+        auto dt_held = now - std::chrono::seconds(s->gc_grace_seconds().count() + 1);
+
+        auto mt = make_lw_shared<replica::memtable>(s);
+        cache_tracker tracker;
+        row_cache cache(s, snapshot_source_from_snapshot(mt->as_data_source()), tracker);
+
+        mutation m0(s, pkeys[0]);
+        m0.partition().apply_delete(*s, ck, tombstone(1, dt_noexp)); // create non-expired tombstone
+        cache.populate(m0);
+
+        mutation m1(s, pkeys[1]);
+        m1.partition().apply_delete(*s, ck, tombstone(2, dt_exp)); // create expired tombstone
+        cache.populate(m1);
+
+        mutation m2(s, pkeys[2]);
+        m2.partition().apply_delete(*s, ck, tombstone(3, dt_held)); // create expired but held by commit log tombstone
+        cache.populate(m2);
+
+        BOOST_REQUIRE_EQUAL(3, tracker.get_stats().partitions);
+
+        shared_tombstone_gc_state gc_shared_state;
+        tombstone_gc_state gc_state(gc_shared_state);
+
+        // emulate commitlog behavior
+        gc_shared_state.set_gc_time_min_source([&](const table_id& id) {
+            return now - (std::chrono::seconds(s->gc_grace_seconds().count() + 600));
+        });
+
+        auto rd = cache.make_reader(s, semaphore.make_permit(), query::full_partition_range, gc_state, can_always_purge);
+        auto close_rd = deferred_close(rd);
+        consume_all(rd);
+
+        BOOST_REQUIRE_EQUAL(1, tracker.get_stats().partitions);
+        BOOST_REQUIRE_EQUAL(2, tracker.get_stats().rows_compacted);
+        BOOST_REQUIRE_EQUAL(2, tracker.get_stats().rows_compacted_away);
+
+        assert_that(cache.make_reader(s, semaphore.make_permit(), query::full_partition_range, gc_state, can_always_purge))
+            .produces(m0)
+            .produces_end_of_stream();
+
+        verify_has(cache, pkeys[0]);
+        verify_does_not_have(cache, pkeys[1]);
+        verify_does_not_have(cache, pkeys[2]);
+    });
+}
+
 SEASTAR_TEST_CASE(test_compact_range_tombstones_on_read) {
     return seastar::async([] {
         simple_schema s;
