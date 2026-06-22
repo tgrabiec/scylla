@@ -15,6 +15,8 @@
 #include "utils/managed_bytes.hh"
 #include "utils/logalloc.hh"
 #include "utils/UUID_gen.hh"
+#include "clocks-impl.hh"
+#include "compaction/compaction_garbage_collector.hh"
 #include "db/row_cache.hh"
 #include "partition_slice_builder.hh"
 #include "schema/schema_builder.hh"
@@ -219,16 +221,195 @@ void test_scan_with_range_delete_over_rows() {
     tracker.cleaner().drain().get();
 }
 
+// Scans a cache populated with many partitions of a schema without clustering
+// columns (stored using the single_row_partition format).
+//
+// The first scan reads from the underlying source and populates the cache with
+// continuity. The second scan should be a pure cache hit and be much faster.
+void test_scan_single_row_partitions() {
+    std::cout << __FUNCTION__<< std::endl;
+
+    auto s = schema_builder(this_smp_shard_count(), "ks", "cf")
+            .with_column("pk", int32_type, column_kind::partition_key)
+            .with_column("v", bytes_type, column_kind::regular_column)
+            .build();
+    tests::reader_concurrency_semaphore_wrapper semaphore;
+
+    cache_tracker tracker;
+    memtable_snapshot_source mss(s);
+
+    auto ck = clustering_key::make_empty(*s);
+    auto val = data_value(bytes(bytes::initialized_later(), cell_size));
+
+    std::cout << "Populating with single-row partitions" << std::endl;
+
+    const size_t cache_size = seastar::memory::stats().total_memory() / 4;
+    int32_t pk_value = 0;
+    while (mss.used_space() < cache_size) {
+        auto pk = dht::decorate_key(*s, partition_key::from_single_value(*s, serialized(pk_value++)));
+        mutation m(s, pk);
+        m.set_clustered_cell(ck, "v", val, api::new_timestamp());
+        mss.apply(m);
+
+        if (cancelled) {
+            return;
+        }
+    }
+
+    row_cache cache(s, snapshot_source([&] { return mss(); }), tracker, is_continuous::no);
+
+    std::cout << "Partitions: " << pk_value << std::endl;
+    std::cout << "Scanning" << std::endl;
+
+    auto test_read = [&] {
+        auto rd = cache.make_reader(s, semaphore.make_permit(), query::full_partition_range);
+        auto close_reader = deferred_close(rd);
+        scheduling_latency_measurer slm;
+        slm.start();
+        auto d = duration_in_seconds([&] {
+            rd.consume_pausable([](mutation_fragment_v2) {
+                return stop_iteration(cancelled);
+            }).get();
+        });
+        slm.stop();
+
+        fmt::print(std::cout, "read: {:.6f} [ms], preemption: {}, cache: {:d}/{:d} [MB]\n",
+                   d.count() * 1000,
+                   slm,
+                   tracker.region().occupancy().used_space() / MB,
+                   tracker.region().occupancy().total_space() / MB);
+    };
+
+    test_read();
+    test_read();
+
+    // Clean gently to avoid reactor stalls in destructors
+    cache.invalidate(row_cache::external_updater([]{})).get();
+    tracker.cleaner().drain().get();
+}
+
+// Scans a cache populated with many partitions of a schema without clustering
+// columns (single_row_partition format), where ~10% of the partitions have a
+// short TTL. After the clocks are moved forward past their expiry and the gc
+// grace period, the first scan should compact away (evict) the expired
+// partitions on read, so that the second scan sees less data in the cache.
+void test_compact_expired_single_row_partitions_on_read() {
+    std::cout << __FUNCTION__<< std::endl;
+
+    const auto gc_grace = std::chrono::seconds(100);
+    auto s = schema_builder(this_smp_shard_count(), "ks", "cf")
+            .with_column("pk", int32_type, column_kind::partition_key)
+            .with_column("v", bytes_type, column_kind::regular_column)
+            .set_gc_grace_seconds(gc_grace.count())
+            .build();
+    tests::reader_concurrency_semaphore_wrapper semaphore;
+
+    cache_tracker tracker;
+    // The underlying source is empty and the cache is populated directly, so
+    // that partitions evicted on read are not re-populated by later scans.
+    memtable_snapshot_source mss(s);
+    row_cache cache(s, snapshot_source([&] { return mss(); }), tracker, is_continuous::no);
+
+    auto ck = clustering_key::make_empty(*s);
+    auto val = data_value(bytes(bytes::initialized_later(), cell_size));
+
+    // The short ttl expires after the clock jump below, the long one does not.
+    const gc_clock::duration short_ttl = std::chrono::seconds(100);
+    const gc_clock::duration long_ttl = std::chrono::hours(24 * 365 * 10);
+
+    std::cout << "Populating with single-row partitions (every 10th expiring)" << std::endl;
+
+    const size_t cache_size = seastar::memory::stats().total_memory() / 4;
+    int32_t pk_value = 0;
+    size_t expiring = 0;
+    while (tracker.region().occupancy().used_space() < cache_size) {
+        auto pk = dht::decorate_key(*s, partition_key::from_single_value(*s, serialized(pk_value)));
+        auto ts = api::new_timestamp();
+        const bool will_expire = (pk_value % 10 == 0);
+        const auto ttl = will_expire ? short_ttl : long_ttl;
+        expiring += will_expire;
+
+        // INSERT with a TTL: sets an expiring row marker and an expiring cell,
+        // both of which are required for the partition to become empty (and
+        // hence evictable) once they expire and become GC-able.
+        mutation m(s, pk);
+        m.partition().clustered_row(*s, ck).apply(row_marker(ts, ttl, gc_clock::now() + ttl));
+        m.set_clustered_cell(ck, "v", val, ts, ttl);
+        cache.populate(m);
+
+        ++pk_value;
+        if (cancelled) {
+            return;
+        }
+    }
+
+    auto print_stats = [&] (const char* phase) {
+        fmt::print(std::cout, "{}: partitions: {}, cache: {:d}/{:d} [MB]\n",
+                   phase,
+                   tracker.get_stats().partitions,
+                   tracker.region().occupancy().used_space() / MB,
+                   tracker.region().occupancy().total_space() / MB);
+    };
+
+    std::cout << "Partitions: " << pk_value << " (expiring: " << expiring << ")" << std::endl;
+    print_stats("populated");
+
+    // Move the clocks forward so that the short-lived partitions are both
+    // expired and past the gc grace period, hence purgeable.
+    forward_jump_clocks(short_ttl + gc_grace + std::chrono::seconds(100));
+
+    auto scan = [&] (const char* phase) {
+        auto rd = cache.make_reader(s, semaphore.make_permit(), query::full_partition_range,
+                                    tombstone_gc_state::for_tests(), can_always_purge);
+        auto close_reader = deferred_close(rd);
+        scheduling_latency_measurer slm;
+        slm.start();
+        auto d = duration_in_seconds([&] {
+            rd.consume_pausable([](mutation_fragment_v2) {
+                return stop_iteration(cancelled);
+            }).get();
+        });
+        slm.stop();
+
+        fmt::print(std::cout, "{}: read: {:.6f} [ms], preemption: {}, partitions: {}, cache: {:d}/{:d} [MB]\n",
+                   phase,
+                   d.count() * 1000,
+                   slm,
+                   tracker.get_stats().partitions,
+                   tracker.region().occupancy().used_space() / MB,
+                   tracker.region().occupancy().total_space() / MB);
+    };
+
+    std::cout << "Scanning" << std::endl;
+
+    scan("compacting scan");
+    scan("post-compaction scan");
+
+    // Clean gently to avoid reactor stalls in destructors
+    cache.invalidate(row_cache::external_updater([]{})).get();
+    tracker.cleaner().drain().get();
+}
+
 int main(int argc, char** argv) {
     app_template app;
-    return app.run(argc, argv, [] {
+    app.add_options()
+        ("enable-single-row-partition", boost::program_options::value<bool>()->default_value(true),
+         "Use the single_row_partition storage format for tables without clustering columns.");
+    return app.run(argc, argv, [&app] {
         return seastar::async([&] {
             auto stop_test = defer([] {
                 cancelled = true;
             });
             logalloc::prime_segment_pool(memory::stats().total_memory(), memory::min_free_memory()).get();
+
             test_scans_with_dummy_entries();
             test_scan_with_range_delete_over_rows();
+
+            enable_single_row_partition = app.configuration()["enable-single-row-partition"].as<bool>();
+            fmt::print(std::cout, "\nsingle_row_partition storage: {}\n",
+                       enable_single_row_partition ? "enabled" : "disabled");
+            test_scan_single_row_partitions();
+            test_compact_expired_single_row_partitions_on_read();
         });
     });
 }
