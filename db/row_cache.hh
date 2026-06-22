@@ -21,6 +21,7 @@
 #include "mutation/single_row_partition.hh"
 #include "utils/double-decker.hh"
 #include "utils/chunked_vector.hh"
+#include "utils/on_internal_error.hh"
 #include "db/cache_tracker.hh"
 #include "readers/empty.hh"
 #include "readers/mutation_source.hh"
@@ -283,7 +284,7 @@ private:
         case partition_format::single_row:
             return partitions_variant(std::in_place_index<1>, less);
         }
-        abort();
+        utils::on_internal_error("unhandled partition_format");
     }
 
     // Accessors for the partition container.
@@ -304,7 +305,7 @@ private:
         case partition_format::single_row:
             return func(std::integral_constant<partition_format, partition_format::single_row>{}, partitions<partition_format::single_row>());
         }
-        abort();
+        utils::on_internal_error("unhandled partition_format");
     }
     template <typename Func>
     decltype(auto) with_partitions(Func&& func) const {
@@ -314,7 +315,7 @@ private:
         case partition_format::single_row:
             return func(std::integral_constant<partition_format, partition_format::single_row>{}, partitions<partition_format::single_row>());
         }
-        abort();
+        utils::on_internal_error("unhandled partition_format");
     }
 
     // The snapshots used by cache are versioned. The version number of a snapshot is
