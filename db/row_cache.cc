@@ -1725,13 +1725,24 @@ void single_row_partition::apply(const schema& mp_schema, mutation_partition&& m
         mp.upgrade(mp_schema, *_s);
     }
     SCYLLA_ASSERT(mp.static_row().empty());
-    _partition_tombstone.apply(mp.partition_tombstone());
+    auto incoming_tombstone = mp.partition_tombstone();
+    _partition_tombstone.apply(incoming_tombstone);
     if (!mp.clustered_rows().empty()) {
         if (!_row.empty()) {
             ++app_stats.row_hits;
         }
         _row.apply(*_s, std::move(mp.clustered_row(*_s, clustering_key::make_empty())));
         ++app_stats.row_writes;
+    }
+    // A newly-applied partition tombstone may shadow the existing or just-applied row.
+    // Drop the shadowed data by compacting the row against the combined partition tombstone,
+    // mirroring mutation_partition_v2::apply_monotonically()'s partition-tombstone compaction
+    // (see rows_entry::compact()). This is shadow-compaction only: no TTL expiry and no GC
+    // purging (query_time/gc_before = min, never_gc), because the partition tombstone remains
+    // in effect for the dropped data.
+    if (incoming_tombstone) {
+        ++app_stats.rows_compacted_with_tombstones;
+        _row.compact_and_expire(*_s, _partition_tombstone, gc_clock::time_point::min(), never_gc, gc_clock::time_point::min());
     }
 }
 
@@ -1748,6 +1759,15 @@ void single_row_partition::apply_monotonically(single_row_partition&& p) {
     // of the row apply below.
     _partition_tombstone.apply(p._partition_tombstone);
     _row.apply(*_s, std::move(p._row));
+    // A newly-applied partition tombstone may shadow the merged row. Drop the shadowed data by
+    // compacting against the combined partition tombstone, mirroring
+    // mutation_partition_v2::apply_monotonically() (see single_row_partition::apply()).
+    // tombstone::apply() above leaves p's tombstone intact; clear it afterwards so a retry does
+    // not redo the (idempotent) compaction, matching the row apply above.
+    if (p._partition_tombstone) {
+        _row.compact_and_expire(*_s, _partition_tombstone, gc_clock::time_point::min(), never_gc, gc_clock::time_point::min());
+        p._partition_tombstone = {};
+    }
 }
 
 void single_row_partition::upgrade_impl(schema_ptr new_schema) {
