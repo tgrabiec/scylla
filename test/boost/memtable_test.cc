@@ -799,6 +799,65 @@ SEASTAR_THREAD_TEST_CASE(test_range_tombstones_are_compacted_with_data) {
             .produces_end_of_stream();
 }
 
+// The single_row_partition format (used for schemas without clustering columns)
+// has no range tombstones, so the analog of test_range_tombstones_are_compacted_with_data
+// is a partition tombstone shadowing the single row. The shadowed row must be dropped
+// when the tombstone is applied, mirroring mutation_partition_v2's apply-time compaction.
+SEASTAR_THREAD_TEST_CASE(test_tombstones_are_compacted_with_data_no_ck) {
+    tests::reader_concurrency_semaphore_wrapper semaphore;
+    auto s = schema_builder(this_smp_shard_count(), "ks", "cf")
+            .with_column("pk", int32_type, column_kind::partition_key)
+            .with_column("v", int32_type)
+            .build();
+    auto mt = make_lw_shared<replica::memtable>(s);
+
+    auto pk = tests::generate_partition_key(s);
+    auto pr = dht::partition_range::make_singular(pk);
+    auto ck = clustering_key::make_empty(*s);
+
+    const api::timestamp_type cell_ts = 100;
+    auto old_tombstone = tombstone(cell_ts - 50, gc_clock::now()); // older than the write, does not cover it
+    auto new_tomb = tombstone(cell_ts + 50, gc_clock::now());      // newer than the write, covers it
+
+    {
+        mutation m(s, pk);
+        m.set_clustered_cell(ck, to_bytes("v"), data_value(1), cell_ts);
+        mt->apply(m);
+    }
+
+    assert_that(mt->make_mutation_reader(s, semaphore.make_permit(), pr))
+            .produces_partition_start(pk)
+            .produces_row_with_key(ck)
+            .produces_partition_end()
+            .produces_end_of_stream();
+
+    {
+        mutation m(s, pk);
+        m.partition().apply(old_tombstone);
+        mt->apply(m);
+    }
+
+    // The tombstone is older than the write, so it does not shadow the row, which survives.
+    assert_that(mt->make_mutation_reader(s, semaphore.make_permit(), pr))
+            .produces_partition_start(pk, {old_tombstone})
+            .produces_row_with_key(ck)
+            .produces_partition_end()
+            .produces_end_of_stream();
+
+    {
+        mutation m(s, pk);
+        m.partition().apply(new_tomb);
+        mt->apply(m);
+    }
+
+    // The tombstone is newer than the write and shadows the row. The shadowed row is
+    // dropped when the tombstone is applied, so no clustering row is emitted.
+    assert_that(mt->make_mutation_reader(s, semaphore.make_permit(), pr))
+            .produces_partition_start(pk, {new_tomb})
+            .produces_partition_end()
+            .produces_end_of_stream();
+}
+
 SEASTAR_TEST_CASE(test_hash_is_cached) {
     return seastar::async([] {
         auto s = schema_builder(this_smp_shard_count(), "ks", "cf")
