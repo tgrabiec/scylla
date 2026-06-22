@@ -25,7 +25,12 @@
 #include "test/perf/perf.hh"
 #include "test/lib/reader_concurrency_semaphore.hh"
 
-static const int update_iterations = 16;
+// Number of fill+drain+update cycles per scenario. The cache reaches its
+// steady-state size after ~3-4 iterations (independent of the memory size),
+// after which the per-iteration update cost is flat, so a handful of extra
+// iterations is enough to observe steady state. Overridable with
+// --update-iterations.
+static int update_iterations = 8;
 static const int cell_size = 128;
 static bool cancelled = false;
 
@@ -310,11 +315,15 @@ namespace perf {
 
 int scylla_row_cache_update_main(int argc, char** argv) {
     app_template app;
-    return app.run(argc, argv, [] {
+    app.add_options()
+        ("update-iterations", boost::program_options::value<int>()->default_value(update_iterations),
+         "Number of fill+drain+update cycles to run per scenario.");
+    return app.run(argc, argv, [&app] {
         return seastar::async([&] {
             auto stop_test = defer([] {
                 cancelled = true;
             });
+            update_iterations = app.configuration()["update-iterations"].as<int>();
             logalloc::prime_segment_pool(memory::stats().total_memory(), memory::min_free_memory()).get();
             test_partition_with_lots_of_small_rows_covered_by_tombstone();
             test_small_partitions();
