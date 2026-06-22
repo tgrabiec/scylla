@@ -41,6 +41,7 @@
 #include "api/api_init.hh"
 #include "db/config.hh"
 #include "db/extensions.hh"
+#include "mutation/single_row_partition.hh"
 #include "service/storage_service.hh"
 #include "service/migration_manager.hh"
 #include "service/tablet_allocator.hh"
@@ -907,6 +908,11 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // See the comment at the definition of sstables::global_cache_index_pages.
             smp::invoke_on_all([&cfg] {
                 sstables::global_cache_index_pages = cfg->cache_index_pages.operator utils::updateable_value<bool>();
+            }).get();
+
+            // Not live-updateable, so it's read once here.
+            smp::invoke_on_all([&cfg] {
+                ::enable_single_row_partition = cfg->enable_single_row_partition();
             }).get();
 
             ::sighup_handler sighup_handler(opts, *cfg);

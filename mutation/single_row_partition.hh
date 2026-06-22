@@ -39,12 +39,21 @@ enum class partition_format {
     single_row
 };
 
+// Global switch for the single_row_partition storage format, controlled by the
+// `enable_single_row_partition` config option. When false, all tables use the
+// generic partition format. Set once during startup from the config and not
+// live-updateable, similar to sstables::global_cache_index_pages.
+extern bool enable_single_row_partition;
+
 inline
 partition_format get_partition_format(const schema& s) {
     // The single_row format stores a single clustering-key-less row and has no place
     // for a static row. A schema may legally have static columns without a clustering
     // key at the schema/mutation level (although CQL disallows it), so such schemas
     // must use the generic format.
+    if (!enable_single_row_partition) {
+        return partition_format::generic;
+    }
     return (s.clustering_key_size() || s.has_static_columns())
         ? partition_format::generic : partition_format::single_row;
 }
