@@ -19,6 +19,7 @@
 #include "db/commitlog/replay_position.hh"
 #include "db/commitlog/rp_set.hh"
 #include "utils/extremum_tracking.hh"
+#include "utils/on_internal_error.hh"
 #include "mutation/mutation_cleaner.hh"
 #include "mutation/single_row_partition.hh"
 #include "utils/double-decker.hh"
@@ -268,7 +269,7 @@ private:
         case partition_format::single_row:
             return partitions_variant(std::in_place_index<1>, less);
         }
-        abort();
+        utils::on_internal_error("unhandled partition_format");
     }
 
     // Accessors for the partition container.
@@ -289,7 +290,7 @@ private:
         case partition_format::single_row:
             return func(std::integral_constant<partition_format, partition_format::single_row>{}, partitions<partition_format::single_row>());
         }
-        abort();
+        utils::on_internal_error("unhandled partition_format");
     }
     template <typename Func>
     decltype(auto) with_partitions(Func&& func) const {
@@ -299,7 +300,7 @@ private:
         case partition_format::single_row:
             return func(std::integral_constant<partition_format, partition_format::single_row>{}, partitions<partition_format::single_row>());
         }
-        abort();
+        utils::on_internal_error("unhandled partition_format");
     }
 
     template <partition_format F>
