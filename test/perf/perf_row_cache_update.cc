@@ -317,20 +317,27 @@ int scylla_row_cache_update_main(int argc, char** argv) {
     app_template app;
     app.add_options()
         ("update-iterations", boost::program_options::value<int>()->default_value(update_iterations),
-         "Number of fill+drain+update cycles to run per scenario.");
+         "Number of fill+drain+update cycles to run per scenario.")
+        ("enable-single-row-partition", boost::program_options::value<bool>()->default_value(true),
+         "Use the single_row_partition storage format for tables without clustering columns.");
     return app.run(argc, argv, [&app] {
         return seastar::async([&] {
             auto stop_test = defer([] {
                 cancelled = true;
             });
             update_iterations = app.configuration()["update-iterations"].as<int>();
+            enable_single_row_partition = app.configuration()["enable-single-row-partition"].as<bool>();
             logalloc::prime_segment_pool(memory::stats().total_memory(), memory::min_free_memory()).get();
+
             test_partition_with_lots_of_small_rows_covered_by_tombstone();
-            test_small_partitions();
             test_partition_with_few_small_rows();
             test_partition_with_lots_of_small_rows();
             test_partition_with_lots_of_range_tombstones();
             test_partition_with_lots_of_range_tombstones_with_residuals();
+
+            fmt::print(std::cout, "\nsingle_row_partition storage: {}\n",
+                       enable_single_row_partition ? "enabled" : "disabled");
+            test_small_partitions();
         });
     });
 }
