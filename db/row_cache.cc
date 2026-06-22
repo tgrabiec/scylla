@@ -42,6 +42,9 @@ logging::logger clogger("cache");
 using namespace std::chrono_literals;
 using namespace cache;
 
+// See the declaration in mutation/single_row_partition.hh.
+bool enable_single_row_partition = true;
+
 static schema_ptr to_query_domain(const query::partition_slice& slice, schema_ptr table_domain_schema) {
     if (slice.is_reversed()) [[unlikely]] {
         return table_domain_schema->make_reversed();

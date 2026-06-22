@@ -47,6 +47,7 @@
 #include "auth/cache.hh"
 #include "auth/common.hh"
 #include "db/config.hh"
+#include "mutation/single_row_partition.hh"
 #include "db/batchlog_manager.hh"
 #include "schema/schema_builder.hh"
 #include "schema/compression_initializer.hh"
@@ -560,6 +561,9 @@ private:
             cfg->broadcast_to_all_shards().get();
             smp::invoke_on_all([&] {
                 sstables::global_cache_index_pages = cfg->cache_index_pages.operator utils::updateable_value<bool>();
+            }).get();
+            smp::invoke_on_all([&] {
+                ::enable_single_row_partition = cfg->enable_single_row_partition();
             }).get();
             create_directories((data_dir_path + "/system").c_str());
             create_directories(cfg->commitlog_directory().c_str());
