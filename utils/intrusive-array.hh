@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <limits>
 #include <utility>
+#include <boost/intrusive/parent_from_member.hpp>
 
 #include "utils/assert.hh"
 #include "utils/collection-concepts.hh"
@@ -331,7 +332,14 @@ public:
             ptr--;
         }
 
-        static_assert(offsetof(intrusive_array, _data[0].object) == 0);
-        return *reinterpret_cast<intrusive_array*>(ptr);
+        // ptr now addresses _data[0].object. Since object is the first member
+        // of the maybe_constructed union and _data[0] is the first array
+        // element, ptr also addresses the _data array. Recover the enclosing
+        // array from its _data member. get_parent_from_member computes the
+        // offset without offsetof(), which would otherwise warn under
+        // -Winvalid-offsetof because T (e.g. cache_entry) need not be
+        // standard-layout.
+        return *boost::intrusive::get_parent_from_member(
+                reinterpret_cast<maybe_constructed(*)[1]>(ptr), &intrusive_array::_data);
     }
 };
