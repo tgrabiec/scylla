@@ -19,6 +19,7 @@
 #include <boost/intrusive/parent_from_member.hpp>
 
 class static_row;
+enum class partition_format;
 
 // This is MVCC implementation for mutation_partitions.
 //
@@ -525,7 +526,7 @@ class partition_entry {
     partition_version_ref _version;
 
     friend class partition_snapshot;
-    friend class cache_entry;
+    template <partition_format F> friend class cache_entry;
 private:
     void set_version(partition_version*);
 public:

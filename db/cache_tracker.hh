@@ -13,6 +13,7 @@
 #include "utils/updateable_value.hh"
 #include "mutation/partition_version.hh"
 #include "mutation/mutation_cleaner.hh"
+#include "mutation/single_row_partition.hh"
 #include "utils/cached_file_stats.hh"
 #include "sstables/partition_index_cache_stats.hh"
 
@@ -20,7 +21,8 @@
 
 #include <stdint.h>
 
-class cache_entry;
+class cache_entry_base;
+template <partition_format F> class cache_entry;
 
 namespace cache {
 
@@ -99,7 +101,7 @@ public:
     ~cache_tracker();
     void clear();
     void touch(rows_entry&);
-    void insert(cache_entry&);
+    template <partition_format F> void insert(cache_entry<F>&);
     void insert(partition_entry&) noexcept;
     void insert(partition_version&) noexcept;
     void insert(mutation_partition_v2&) noexcept;
@@ -107,7 +109,7 @@ public:
     void remove(rows_entry&) noexcept;
     // Inserts e such that it will be evicted right before more_recent in the absence of later touches.
     void insert(rows_entry& more_recent, rows_entry& e) noexcept;
-    void clear_continuity(cache_entry& ce) noexcept;
+    void clear_continuity(cache_entry_base& ce) noexcept;
     void on_partition_erase() noexcept;
     void on_partition_merge() noexcept;
     void on_partition_hit() noexcept;

@@ -192,8 +192,8 @@ class cache_tester {
 public:
     static partition_snapshot_ptr snapshot_for_key(row_cache& rc, const dht::decorated_key& dk) {
         return rc._read_section(rc._tracker.region(), [&] {
-            cache_entry& e = rc.lookup(dk);
-            return e.partition().read(rc._tracker.region(), rc._tracker.cleaner(), &rc._tracker);
+            auto& e = rc.lookup(dk);
+            return e.get_partition_entry().read(rc._tracker.region(), rc._tracker.cleaner(), &rc._tracker);
         });
     }
 };
