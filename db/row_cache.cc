@@ -1170,11 +1170,7 @@ void row_cache::touch(const dht::decorated_key& dk) {
  _read_section(_tracker.region(), [&] {
     auto i = _partitions.find(dk, dht::ring_position_comparator(*_schema));
     if (i != _partitions.end()) {
-        for (partition_version& pv : i->partition().versions_from_oldest()) {
-            for (rows_entry& row : pv.partition().clustered_rows()) {
-                _tracker.touch(row);
-            }
-        }
+        i->partition().touch(_tracker);
     }
  });
 }
@@ -1183,14 +1179,7 @@ void row_cache::unlink_from_lru(const dht::decorated_key& dk) {
     _read_section(_tracker.region(), [&] {
         auto i = _partitions.find(dk, dht::ring_position_comparator(*_schema));
         if (i != _partitions.end()) {
-            for (partition_version& pv : i->partition().versions_from_oldest()) {
-                for (rows_entry& row : pv.partition().clustered_rows()) {
-                    // Last dummy may already be unlinked.
-                    if (row.is_linked()) {
-                        _tracker.get_lru().remove(row);
-                    }
-                }
-            }
+            i->partition().unlink_from_lru(_tracker);
         }
     });
 }
@@ -1323,7 +1312,7 @@ cache_entry::~cache_entry() {
 }
 
 void cache_entry::evict(cache_tracker& tracker) noexcept {
-    _pe.evict(tracker.cleaner());
+    _pe.evict(tracker);
 }
 
 void row_cache::set_schema(schema_ptr new_schema) noexcept {

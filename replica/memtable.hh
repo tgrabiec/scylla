@@ -76,9 +76,7 @@ public:
 
     size_t size_in_allocator(allocation_strategy& allocator) {
         auto size = size_in_allocator_without_rows(allocator);
-        for (auto&& v : _pe.versions()) {
-            size += v.size_in_allocator(allocator);
-        }
+        size += _pe.external_memory_usage(allocator);
         return size;
     }
 

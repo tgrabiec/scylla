@@ -759,6 +759,37 @@ void partition_entry::evict(mutation_cleaner& cleaner) noexcept {
     }
 }
 
+void partition_entry::evict(cache_tracker& tracker) noexcept {
+    evict(tracker.cleaner());
+}
+
+void partition_entry::touch(cache_tracker& tracker) {
+    for (partition_version& pv : versions_from_oldest()) {
+        for (rows_entry& row : pv.partition().clustered_rows()) {
+            tracker.touch(row);
+        }
+    }
+}
+
+void partition_entry::unlink_from_lru(cache_tracker& tracker) {
+    for (partition_version& pv : versions_from_oldest()) {
+        for (rows_entry& row : pv.partition().clustered_rows()) {
+            // Last dummy may already be unlinked.
+            if (row.is_linked()) {
+                tracker.get_lru().remove(row);
+            }
+        }
+    }
+}
+
+size_t partition_entry::external_memory_usage(allocation_strategy& allocator) {
+    size_t size = 0;
+    for (partition_version& v : versions()) {
+        size += v.size_in_allocator(allocator);
+    }
+    return size;
+}
+
 partition_snapshot_ptr::~partition_snapshot_ptr() {
     if (_snp) {
         auto&& cleaner = _snp->cleaner();
