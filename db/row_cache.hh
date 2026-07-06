@@ -42,12 +42,14 @@ class lsa_manager;
 
 }
 
-// Intrusive set entry which holds partition data.
+// Format-independent base of the intrusive set entry which holds partition data.
 //
-// TODO: Make memtables use this format too.
-class cache_entry {
+// Holds the state and behavior of a cache entry which does not depend on the
+// partition storage type, so that code which does not care about the storage
+// can operate on a cache_entry_base& without depending on the concrete entry.
+class cache_entry_base {
+protected:
     dht::decorated_key _key;
-    partition_entry _pe;
     // True when we know that there is nothing between this entry and the previous one in cache
     struct {
         bool _continuous : 1;
@@ -56,20 +58,50 @@ class cache_entry {
         bool _tail : 1;
         bool _train : 1;
     } _flags{};
+
+    explicit cache_entry_base(dht::decorated_key key) noexcept
+        : _key(std::move(key))
+    { }
+    cache_entry_base(cache_entry_base&&) noexcept = default;
+    ~cache_entry_base() = default;
+
     friend class size_calculator;
-
-    mutation_reader do_read(row_cache&, cache::read_context& ctx, std::unique_ptr<cache::read_context> ctx_holder);
-    mutation_reader do_read(row_cache&, std::unique_ptr<cache::read_context> unique_ctx);
 public:
-    friend class row_cache;
-    friend class cache_tracker;
-
     bool is_head() const noexcept { return _flags._head; }
     void set_head(bool v) noexcept { _flags._head = v; }
     bool is_tail() const noexcept { return _flags._tail; }
     void set_tail(bool v) noexcept { _flags._tail = v; }
     bool with_train() const noexcept { return _flags._train; }
     void set_train(bool v) noexcept { _flags._train = v; }
+
+    const dht::decorated_key& key() const noexcept { return _key; }
+    dht::ring_position_view position() const noexcept {
+        if (is_dummy_entry()) {
+            return dht::ring_position_view::max();
+        }
+        return _key;
+    }
+
+    bool continuous() const noexcept { return _flags._continuous; }
+    void set_continuous(bool value) noexcept { _flags._continuous = value; }
+
+    bool is_dummy_entry() const noexcept { return _flags._dummy_entry; }
+
+    // Found by ADL on cache_entry through its cache_entry_base subobject.
+    friend dht::ring_position_view ring_position_view_to_compare(const cache_entry_base& ce) noexcept { return ce.position(); }
+};
+
+// Intrusive set entry which holds partition data.
+//
+// TODO: Make memtables use this format too.
+class cache_entry final : public cache_entry_base {
+    partition_entry _pe;
+
+    mutation_reader do_read(row_cache&, cache::read_context& ctx, std::unique_ptr<cache::read_context> ctx_holder);
+    mutation_reader do_read(row_cache&, std::unique_ptr<cache::read_context> unique_ctx);
+public:
+    friend class row_cache;
+    friend class cache_tracker;
 
     struct dummy_entry_tag{};
     struct evictable_tag{};
@@ -94,16 +126,6 @@ public:
     // The caller is still responsible for unlinking and destroying this entry.
     void evict(cache_tracker&) noexcept;
 
-    const dht::decorated_key& key() const noexcept { return _key; }
-    dht::ring_position_view position() const noexcept {
-        if (is_dummy_entry()) {
-            return dht::ring_position_view::max();
-        }
-        return _key;
-    }
-
-    friend dht::ring_position_view ring_position_view_to_compare(const cache_entry& ce) noexcept { return ce.position(); }
-
     const partition_entry& partition() const noexcept { return _pe; }
     partition_entry& partition() { return _pe; }
     const schema_ptr& schema() const noexcept { return _pe.get_schema(); }
@@ -111,10 +133,6 @@ public:
     mutation_reader read(row_cache&, std::unique_ptr<cache::read_context>);
     mutation_reader read(row_cache&, cache::read_context&, utils::phased_barrier::phase_type);
     mutation_reader read(row_cache&, std::unique_ptr<cache::read_context>, utils::phased_barrier::phase_type);
-    bool continuous() const noexcept { return _flags._continuous; }
-    void set_continuous(bool value) noexcept { _flags._continuous = value; }
-
-    bool is_dummy_entry() const noexcept { return _flags._dummy_entry; }
 };
 
 using cache_invalidation_filter = std::function<bool(const dht::decorated_key&)>;

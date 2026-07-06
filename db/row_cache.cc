@@ -1302,9 +1302,8 @@ row_cache::row_cache(schema_ptr s, snapshot_source src, cache_tracker& tracker, 
 }
 
 cache_entry::cache_entry(cache_entry&& o) noexcept
-    : _key(std::move(o._key))
+    : cache_entry_base(std::move(o))
     , _pe(std::move(o._pe))
-    , _flags(o._flags)
 {
 }
 
@@ -1320,13 +1319,13 @@ void row_cache::set_schema(schema_ptr new_schema) noexcept {
 }
 
 cache_entry::cache_entry(dummy_entry_tag)
-    : _key{dht::token(), partition_key::make_empty()}
+    : cache_entry_base(dht::decorated_key{dht::token(), partition_key::make_empty()})
 {
     _flags._dummy_entry = true;
 }
 
 cache_entry::cache_entry(schema_ptr s, const dht::decorated_key& key, const mutation_partition& p)
-    : _key(key)
+    : cache_entry_base(key)
     , _pe(partition_entry::make_evictable(*s, mutation_partition(*s, p)))
 { }
 
@@ -1335,7 +1334,7 @@ cache_entry::cache_entry(schema_ptr s, dht::decorated_key&& key, mutation_partit
 { }
 
 cache_entry::cache_entry(evictable_tag, schema_ptr s, dht::decorated_key&& key, partition_entry&& pe) noexcept
-    : _key(std::move(key))
+    : cache_entry_base(std::move(key))
     , _pe(std::move(pe))
 { }
 
