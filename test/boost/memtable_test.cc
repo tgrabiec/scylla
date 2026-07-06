@@ -494,50 +494,67 @@ SEASTAR_TEST_CASE(test_fast_forward_to_after_memtable_is_flushed) {
     });
 }
 
+// Invokes test_body(s, ms) twice: once with a schema that has a clustering key
+// (generic partition format) and once without (single_row partition format), so
+// that both memtable storage formats are exercised. ms holds two partitions.
+static void for_each_partition_format(std::function<void(schema_ptr, const utils::chunked_vector<mutation>&)> test_body) {
+    {
+        random_mutation_generator gen(random_mutation_generator::generate_counters::no);
+        test_body(gen.schema(), gen(2));
+    }
+    {
+        // maybe_without_clustering::yes drops the clustering key only for some
+        // seeds, so retry until it does to get the single_row format.
+        std::optional<random_mutation_generator> gen;
+        do {
+            gen.emplace(random_mutation_generator::generate_counters::no, local_shard_only::yes,
+                    random_mutation_generator::generate_uncompactable::no,
+                    std::nullopt, "ks", "cf",
+                    random_mutation_generator::compress::yes,
+                    random_mutation_generator::maybe_without_clustering::yes);
+        } while (gen->schema()->clustering_key_size() != 0);
+        test_body(gen->schema(), (*gen)(2));
+    }
+}
+
 SEASTAR_TEST_CASE(test_exception_safety_of_partition_range_reads) {
     return seastar::async([] {
-        random_mutation_generator gen(random_mutation_generator::generate_counters::no);
-        auto s = gen.schema();
         tests::reader_concurrency_semaphore_wrapper semaphore;
-        utils::chunked_vector<mutation> ms = gen(2);
-
-        auto mt = make_memtable(s, ms).get();
-        memory::with_allocation_failures([&] {
-            assert_that(mt->make_mutation_reader(s, semaphore.make_permit(), query::full_partition_range))
-                .produces(ms);
+        for_each_partition_format([&] (schema_ptr s, const utils::chunked_vector<mutation>& ms) {
+            auto mt = make_memtable(s, ms).get();
+            memory::with_allocation_failures([&] {
+                assert_that(mt->make_mutation_reader(s, semaphore.make_permit(), query::full_partition_range))
+                    .produces(ms);
+            });
         });
     });
 }
 
 SEASTAR_TEST_CASE(test_exception_safety_of_flush_reads) {
     return seastar::async([] {
-        random_mutation_generator gen(random_mutation_generator::generate_counters::no);
-        auto s = gen.schema();
         tests::reader_concurrency_semaphore_wrapper semaphore;
-        utils::chunked_vector<mutation> ms = gen(2);
-
-        auto mt = make_memtable(s, ms).get();
-        memory::with_allocation_failures([&] {
-            auto revert = defer([&] {
-                mt->revert_flushed_memory();
+        for_each_partition_format([&] (schema_ptr s, const utils::chunked_vector<mutation>& ms) {
+            auto mt = make_memtable(s, ms).get();
+            memory::with_allocation_failures([&] {
+                auto revert = defer([&] {
+                    mt->revert_flushed_memory();
+                });
+                assert_that(mt->make_flush_reader(s, semaphore.make_permit()))
+                    .produces(ms);
             });
-            assert_that(mt->make_flush_reader(s, semaphore.make_permit()))
-                .produces(ms);
         });
     });
 }
 
 SEASTAR_TEST_CASE(test_exception_safety_of_single_partition_reads) {
     return seastar::async([] {
-        random_mutation_generator gen(random_mutation_generator::generate_counters::no);
-        auto s = gen.schema();
         tests::reader_concurrency_semaphore_wrapper semaphore;
-        utils::chunked_vector<mutation> ms = gen(2);
-
-        auto mt = make_memtable(s, ms).get();
-        memory::with_allocation_failures([&] {
-            assert_that(mt->make_mutation_reader(s, semaphore.make_permit(), dht::partition_range::make_singular(ms[1].decorated_key())))
-                .produces(ms[1]);
+        for_each_partition_format([&] (schema_ptr s, const utils::chunked_vector<mutation>& ms) {
+            auto mt = make_memtable(s, ms).get();
+            memory::with_allocation_failures([&] {
+                assert_that(mt->make_mutation_reader(s, semaphore.make_permit(), dht::partition_range::make_singular(ms[1].decorated_key())))
+                    .produces(ms[1]);
+            });
         });
     });
 }
