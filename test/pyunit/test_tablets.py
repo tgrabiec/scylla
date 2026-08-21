@@ -1,14 +1,16 @@
 # Python rendition of test/boost/tablets_test.cc::test_load_balancing_with_empty_node.
 #
-# Demonstrates the proposed scylla_test bindings: an in-process cql_test_env
-# driven from pytest. No node boot, no cluster manager — the same granularity
-# as the boost test, with pytest ergonomics.
+# Runs against an in-process cql_test_env via the scylla_test bindings.
+# No node boot, no cluster manager — the same granularity as the boost
+# test, with pytest ergonomics. Run with:
+#
+#   tools/toolchain/dbuild build/dev/test/pyunit/runner test/pyunit -v
 #
 # The `env` fixture (see conftest.py) constructs cql_test_env on a background
 # seastar reactor. Calls below block the Python thread until the underlying
 # future resolves; the GIL is released while waiting.
 
-from scylla_test.tablets import TabletMap
+from scylla_test import TabletMap
 
 
 def test_load_balancing_with_empty_node(env):

@@ -527,6 +527,7 @@ ldap_tests = set([
 
 scylla_tests = set([
     'test/boost/combined_tests',
+    'test/pyunit/runner',
     'test/boost/UUID_test',
     'test/boost/url_parse_test',
     'test/boost/advanced_rpc_compressor_test',
@@ -1688,6 +1689,15 @@ for t in sorted(scylla_tests):
     else:
         deps[t] += scylla_core + alternator + idls + scylla_tests_generic_dependencies
 
+# pyunit runner embeds CPython (vendored pybind11 headers) and links the
+# tablets test helpers from tablets_test.cc.
+deps['test/pyunit/runner'] += ['test/boost/tablets_test.cc']
+python_embed_cflags = pkg_config('python3-embed', '--cflags')
+python_embed_libs = pkg_config('python3-embed', '--libs')
+for m in modes:
+    modes[m]['per_src_extra_cxxflags']['test/pyunit/runner.cc'] = \
+        python_embed_cflags + ' -Itest/pyunit/pybind11/include'
+
 for t in sorted(perf_tests | perf_standalone_tests):
     deps[t] = [t + '.cc'] + scylla_tests_dependencies
     deps[t] += ['test/perf/perf.cc', 'seastar/tests/perf/linux_perf_event.cc']
@@ -2775,6 +2785,8 @@ def write_build_file(f,
                     local_libs += f' {seastar_testing_libs}'
                 else:
                     local_libs += ' ' + '-lgnutls' + ' ' + '-lboost_unit_test_framework'
+                if binary == 'test/pyunit/runner':
+                    local_libs += ' ' + python_embed_libs
                 # Our code's debugging information is huge, and multiplied
                 # by many tests yields ridiculous amounts of disk space.
                 # So we strip the tests by default; The user can very
