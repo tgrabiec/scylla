@@ -48,3 +48,17 @@ def test_load_balancing_with_empty_node(env):
     for host in (host1, host2, host3):
         assert 1 < load.tablet_count(host) <= 3
         assert 0 < load.avg_tablet_count(host) <= 2
+
+
+def test_fresh_env_per_test(env):
+    # The fixture boots a fresh in-process env for each test: the same
+    # setup calls work again with no state carried over from the test above.
+    # The keyspace's RF targets the new DC, so its tablet is allocated on
+    # the node just added there.
+    topo = env.topology_builder()
+    host = topo.add_node(shards=1)
+    ks = env.add_keyspace(rf={topo.dc: 1}, initial_tablets=1)
+    env.add_table(ks)
+
+    load = env.load_sketch()
+    assert load.tablet_count(host) == 1

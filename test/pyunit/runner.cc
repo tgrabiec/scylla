@@ -47,7 +47,9 @@ using namespace seastar;
 using namespace locator;
 using namespace service;
 
-// Test helpers linked in from test/boost/tablets_test.cc.
+// Test helpers linked in from test/boost/tablets_test.cc. combined_tests
+// wraps each test file in a namespace named after it.
+namespace tablets_test {
 void mutate_tablets(cql_test_env& e, seastar::noncopyable_function<future<>(tablet_metadata&)> mutator);
 void rebalance_tablets(cql_test_env& e,
                        shared_load_stats* load_stats,
@@ -55,6 +57,7 @@ void rebalance_tablets(cql_test_env& e,
                        std::function<bool(const migration_plan&)> stop,
                        bool auto_split,
                        bool use_resize_hint);
+}
 
 namespace {
 
@@ -181,7 +184,7 @@ struct py_tablet_update {
 
     void apply() {
         on_reactor([this] {
-            mutate_tablets(env(), [this] (tablet_metadata& tmeta) -> future<> {
+            tablets_test::mutate_tablets(env(), [this] (tablet_metadata& tmeta) -> future<> {
                 for (auto& [table, data] : staged) {
                     tablet_map tmap(data.tablet_count);
                     auto tid = tmap.first_tablet();
@@ -275,7 +278,7 @@ struct py_env {
     void rebalance_tablets(std::optional<py_load_stats> stats) {
         on_reactor([stats] {
             shared_load_stats* ls = stats ? &topo(stats->topo_idx).get_shared_load_stats() : nullptr;
-            ::rebalance_tablets(env(), ls, {}, nullptr, true, false);
+            tablets_test::rebalance_tablets(env(), ls, {}, nullptr, true, false);
         });
     }
 };
