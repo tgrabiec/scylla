@@ -53,16 +53,20 @@ cql_test_config tablet_cql_test_config() {
 }
 
 static
-future<table_id> add_table(cql_test_env& e, sstring test_ks_name = "") {
+future<table_id> add_table(cql_test_env& e, sstring test_ks_name = "", std::map<sstring, sstring> tablet_options = {}) {
     auto id = table_id(utils::UUID_gen::get_time_UUID());
     co_await e.create_table([&] (std::string_view ks_name) {
         if (!test_ks_name.empty()) {
             ks_name = test_ks_name;
         }
-        return *schema_builder(this_smp_shard_count(), ks_name, id.to_sstring(), id)
-                .with_column("p1", utf8_type, column_kind::partition_key)
-                .with_column("r1", int32_type)
-                .build();
+        auto builder = schema_builder(this_smp_shard_count(), ks_name, id.to_sstring(), id);
+        builder.with_column("p1", utf8_type, column_kind::partition_key)
+               .with_column("r1", int32_type);
+        if (!tablet_options.empty()) {
+            auto opts = tablet_options;
+            builder.set_tablet_options(std::move(opts));
+        }
+        return *builder.build();
     });
     co_return id;
 }
@@ -621,6 +625,201 @@ void test_parallel_scaleout(const bpo::variables_map& opts) {
     }, cfg).get();
 }
 
+// Reproduces the conditions behind SCYLLADB-3905: a tablet count reduction
+// which merges every table at once. Merge requires sibling tablets to be
+// co-located on the same replica shards, which the balancer achieves mostly
+// with intra-node migrations. Each plan corresponds to a batch of topology
+// transitions (barriers) in production, and each migration to a session
+// which every node drains on every shard, so the number of plans and
+// migrations produced here approximates the barrier/session storm.
+//
+// Modeled after a production cluster: 52 tables, all at 256 tablets,
+// merging to 128 after the per-table tablet count floor drops.
+void test_count_reduction_merge(const bpo::variables_map& opts) {
+    const shard_id shard_count = opts["shards"].as<int>();
+    const int rf = opts["rf"].as<int>();
+    const int nodes = opts["nodes"].as<int>();
+    const int nr_tables = opts["tables"].as<int>();
+    const int tablets_before = opts["tablets-before"].as<int>();
+    const int tablets_after = opts["tablets-after"].as<int>();
+    const uint64_t tablet_size = uint64_t(opts["tablet-size-mib"].as<int>()) << 20;
+
+    auto cfg = tablet_cql_test_config();
+    // Keep the min_tablet_count floors effective so tablet counts match the
+    // modeled cluster exactly, instead of being scaled down by the goal.
+    cfg.db_config->tablets_per_shard_goal(1000);
+    do_with_cql_env_thread([&] (auto& e) {
+        topology_builder topo(e);
+        locator::load_stats stats;
+
+        std::vector<endpoint_dc_rack> racks;
+        racks.push_back(topo.rack());
+        for (int i = 1; i < rf; ++i) {
+            racks.push_back(topo.start_new_rack());
+        }
+
+        for (int i = 0; i < nodes; ++i) {
+            auto host = topo.add_node(service::node_state::normal, shard_count, racks[i % racks.size()]);
+            const uint64_t capacity = default_target_tablet_size * shard_count * 100;
+            stats.capacity[host] = capacity;
+            stats.tablet_stats[host].effective_capacity = capacity;
+            testlog.info("Added new node: {}", host);
+        }
+
+        auto& stm = e.shared_token_metadata().local();
+        auto& talloc = e.get_tablet_allocator().local();
+
+        testlog.info("Creating schema");
+        auto ks = add_keyspace(e, {{topo.dc(), rf}}, 0);
+        std::vector<table_id> tables;
+        for (int i = 0; i < nr_tables; ++i) {
+            tables.push_back(add_table(e, ks, {{"min_tablet_count", fmt::to_string(tablets_before)}}).get());
+        }
+
+        auto tablet_count_of = [&] (table_id table) {
+            return stm.get()->tablets().get_tablet_map(table).tablet_count();
+        };
+
+        auto check_tablet_counts = [&] (size_t expected) {
+            for (auto table : tables) {
+                auto count = tablet_count_of(table);
+                if (count != expected) {
+                    throw std::runtime_error(format("Table {} has {} tablets, expected {}", table, count, expected));
+                }
+            }
+        };
+
+        check_tablet_counts(tablets_before);
+
+        // Uniform per-replica tablet sizes and per-table totals. The sizing
+        // logic needs stats.tables to compute average tablet size.
+        for (auto table : tables) {
+            auto& tmap = stm.get()->tablets().get_tablet_map(table);
+            stats.tables[table].size_in_bytes = tmap.tablet_count() * tablet_size;
+            tmap.for_each_tablet([&] (tablet_id tid, const tablet_info& ti) -> future<> {
+                for (const auto& replica : ti.replicas) {
+                    stats.tablet_stats[replica.host].tablet_sizes[table][tmap.get_token_range(tid)] = tablet_size;
+                }
+                return make_ready_future<>();
+            }).get();
+        }
+
+        testlog.info("Initial rebalancing");
+        rebalance_tablets(e, stats);
+        check_tablet_counts(tablets_before);
+
+        testlog.info("Dropping min_tablet_count: {} -> {}", tablets_before, tablets_after);
+        for (auto table : tables) {
+            e.execute_cql(fmt::format("alter table {}.\"{}\" with tablets = {{'min_tablet_count': '{}'}}",
+                                      ks, table, tablets_after)).get();
+        }
+
+        struct storm_stats {
+            size_t plans = 0;
+            size_t migrations = 0;
+            size_t intranode_migrations = 0;
+            size_t resize_decisions = 0;
+            size_t finalizations = 0;
+            seconds_double planning_time = seconds_double(0);
+        };
+        storm_stats storm;
+
+        abort_source as;
+        auto guard = e.get_raft_group0_client().start_operation(as).get();
+
+        // Sanity limit to avoid infinite loops.
+        auto max_iterations = 1 + get_tablet_count(stm.get()->tablets()) * 10;
+
+        for (size_t i = 0; ; ++i) {
+            if (i == max_iterations) {
+                throw std::runtime_error("merge convergence not reached within limit");
+            }
+
+            auto load_stats_p = make_lw_shared<locator::load_stats>(stats);
+            auto start_time = std::chrono::steady_clock::now();
+            auto plan = talloc.balance_tablets(stm.get(), nullptr, nullptr, load_stats_p).get();
+            storm.planning_time += std::chrono::duration_cast<seconds_double>(std::chrono::steady_clock::now() - start_time);
+
+            if (plan.empty()) {
+                break;
+            }
+            storm.plans++;
+
+            size_t intranode = 0;
+            for (const auto& mig : plan.migrations()) {
+                intranode += mig.kind == tablet_transition_kind::intranode_migration;
+            }
+            storm.migrations += plan.migrations().size();
+            storm.intranode_migrations += intranode;
+            storm.resize_decisions += plan.resize_plan().resize.size();
+            storm.finalizations += plan.resize_plan().finalize_resize.size();
+
+            testlog.info("Plan {}: migrations={} (intranode={}), resize decisions={}, finalizations={}",
+                         i + 1, plan.migrations().size(), intranode,
+                         plan.resize_plan().resize.size(), plan.resize_plan().finalize_resize.size());
+
+            // Apply migrations and new resize decisions.
+            stm.mutate_token_metadata([&] (token_metadata& tm) -> future<> {
+                for (auto&& mig : plan.migrations()) {
+                    co_await tm.tablets().mutate_tablet_map_async(mig.tablet.table, [&mig] (tablet_map& tmap) {
+                        auto tinfo = tmap.get_tablet_info(mig.tablet.tablet);
+                        tinfo.replicas = replace_replica(tinfo.replicas, mig.src, mig.dst);
+                        tmap.set_tablet(mig.tablet.tablet, tinfo);
+                        return make_ready_future();
+                    });
+                    if (mig.src && mig.dst && mig.src->host != mig.dst->host) {
+                        auto& tmap = tm.tablets().get_tablet_map(mig.tablet.table);
+                        auto new_stats = stats.migrate_tablet_size(mig.src->host, mig.dst->host, mig.tablet,
+                                                                   tmap.get_token_range(mig.tablet.tablet));
+                        if (!new_stats) {
+                            throw std::runtime_error(format("Unable to migrate tablet size in load_stats for migration: {}", mig));
+                        }
+                        stats = std::move(*new_stats);
+                    }
+                }
+                for (auto [table, resize_decision] : plan.resize_plan().resize) {
+                    co_await tm.tablets().mutate_tablet_map_async(table, [&resize_decision] (tablet_map& tmap) {
+                        resize_decision.sequence_number = tmap.resize_decision().sequence_number + 1;
+                        tmap.set_resize_decision(resize_decision);
+                        return make_ready_future();
+                    });
+                }
+            }).get();
+
+            // Finalize merges like the topology coordinator does: replace the
+            // tablet map with a resized one, then reconcile tablet sizes.
+            for (auto table : plan.resize_plan().finalize_resize) {
+                auto old_tm = stm.get();
+                auto new_tmap = talloc.resize_tablets(old_tm, table).get();
+                auto new_resize_decision = locator::resize_decision{};
+                new_resize_decision.sequence_number = old_tm->tablets().get_tablet_map(table).resize_decision().next_sequence_number();
+                new_tmap.set_resize_decision(std::move(new_resize_decision));
+
+                stm.mutate_token_metadata([&] (token_metadata& tm) {
+                    tm.tablets().set_tablet_map(table, std::move(new_tmap));
+                    return make_ready_future<>();
+                }).get();
+
+                auto reconciled = stats.reconcile_tablets_resize({table}, *old_tm, *stm.get());
+                if (!reconciled) {
+                    throw std::runtime_error(format("Unable to reconcile load_stats after resize of table {}", table));
+                }
+                stats = *reconciled;
+            }
+        }
+
+        save_tablet_metadata(e.local_db(), stm.get()->tablets(), guard.write_timestamp()).get();
+        e.get_storage_service().local().update_tablet_metadata({}).get();
+
+        check_tablet_counts(tablets_after);
+
+        testlog.info("Merge storm: plans={}, migrations={} (intranode={}, internode={}), resize decisions={}, finalizations={}, planning time={:.3f} [s]",
+                     storm.plans, storm.migrations, storm.intranode_migrations,
+                     storm.migrations - storm.intranode_migrations,
+                     storm.resize_decisions, storm.finalizations, storm.planning_time.count());
+    }, cfg).get();
+}
+
 future<> run_simulation(const params& p, const sstring& name = "") {
     testlog.info("[run {}] params: {}", name, p);
 
@@ -747,6 +946,20 @@ const std::map<operation, operation_func> operations_with_func{
             typed_option<double>("tablet-size-deviation-factor", 0.5, "Deviation factor for the tablet size random generator.")
           }
         }, &test_parallel_scaleout},
+
+        {{"count-reduction-merge",
+         "Simulates a tablet count reduction which merges all tables, colocating siblings via intra-node migrations (SCYLLADB-3905)",
+         "",
+         {
+            typed_option<int>("tables", 52, "Table count."),
+            typed_option<int>("tablets-before", 256, "Tablets per table before the count reduction."),
+            typed_option<int>("tablets-after", 128, "Tablets per table after the count reduction."),
+            typed_option<int>("rf", 3, "Replication factor."),
+            typed_option<int>("nodes", 3, "Number of nodes in the cluster."),
+            typed_option<int>("shards", 60, "Number of shards per node."),
+            typed_option<int>("tablet-size-mib", 22, "Tablet size [MiB]."),
+          }
+        }, &test_count_reduction_merge},
     }
 };
 
