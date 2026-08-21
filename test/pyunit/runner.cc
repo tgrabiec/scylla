@@ -133,7 +133,7 @@ void stop_env() {
             B.env_stop->set_value();
             B.env_stop.reset();
         }
-        return std::move(B.env_done);
+        return std::exchange(B.env_done, seastar::make_ready_future<>());
     }).get();
 }
 
@@ -423,7 +423,7 @@ int main(int argc, char** argv) {
             B.env_stop->set_value();
             B.env_stop.reset();
         }
-        return std::move(B.env_done).finally([] {
+        return std::exchange(B.env_done, seastar::make_ready_future<>()).finally([] {
             B.app_stop->set_value();
         });
     }).get();
