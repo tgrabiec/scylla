@@ -29,6 +29,8 @@
 #include "db/extensions.hh"
 #include "db/tags/extension.hh"
 #include "gms/gossiper.hh"
+#include "service/storage_service.hh"
+#include "locator/tablets.hh"
 #include "audit/audit.hh"
 #include "audit/audit_rule.hh"
 #include "keys/keys.hh"
@@ -36,6 +38,8 @@
 #include "replica/database.hh"
 #include <seastar/core/sleep.hh>
 #include <seastar/core/sharded.hh>
+#include <seastar/core/loop.hh>
+#include <seastar/core/metrics_api.hh>
 
 static const sstring table_name = "cf";
 
@@ -107,6 +111,7 @@ struct test_config {
     sstring timeout;
     bool bypass_cache;
     std::optional<unsigned> initial_tablets;
+    unsigned tablet_migration_batch = 0; // 0 = no migrations
     unsigned collection = 0;
     db::consistency_level consistency_level;
     bool shard_aware;
@@ -200,7 +205,6 @@ static std::optional<bytes> next_key(test_config& cfg, const std::vector<uint64_
 }
 
 static std::vector<perf_result> test_read(cql_test_env& env, test_config& cfg, sharded<std::vector<uint64_t>>& shard_seqs) {
-    create_partitions(env, cfg);
     sstring query = "select \"C0\", \"C1\", \"C2\", \"C3\", \"C4\"";
     if (cfg.collection > 0) {
         query += ", \"CC\"";
@@ -253,7 +257,6 @@ static std::vector<perf_result> test_write(cql_test_env& env, test_config& cfg, 
 }
 
 static std::vector<perf_result> test_delete(cql_test_env& env, test_config& cfg, sharded<std::vector<uint64_t>>& shard_seqs) {
-    create_partitions(env, cfg);
     sstring usings;
     if (!cfg.timeout.empty()) {
         usings += "USING TIMEOUT " + cfg.timeout;
@@ -310,6 +313,107 @@ static schema_ptr make_counter_schema(std::string_view ks_name) {
             .build();
 }
 
+// Snapshot of this shard's reactor_stalls histogram (microsecond buckets,
+// counts task runtimes exceeding 2x task quota; unlike stall reports, not
+// rate-limited).
+static seastar::metrics::histogram reactor_stalls_snapshot() {
+    const auto& vm = seastar::metrics::impl::get_value_map();
+    auto it = vm.find("reactor_stalls");
+    if (it == vm.end() || it->second.empty()) {
+        return {};
+    }
+    return (*it->second.begin()->second)().get_histogram();
+}
+
+static std::vector<seastar::metrics::histogram> reactor_stalls_all_shards() {
+    std::vector<seastar::metrics::histogram> res(this_smp_shard_count());
+    for (unsigned shard = 0; shard < this_smp_shard_count(); ++shard) {
+        res[shard] = smp::submit_to(shard, [] { return reactor_stalls_snapshot(); }).get();
+    }
+    return res;
+}
+
+struct stall_stats {
+    uint64_t count = 0;
+    double max_us = 0; // upper bound of the highest bucket hit
+};
+
+static stall_stats stalls_delta(const seastar::metrics::histogram& before, const seastar::metrics::histogram& after) {
+    stall_stats r;
+    r.count = after.sample_count - before.sample_count;
+    uint64_t prev_a = 0;
+    uint64_t prev_b = 0;
+    for (size_t i = 0; i < after.buckets.size(); ++i) {
+        // Buckets hold cumulative counts.
+        uint64_t cum_b = i < before.buckets.size() ? before.buckets[i].count : 0;
+        if ((after.buckets[i].count - prev_a) > (cum_b - prev_b)) {
+            r.max_us = after.buckets[i].upper_bound;
+        }
+        prev_a = after.buckets[i].count;
+        prev_b = cum_b;
+    }
+    // Overflow bucket: only a lower bound for max is known.
+    if (!after.buckets.empty() && (after.sample_count - prev_a) > (before.sample_count - prev_b)) {
+        r.max_us = after.buckets.back().upper_bound;
+    }
+    return r;
+}
+
+// Swaps tablets between shards in batches for the duration of the workload.
+// Each move is a full intra-node migration: topology transition with global
+// barriers, storage clone on the node (memtable flush, sstable hard links),
+// and source-side cleanup (unlinks). Reproduces the fs-metadata and logging
+// storm seen with mass sibling-colocation migrations (CUSTOMER-651).
+class tablet_migrator {
+    cql_test_env& _env;
+    unsigned _batch;
+    bool _stop = false;
+    uint64_t _migrations = 0;
+    size_t _next = 0; // rotates batches over all tablets
+    future<> _done = make_ready_future<>();
+public:
+    tablet_migrator(cql_test_env& env, unsigned batch) : _env(env), _batch(batch) {}
+    void start() {
+        _done = seastar::async([this] { run(); });
+    }
+    future<> stop() {
+        _stop = true;
+        return std::move(_done);
+    }
+    uint64_t migrations() const { return _migrations; }
+private:
+    void run() {
+        auto& ss = _env.get_storage_service().local();
+        auto table = _env.local_db().find_column_family("ks", table_name).schema()->id();
+        const auto shards = this_smp_shard_count();
+        while (!_stop) {
+            struct tablet_move {
+                dht::token last_token;
+                locator::tablet_replica src;
+                locator::tablet_replica dst;
+            };
+            std::vector<tablet_move> moves;
+            {
+                // No yields while the map reference is alive.
+                const auto& tmap = _env.local_db().get_token_metadata().tablets().get_tablet_map(table);
+                const auto count = tmap.tablet_count();
+                for (size_t i = 0; i < std::min<size_t>(_batch, count); ++i) {
+                    auto tid = locator::tablet_id((_next + i) % count);
+                    auto src = tmap.get_tablet_info(tid).replicas.front();
+                    auto dst = src;
+                    dst.shard = (src.shard + 1) % shards;
+                    moves.push_back({tmap.get_last_token(tid), src, dst});
+                }
+                _next = (_next + moves.size()) % count;
+            }
+            parallel_for_each(moves, [&] (tablet_move& m) {
+                return ss.move_tablet(table, m.last_token, m.src, m.dst);
+            }).get();
+            _migrations += moves.size();
+        }
+    }
+};
+
 static std::vector<perf_result> do_cql_test(cql_test_env& env, test_config& cfg) {
     std::cout << "Running test with config: " << cfg << std::endl;
     env.create_table([&cfg] (auto ks_name) {
@@ -347,19 +451,62 @@ static std::vector<perf_result> do_cql_test(cql_test_env& env, test_config& cfg)
         s = table[this_shard_id()];
     }).get();
 
-    switch (cfg.mode) {
-    case test_config::run_mode::read:
-        return test_read(env, cfg, shard_seqs);
-    case test_config::run_mode::write:
-        if (cfg.counters) {
-            return test_counter_update(env, cfg, shard_seqs);
-        } else {
-            return test_write(env, cfg, shard_seqs);
+    // Populate before starting migrations so they only disturb the measured phase.
+    if (cfg.mode == test_config::run_mode::read || cfg.mode == test_config::run_mode::del) {
+        create_partitions(env, cfg);
+    }
+
+    std::optional<tablet_migrator> migrator;
+    if (cfg.tablet_migration_batch) {
+        migrator.emplace(env, cfg.tablet_migration_batch);
+        migrator->start();
+    }
+    auto stop_migrator = defer([&migrator] noexcept {
+        if (migrator) {
+            try {
+                migrator->stop().get();
+            } catch (...) {
+                fmt::print(std::cerr, "tablet migrator failed: {}\n", std::current_exception());
+            }
         }
-    case test_config::run_mode::del:
-        return test_delete(env, cfg, shard_seqs);
+    });
+
+    auto run = [&] {
+        switch (cfg.mode) {
+        case test_config::run_mode::read:
+            return test_read(env, cfg, shard_seqs);
+        case test_config::run_mode::write:
+            if (cfg.counters) {
+                return test_counter_update(env, cfg, shard_seqs);
+            } else {
+                return test_write(env, cfg, shard_seqs);
+            }
+        case test_config::run_mode::del:
+            return test_delete(env, cfg, shard_seqs);
+        };
+        abort();
     };
-    abort();
+    auto stalls_before = reactor_stalls_all_shards();
+    auto results = run();
+    auto stalls_after = reactor_stalls_all_shards();
+
+    if (migrator) {
+        stop_migrator.cancel();
+        migrator->stop().get();
+        std::cout << "Tablet migrations completed: " << migrator->migrations() << std::endl;
+    }
+
+    stall_stats total;
+    for (unsigned shard = 0; shard < this_smp_shard_count(); ++shard) {
+        auto d = stalls_delta(stalls_before[shard], stalls_after[shard]);
+        total.count += d.count;
+        total.max_us = std::max(total.max_us, d.max_us);
+        if (d.count) {
+            fmt::print("Reactor stalls on shard {}: count={} max<={:.1f}ms\n", shard, d.count, d.max_us / 1000.0);
+        }
+    }
+    fmt::print("Reactor stalls total: count={} max<={:.1f}ms\n", total.count, total.max_us / 1000.0);
+    return results;
 }
 
 void write_json_result(std::string result_file, const test_config& cfg, const aggregated_perf_results& agg) {
@@ -418,6 +565,7 @@ int scylla_simple_query_main(int argc, char** argv) {
         ("strongly-consistent-tables", "use strongly consistent tables")
         ("consistency-level", bpo::value<std::string>()->default_value("QUORUM"), "consistency level used for read and write operations")
         ("initial-tablets", bpo::value<unsigned>()->default_value(128), "initial number of tablets")
+        ("tablet-migration-batch", bpo::value<unsigned>()->default_value(0), "run intra-node tablet migrations concurrently with the workload, this many tablets at a time (requires --tablets and >= 2 shards)")
         ("sstable-summary-ratio", bpo::value<double>(), "Generate summary entry, so that summary file size / data file size ~= this ratio")
         ("sstable-format", bpo::value<std::string>(), "SSTable format name to use")
         ("flush", "flush memtables before test")
@@ -465,6 +613,10 @@ int scylla_simple_query_main(int argc, char** argv) {
             }
             std::cout << "sstable-format=" << db_cfg->sstable_format() << '\n';
             cql_test_config cfg(db_cfg);
+            if (app.configuration()["tablet-migration-batch"].as<unsigned>()) {
+                // Tablet migration streaming goes through loopback RPC.
+                cfg.ms_listen = true;
+            }
             if (app.configuration().contains("tablets")) {
                 cfg.db_config->tablets_mode_for_new_keyspaces.set(db::tablets_mode_t::mode::enabled);
                 cfg.initial_tablets = app.configuration()["initial-tablets"].as<unsigned>();
@@ -496,6 +648,15 @@ int scylla_simple_query_main(int argc, char** argv) {
             }
             if (app.configuration().contains("tablets")) {
                 cfg.initial_tablets = app.configuration()["initial-tablets"].as<unsigned>();
+            }
+            cfg.tablet_migration_batch = app.configuration()["tablet-migration-batch"].as<unsigned>();
+            if (cfg.tablet_migration_batch) {
+                if (!cfg.initial_tablets) {
+                    throw std::invalid_argument("--tablet-migration-batch requires --tablets");
+                }
+                if (this_smp_shard_count() < 2) {
+                    throw std::invalid_argument("--tablet-migration-batch requires at least 2 shards");
+                }
             }
             if (app.configuration().contains("write")) {
                 cfg.mode = test_config::run_mode::write;
