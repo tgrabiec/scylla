@@ -231,17 +231,24 @@ public:
         return cap;
     }
 
+    // num_tokens sets the size of the node's vnode ring slice. supported_features
+    // goes into system.topology as given; pass a realistic set to make the row
+    // cost representative of a real cluster.
     locator::host_id add_node(service::node_state state = service::node_state::normal,
                               unsigned shard_count = 1,
-                              std::optional<endpoint_dc_rack> rack_override = {})
+                              std::optional<endpoint_dc_rack> rack_override = {},
+                              unsigned num_tokens = 1,
+                              std::set<sstring> supported_features = {})
     {
         ++_nr_nodes;
 
         auto ip = make_node_address(_nr_nodes);
         auto id = locator::host_id(utils::UUID_gen::get_time_UUID());
         auto dc_rack = rack_override.value_or(rack());
-        dht::token token = new_token();
-        std::unordered_set<dht::token> tokens({token});
+        std::unordered_set<dht::token> tokens;
+        while (tokens.size() < num_tokens) {
+            tokens.insert(new_token());
+        }
 
         abort_source as;
         auto& client = _env.get_raft_group0_client();
@@ -251,19 +258,23 @@ public:
             auto guard = client.start_operation(as).get();
 
             service::topology_mutation_builder builder(guard.write_timestamp());
-            builder.with_node(raft::server_id(id.uuid()))
-                    .set("datacenter", dc_rack.dc)
+            auto& node_builder = builder.with_node(raft::server_id(id.uuid()));
+            node_builder.set("datacenter", dc_rack.dc)
                     .set("rack", dc_rack.rack)
                     .set("node_state", state)
                     .set("shard_count", (uint32_t) shard_count)
                     .set("cleanup_status", service::cleanup_status::clean)
                     .set("release_version", version::release())
-                    .set("num_tokens", (uint32_t) 1)
-                    .set("tokens_string", fmt::format("{}", token))
-                    .set("tokens", tokens)
-                    .set("supported_features", std::set<sstring>())
+                    .set("num_tokens", (uint32_t) tokens.size())
+                    .set("tokens_string", tokens.empty() ? sstring() : sstring(fmt::format("{}", *tokens.begin())))
+                    .set("supported_features", supported_features)
                     .set("request_id", utils::UUID())
                     .set("ignore_msb", (uint32_t) 0);
+            if (!tokens.empty()) {
+                // A node which left the ring has its tokens deleted, so leave
+                // the column unset rather than writing an empty set.
+                node_builder.set("tokens", tokens);
+            }
             service::topology_change change({builder.build()});
             service::group0_command g0_cmd = client.prepare_command(std::move(change), guard,
                                                                     format("adding node {} to topology", id));
