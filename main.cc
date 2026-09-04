@@ -3064,6 +3064,7 @@ int main(int ac, char** av) {
         {"perf-fast-forward", perf::scylla_fast_forward_main, "run performance tests by fast forwarding the reader on this server"},
         {"perf-row-cache-update", perf::scylla_row_cache_update_main, "run performance tests by updating row cache on this server"},
         {"perf-tablets", perf::scylla_tablets_main, "run performance tests of tablet metadata management"},
+        {"perf-topology", perf::scylla_topology_main, "run performance tests of topology state reload"},
         {"perf-load-balancing", perf::scylla_tablet_load_balancing_main, "run tablet load balancer tests"},
         {"perf-simple-query", perf::scylla_simple_query_main, "run performance tests by sending simple queries to this server"},
         {"perf-sstable", perf::scylla_sstable_main, "run performance tests by exercising sstable related operations on this server"},
