@@ -9,6 +9,7 @@
 
 #include <seastar/core/gate.hh>
 #include <seastar/core/abort_source.hh>
+#include <concepts>
 #include <unordered_map>
 
 #include "data_dictionary/data_dictionary.hh"
@@ -101,6 +102,16 @@ public:
 
     explicit group0_update_collector(size_t max_mutation_size = default_max_mutation_size)
         : _max_mutation_size(max_mutation_size) {}
+
+    /// Collects the given mutations, which must be small enough to not need yielding.
+    /// Convenient for the common case of a handful of mutations built on the spot,
+    /// e.g. update_topology_state(std::move(guard), {builder.build()}, reason).
+    template<typename... Mutations>
+    requires (sizeof...(Mutations) > 0) && (std::same_as<std::remove_cvref_t<Mutations>, mutation> && ...)
+    group0_update_collector(Mutations&&... ms)
+        : _max_mutation_size(default_max_mutation_size) {
+        (add_small(std::forward<Mutations>(ms)), ...);
+    }
 
     /// Adds a mutation to the collector.
     /// The mutation is merged with already collected mutations of the same
