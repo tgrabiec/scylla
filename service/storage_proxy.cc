@@ -1208,7 +1208,7 @@ private:
                 trbuilder.set("request_type", req);
             }
 
-            topology_change change{{builder.build(), trbuilder.build()}};
+            topology_change change{{canonical_mutation(builder.build()), canonical_mutation(trbuilder.build())}};
             group0_command g0_cmd = _group0_client.prepare_command(std::move(change), guard, reason);
             try {
                 co_await _group0_client.add_entry(std::move(g0_cmd), std::move(guard), _group0_as, raft_timeout{});

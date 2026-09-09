@@ -742,7 +742,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
         std::vector<cdc::generation_id> new_committed_gens(*first_nonobsolete_gen_it, committed_gens.end());
         topology_mutation_builder builder(guard.write_timestamp());
         builder.set_committed_cdc_generations(std::move(new_committed_gens));
-        updates.push_back(builder.build());
+        updates.push_back(canonical_mutation(builder.build()));
 
         reason += ::format("deleted data of CDC generations with time UUID lower than {}", id_upper_bound);
     }
@@ -771,7 +771,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
         std::vector<cdc::generation_id> new_unpublished_gens(unpublished_gens.begin() + 1, unpublished_gens.end());
         topology_mutation_builder builder(guard.write_timestamp());
         builder.set_unpublished_cdc_generations(std::move(new_unpublished_gens));
-        updates.push_back(builder.build());
+        updates.push_back(canonical_mutation(builder.build()));
 
         reason += ::format("published CDC generation with ID {}, ", gen_id);
     }
@@ -910,7 +910,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                                 .set("cleanup_status", cleanup_status::clean)
                                 .set("node_state", node_state::left);
                         reason.append(::format(" {}/{},", host_id, eps.get_ip()));
-                        updates.push_back({builder.build()});
+                        updates.push_back(canonical_mutation(builder.build()));
                     }
                 });
                 if (!updates.empty()) {
@@ -1074,7 +1074,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                    .drop_first_global_topology_request_id(_topo_sm._topology.global_requests_queue, req_id);
             auto reason = ::format(
                 "insert CDC generation data (UUID: {})", gen_uuid);
-            co_await update_topology_state(std::move(guard), {std::move(mutation), builder.build()}, reason);
+            co_await update_topology_state(std::move(guard), {std::move(mutation), canonical_mutation(builder.build())}, reason);
         }
         break;
         case global_topology_request::cleanup:
@@ -1173,8 +1173,8 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                                 updates.add_large(std::move(m));
                             }
 
-                            updates.add(tbuilder_with_request_drop().build());
-                            updates.add(topology_request_tracking_mutation_builder(req_id)
+                            updates.add_small(tbuilder_with_request_drop().build());
+                            updates.add_small(topology_request_tracking_mutation_builder(req_id)
                                                         .done()
                                                         .build());
                             break;
@@ -1183,7 +1183,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                             rtlogger.info("keyspace_rf_change for keyspace {} postponed for colocation", ks_name);
                             topology_mutation_builder tbuilder = tbuilder_with_request_drop();
                             tbuilder.pause_rf_change_request(req_id);
-                            updates.add(tbuilder.build());
+                            updates.add_small(tbuilder.build());
                             break;
                         }
                         case keyspace_rf_change_kind::multi_rf_change: {
@@ -1197,7 +1197,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
 
                             topology_mutation_builder tbuilder = tbuilder_with_request_drop();
                             tbuilder.start_rf_change_migrations(req_id);
-                            updates.add(tbuilder.build());
+                            updates.add_small(tbuilder.build());
                             break;
                         }
                     }
@@ -1212,8 +1212,8 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
             }
 
             if (error != "") {
-                updates.add(tbuilder_with_request_drop().build());
-                updates.add(topology_request_tracking_mutation_builder(req_id)
+                updates.add_small(tbuilder_with_request_drop().build());
+                updates.add_small(topology_request_tracking_mutation_builder(req_id)
                                                          .done(error)
                                                          .build());
             }
@@ -1233,7 +1233,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                    .set_global_topology_request_id(req_id)
                    .drop_first_global_topology_request_id(_topo_sm._topology.global_requests_queue, req_id)
                    .set_session(session_id(req_id));
-            co_await update_topology_state(std::move(guard), {builder.build()}, "TRUNCATE TABLE requested");
+            co_await update_topology_state(std::move(guard), {canonical_mutation(builder.build())}, "TRUNCATE TABLE requested");
         }
         break;
         case global_topology_request::noop_request: {
@@ -1306,19 +1306,19 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                 updates.clear();
             }
 
-            updates.emplace_back(
+            updates.emplace_back(canonical_mutation(
                     topology_mutation_builder(guard.write_timestamp())
                          .drop_first_global_topology_request_ids(_topo_sm._topology.global_requests_queue, batch)
-                         .build());
+                         .build()));
             // One evaluation answered all of them, so stamp them with one time rather than
             // letting each request pick up a slightly different db_clock::now().
             const auto completion_time = db_clock::now();
             for (const auto& id : batch) {
-                updates.emplace_back(
+                updates.emplace_back(canonical_mutation(
                         topology_request_tracking_mutation_builder(id)
                              .set("start_time", completion_time)
                              .done(error, completion_time)
-                             .build());
+                             .build()));
             }
             if (error) {
                 auto reason = fmt::format("quiesce request deferred ({} request(s)): {}", batch.size(), *error);
@@ -1341,7 +1341,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                    .set_global_topology_request_id(req_id)
                    .drop_first_global_topology_request_id(_topo_sm._topology.global_requests_queue, req_id)
                    .set_session(session_id(req_id));
-            co_await update_topology_state(std::move(guard), {builder.build()}, "SNAPSHOT TABLES requested");
+            co_await update_topology_state(std::move(guard), {canonical_mutation(builder.build())}, "SNAPSHOT TABLES requested");
         }
         break;
         case global_topology_request::finalize_migration: {
@@ -1528,7 +1528,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                 });
                 updates.emplace_back(tablet_builder.build());
 
-                updates.emplace_back(
+                updates.emplace_back(canonical_mutation(
                     topology_mutation_builder(guard.write_timestamp())
                         .set_transition_state(topology::transition_state::tablet_migration)
                         .del_global_topology_request()
@@ -1536,7 +1536,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                         .drop_first_global_topology_request_id(_topo_sm._topology.global_requests_queue, req_id)
                         .start_restore_request(req_id)
                         .set_version(_topo_sm._topology.version + 1)
-                        .build());
+                        .build()));
             } catch (const std::exception& e) {
                 error = e.what();
                 rtlogger.error("Couldn't set up restore transitions for table {}: {:t}", tid, std::current_exception());
@@ -1546,10 +1546,10 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                 builder.del_global_topology_request()
                        .del_global_topology_request_id()
                        .drop_first_global_topology_request_id(_topo_sm._topology.global_requests_queue, req_id);
-                updates.emplace_back(builder.build());
-                updates.emplace_back(topology_request_tracking_mutation_builder(req_id)
+                updates.emplace_back(canonical_mutation(builder.build()));
+                updates.emplace_back(canonical_mutation(topology_request_tracking_mutation_builder(req_id)
                                           .done(error)
-                                          .build());
+                                          .build()));
             }
 
             co_await update_topology_state(std::move(guard), std::move(updates), "restore_tablets: set up tablet transitions");
@@ -1607,7 +1607,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
         topology_mutation_builder builder(guard.write_timestamp());
         builder.add_enabled_features(features_to_enable);
         auto reason = ::format("enabling features: {}", features_to_enable);
-        co_await update_topology_state(std::move(guard), {builder.build()}, reason);
+        co_await update_topology_state(std::move(guard), {canonical_mutation(builder.build())}, reason);
 
         rtlogger.info("enabled features: {}", features_to_enable);
     }
@@ -1632,7 +1632,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
         // prior to barrier_and_drain RPCs were sent.
         builder.set_fence_version(version);
         auto reason = ::format("advance fence version to {}", version);
-        co_await update_topology_state(std::move(guard), {builder.build()}, reason);
+        co_await update_topology_state(std::move(guard), {canonical_mutation(builder.build())}, reason);
         if (fenced) {
             *fenced = true;
         }
@@ -1842,10 +1842,10 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
 
     void generate_rf_change_resume_update(group0_update_collector& out, const group0_guard& guard, utils::UUID request_to_resume) {
         rtlogger.debug("Generating RF change resume for request id {}", request_to_resume);
-        out.emplace_back(topology_mutation_builder(guard.write_timestamp())
+        out.emplace_back(canonical_mutation(topology_mutation_builder(guard.write_timestamp())
                 .queue_global_topology_request_id(request_to_resume)
                 .resume_rf_change_request(_topo_sm._topology.paused_rf_change_requests, request_to_resume)
-                .build());
+                .build()));
     }
 
     // Drops the request paused for rack_list colocation without queueing it again
@@ -1853,12 +1853,12 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
     // The keyspace metadata is not touched, as it is not modified before the colocation is done.
     void generate_rack_list_colocation_failure_update(group0_update_collector& out, const group0_guard& guard, const rack_list_colocation_failure& failure) {
         rtlogger.warn("Failing request {} paused for rack_list colocation: {}", failure.request_id, failure.error);
-        out.emplace_back(topology_mutation_builder(guard.write_timestamp())
+        out.emplace_back(canonical_mutation(topology_mutation_builder(guard.write_timestamp())
                 .resume_rf_change_request(_topo_sm._topology.paused_rf_change_requests, failure.request_id)
-                .build());
-        out.emplace_back(topology_request_tracking_mutation_builder(failure.request_id)
+                .build()));
+        out.emplace_back(canonical_mutation(topology_request_tracking_mutation_builder(failure.request_id)
                 .done(failure.error)
-                .build());
+                .build()));
     }
 
     // Updates keyspace properties; removes system_schema.keyspaces::next_replication;
@@ -1896,13 +1896,13 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
             }
         }
 
-        out.emplace_back(topology_mutation_builder(guard.write_timestamp())
+        out.emplace_back(canonical_mutation(topology_mutation_builder(guard.write_timestamp())
                 .finish_rf_change_migrations(_topo_sm._topology.ongoing_rf_changes, completion.request_id)
-                .build());
+                .build()));
 
-        out.emplace_back(topology_request_tracking_mutation_builder(completion.request_id)
+        out.emplace_back(canonical_mutation(topology_request_tracking_mutation_builder(completion.request_id)
                 .done(error)
-                .build());
+                .build()));
     }
 
     // Sets next_replication to current_replication and sets error on the topology request.
@@ -1923,7 +1923,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
             out.add_small(m);
         }
 
-        out.add(topology_request_tracking_mutation_builder(abort_info.request_id)
+        out.add_small(topology_request_tracking_mutation_builder(abort_info.request_id)
                 .abort(abort_info.error)
                 .build());
     }
@@ -1985,14 +1985,14 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
 
         for (const auto& completion : plan.restore_completions()) {
             rtlogger.info("All restore transitions for table {} completed, finishing request {}", completion.table, completion.request_id);
-            out.emplace_back(
+            out.emplace_back(canonical_mutation(
                 topology_mutation_builder(guard.write_timestamp())
                     .finish_restore_request(_topo_sm._topology.ongoing_restore_requests, completion.request_id)
-                    .build());
-            out.emplace_back(
+                    .build()));
+            out.emplace_back(canonical_mutation(
                 topology_request_tracking_mutation_builder(completion.request_id)
                     .done(completion.error.empty() ? std::nullopt : std::optional<sstring>(completion.error))
-                    .build());
+                    .build()));
         }
     }
 
@@ -2587,7 +2587,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                         get_mutation_builder().del_transition(last_token).del_snapshot_name(last_token).del_session(last_token);
                         // Record error on the ongoing restore request so it's propagated to the caller.
                         if (auto it = restore_request_for_table.find(gid.table); it != restore_request_for_table.end()) {
-                            updates.add(
+                            updates.add_small(
                                 topology_request_tracking_mutation_builder(it->second)
                                     .set("error", format("Restore failed for tablet {}: {:t}", gid, ep))
                                     .build());
@@ -2691,10 +2691,10 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
         bool has_updates = !updates.empty();
         if (has_updates) {
             co_await utils::get_local_injector().inject("tablet_transition_updates", utils::wait_for_message(2min));
-            updates.emplace_back(
+            updates.emplace_back(canonical_mutation(
                 topology_mutation_builder(guard.write_timestamp())
                     .set_version(_topo_sm._topology.version + 1)
-                    .build());
+                    .build()));
             if (requires_schema_changes) {
                 co_await update_topology_state_with_mixed_change(std::move(guard), std::move(updates), format("Tablet migration"));
             } else {
@@ -2741,18 +2741,18 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                 co_await sleep(3s); // Throttle retries
                 co_return;
             }
-            updates.emplace_back(
+            updates.emplace_back(canonical_mutation(
                 topology_mutation_builder(guard.write_timestamp())
                     .set_transition_state(topology::transition_state::write_both_read_old)
                     .set_session(session_id(guard.new_group0_state_id()))
                     .set_version(_topo_sm._topology.version + 1)
-                    .build());
+                    .build()));
         } else {
-            updates.emplace_back(
+            updates.emplace_back(canonical_mutation(
                 topology_mutation_builder(guard.write_timestamp())
                     .del_transition_state()
                     .set_version(_topo_sm._topology.version + 1)
-                    .build());
+                    .build()));
         }
         co_await update_topology_state(std::move(guard), std::move(updates), "Finished tablet migration");
     }
@@ -2871,11 +2871,11 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
             }
         }
 
-        updates.emplace_back(
+        updates.emplace_back(canonical_mutation(
             topology_mutation_builder(guard.write_timestamp())
                 .del_transition_state()
                 .set_version(_topo_sm._topology.version + 1)
-                .build());
+                .build()));
         co_await update_topology_state(std::move(guard), std::move(updates), format("Finished tablet resize finalization"));
 
         if (auto old_load_stats = _tablet_allocator.get_load_stats()) {
@@ -2976,13 +2976,13 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                 }
 
                 utils::chunked_vector<canonical_mutation> updates;
-                updates.push_back(topology_mutation_builder(guard.write_timestamp())
+                updates.push_back(canonical_mutation(topology_mutation_builder(guard.write_timestamp())
                                     .del_session()
-                                    .build());
+                                    .build()));
                 if (error) {
-                    updates.push_back(topology_request_tracking_mutation_builder(global_request_id)
+                    updates.push_back(canonical_mutation(topology_request_tracking_mutation_builder(global_request_id)
                                         .set("error", *error)
-                                        .build());
+                                        .build()));
                 }
 
                 try {
@@ -3014,14 +3014,14 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                 guard = co_await start_operation();
             }
             utils::chunked_vector<canonical_mutation> updates;
-            updates.push_back(topology_mutation_builder(guard.write_timestamp())
+            updates.push_back(canonical_mutation(topology_mutation_builder(guard.write_timestamp())
                                 .del_transition_state()
                                 .del_global_topology_request()
                                 .del_global_topology_request_id()
-                                .build());
-            updates.push_back(topology_request_tracking_mutation_builder(global_request_id)
+                                .build()));
+            updates.push_back(canonical_mutation(topology_request_tracking_mutation_builder(global_request_id)
                                 .done()
-                                .build());
+                                .build()));
 
             try {
                 co_await update_topology_state(std::move(guard), std::move(updates), fmt::format("{}{} has completed", static_cast<char>(::toupper(what[0])), what.substr(1)));
@@ -3309,7 +3309,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                            .set("node_state", node_state::left);
                     rtbuilder.done("join is not accepted");
                     auto reason = ::format("bootstrap: failed to accept {}", node.id);
-                    co_await update_topology_state(std::move(node.guard), {builder.build(), rtbuilder.build()}, reason);
+                    co_await update_topology_state(std::move(node.guard), {canonical_mutation(builder.build()), canonical_mutation(rtbuilder.build())}, reason);
 
                     rtlogger.info("node {} moved to left state", node.id);
 
@@ -3338,7 +3338,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                             rtbuilder.done();
                             auto reason = ::format("bootstrap: joined a zero-token node {}", node.id);
                             co_await _voter_handler.on_node_added(node.id, _as);
-                            utils::chunked_vector<canonical_mutation> updates{builder.build(), rtbuilder.build()};
+                            utils::chunked_vector<canonical_mutation> updates{canonical_mutation(builder.build()), canonical_mutation(rtbuilder.build())};
                             co_await mark_view_build_statuses_on_node_join(updates, guard, node.id);
                             co_await update_topology_state(std::move(guard), std::move(updates), reason);
                             break;
@@ -3370,7 +3370,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                                .set("tokens", bootstrap_tokens);
                         auto reason = ::format(
                             "bootstrap: insert tokens and CDC generation data (UUID: {})", gen_uuid);
-                        co_await update_topology_state(std::move(guard_), {std::move(mutation), builder.build()}, reason);
+                        co_await update_topology_state(std::move(guard_), {std::move(mutation), canonical_mutation(builder.build())}, reason);
 
                         co_await utils::get_local_injector().inject("topology_coordinator_pause_after_updating_cdc_generation", utils::wait_for_message(5min));
                     }
@@ -3413,7 +3413,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                                     .set("node_state", node_state::left);
                             rtbuilder.done();
                             co_await _voter_handler.on_node_added(node.id, _as);
-                            utils::chunked_vector<canonical_mutation> updates{builder.build(), builder2.build(), rtbuilder.build()};
+                            utils::chunked_vector<canonical_mutation> updates{canonical_mutation(builder.build()), canonical_mutation(builder2.build()), canonical_mutation(rtbuilder.build())};
                             co_await mark_view_build_statuses_on_node_join(updates, node.guard, node.id);
                             co_await remove_view_build_statuses_on_left_node(updates, node.guard, replaced_id);
                             co_await update_topology_state(take_guard(std::move(node)), std::move(updates),
@@ -3427,7 +3427,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                                .set_session(session_id(guard.new_group0_state_id()))
                                .with_node(node.id)
                                .set("tokens", it->second.ring->tokens);
-                        co_await update_topology_state(std::move(guard), {builder.build()},
+                        co_await update_topology_state(std::move(guard), {canonical_mutation(builder.build())},
                                 "replace: transition to write_both_read_old and take ownership of the replaced node's tokens");
                     }
                         break;
@@ -3474,7 +3474,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                         // if this is global command fail it since there is nothing to rollback
                         rtbuilder.done(*_rollback);
                         _rollback.reset();
-                        co_await update_topology_state(std::move(guard), {builder.build(), rtbuilder.build()}, "committed new CDC generation command failed");
+                        co_await update_topology_state(std::move(guard), {canonical_mutation(builder.build()), canonical_mutation(rtbuilder.build())}, "committed new CDC generation command failed");
                     }
                     break;
                 }
@@ -3535,14 +3535,14 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                     if (_feature_service.topology_global_request_queue) {
                         topology_request_tracking_mutation_builder rtbuilder(*_topo_sm._topology.global_request_id);
                         rtbuilder.done();
-                        updates.push_back(rtbuilder.build());
+                        updates.push_back(canonical_mutation(rtbuilder.build()));
                     }
                 } else {
                     builder.set_transition_state(topology::transition_state::write_both_read_old);
                     builder.set_session(session_id(guard.new_group0_state_id()));
                     builder.set_version(_topo_sm._topology.version + 1);
                 }
-                updates.push_back(builder.build());
+                updates.push_back(canonical_mutation(builder.build()));
                 auto str = ::format("committed new CDC generation, ID: {}", cdc_gen_id);
                 co_await update_topology_state(std::move(guard), std::move(updates), std::move(str));
             }
@@ -3661,7 +3661,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                     .del_session()
                     .set_version(_topo_sm._topology.version + 1);
                 auto str = ::format("{}: streaming completed for node {}", node.rs->state, node.id);
-                co_await update_topology_state(take_guard(std::move(node)), {builder.build()}, std::move(str));
+                co_await update_topology_state(take_guard(std::move(node)), {canonical_mutation(builder.build())}, std::move(str));
             }
                 break;
             case topology::transition_state::write_both_read_new: {
@@ -3717,8 +3717,8 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                     builder.set_version(_topo_sm._topology.version + 1)
                            .with_node(node.id)
                            .set("node_state", node_state::normal);
-                    muts.emplace_back(builder.build());
-                    muts.emplace_back(rtbuilder.build());
+                    muts.emplace_back(canonical_mutation(builder.build()));
+                    muts.emplace_back(canonical_mutation(rtbuilder.build()));
                     co_await _voter_handler.on_node_added(node.id, _as);
                     co_await mark_view_build_statuses_on_node_join(muts, node.guard, node.id);
                     co_await update_topology_state(take_guard(std::move(node)), std::move(muts), "bootstrap: read fence completed");
@@ -3747,7 +3747,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                         next_state = node_state::left;
                         builder.del_transition_state();
                         cleanup_ignored_nodes_on_left(builder, node.id);
-                        muts.push_back(rtbuilder.build());
+                        muts.push_back(canonical_mutation(rtbuilder.build()));
                         co_await remove_view_build_statuses_on_left_node(muts, node.guard, node.id);
                         co_await db::view::view_builder::generate_mutations_on_node_left(_db, _sys_ks, node.guard.write_timestamp(), locator::host_id(node.id.uuid()), muts);
                     }
@@ -3756,7 +3756,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                            .del("tokens")
                            .set("node_state", next_state);
                     auto str = ::format("{}: read fence completed", node.rs->state);
-                    muts.push_back(builder.build());
+                    muts.push_back(canonical_mutation(builder.build()));
                     co_await update_topology_state(take_guard(std::move(node)), std::move(muts), std::move(str));
                     co_await utils::get_local_injector().inject("in_left_token_ring_transition", utils::wait_for_message(std::chrono::minutes(5)));
                 }
@@ -3773,7 +3773,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                             .set_version(_topo_sm._topology.version + 1)
                             .with_node(node.id)
                             .set("node_state", node_state::normal);
-                    muts.push_back(builder1.build());
+                    muts.push_back(canonical_mutation(builder1.build()));
 
                     // Move old node to 'left'
                     topology_mutation_builder builder2(node.guard.write_timestamp());
@@ -3781,9 +3781,9 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                     builder2.with_node(replaced_node_id)
                             .del("tokens")
                             .set("node_state", node_state::left);
-                    muts.push_back(builder2.build());
+                    muts.push_back(canonical_mutation(builder2.build()));
 
-                    muts.push_back(rtbuilder.build());
+                    muts.push_back(canonical_mutation(rtbuilder.build()));
                     co_await mark_view_build_statuses_on_node_join(muts, node.guard, node.id);
                     co_await remove_view_build_statuses_on_left_node(muts, node.guard, replaced_node_id);
                     co_await db::view::view_builder::generate_mutations_on_node_left(_db, _sys_ks, node.guard.write_timestamp(), locator::host_id(replaced_node_id.uuid()), muts);
@@ -3846,7 +3846,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                     }
                     builder.with_node(node.id)
                             .set("node_state", node_state::left);
-                    muts.push_back(builder.build());
+                    muts.push_back(canonical_mutation(builder.build()));
                     co_await remove_view_build_statuses_on_left_node(muts, node.guard, node.id);
                     co_await db::view::view_builder::generate_mutations_on_node_left(_db, _sys_ks, node.guard.write_timestamp(), locator::host_id(node.id.uuid()), muts);
                     auto str = std::invoke([&]() {
@@ -3931,7 +3931,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
 
                 rtbuilder.done();
 
-                co_await update_topology_state(take_guard(std::move(node)), {rtbuilder.build()}, "report request completion in left_token_ring state");
+                co_await update_topology_state(take_guard(std::move(node)), {canonical_mutation(rtbuilder.build())}, "report request completion in left_token_ring state");
 
                 // For decommission/rollback: Tell the node to shut down.
                 // This is done to improve user experience when there are no failures.
@@ -4003,7 +4003,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                 co_await _voter_handler.on_node_added(node.id, _as);
 
                 rtlogger.info("{}", str);
-                co_await update_topology_state(std::move(node.guard), {builder.build(), rtbuilder.build()}, str);
+                co_await update_topology_state(std::move(node.guard), {canonical_mutation(builder.build()), canonical_mutation(rtbuilder.build())}, str);
             }
                 break;
             case topology::transition_state::truncate_table:
@@ -4091,7 +4091,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                         rtbuilder.done("Join is rejected during validation");
                         auto reason = ::format("bootstrap: node rejected");
 
-                        co_await update_topology_state(std::move(node.guard), {builder.build(), rtbuilder.build()}, reason);
+                        co_await update_topology_state(std::move(node.guard), {canonical_mutation(builder.build()), canonical_mutation(rtbuilder.build())}, reason);
 
                         rtlogger.info("rejected node moved to left state {}", node.id);
 
@@ -4127,7 +4127,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                                .set("node_state", node_state::bootstrapping)
                                .del("topology_request");
                         auto reason = ::format("bootstrap: accept node");
-                        co_await update_topology_state(std::move(node.guard), {builder.build(), rtbuilder.build()}, reason);
+                        co_await update_topology_state(std::move(node.guard), {canonical_mutation(builder.build()), canonical_mutation(rtbuilder.build())}, reason);
                         co_await utils::get_local_injector().inject("topology_coordinator_pause_after_accept_node", utils::wait_for_message(5min));
                         break;
                         }
@@ -4145,7 +4145,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                                    .del("topology_request");
                             rtbuilder.done(format("node decommission rejected: {}",
                                     std::get<node_validation_failure>(validation_result).reason));
-                            co_await update_topology_state(std::move(node.guard), {builder.build(), rtbuilder.build()},
+                            co_await update_topology_state(std::move(node.guard), {canonical_mutation(builder.build()), canonical_mutation(rtbuilder.build())},
                                                            "decommission rejected");
                             break;
                         }
@@ -4162,7 +4162,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                                .with_node(node.id)
                                .set("node_state", node_state::decommissioning)
                                .del("topology_request");
-                        co_await update_topology_state(take_guard(std::move(node)), {builder.build(), rtbuilder.build()},
+                        co_await update_topology_state(take_guard(std::move(node)), {canonical_mutation(builder.build()), canonical_mutation(rtbuilder.build())},
                                                        "start decommission");
                         co_await utils::get_local_injector().inject("topology_coordinator_pause_after_start_decommission", utils::wait_for_message(5min));
                         break;
@@ -4178,7 +4178,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                                    .del("topology_request");
                             rtbuilder.done(format("node remove rejected: {}",
                                     std::get<node_validation_failure>(validation_result).reason));
-                            co_await update_topology_state(std::move(node.guard), {builder.build(), rtbuilder.build()},
+                            co_await update_topology_state(std::move(node.guard), {canonical_mutation(builder.build()), canonical_mutation(rtbuilder.build())},
                                                            "removenode rejected");
                             break;
                         }
@@ -4192,7 +4192,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                                .with_node(node.id)
                                .set("node_state", node_state::removing)
                                .del("topology_request");
-                        co_await update_topology_state(take_guard(std::move(node)), {builder.build(), rtbuilder.build()},
+                        co_await update_topology_state(take_guard(std::move(node)), {canonical_mutation(builder.build()), canonical_mutation(rtbuilder.build())},
                                                        "start removenode");
                         co_await utils::get_local_injector().inject("topology_coordinator_pause_after_start_removenode", utils::wait_for_message(5min));
                         break;
@@ -4206,7 +4206,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                                .with_node(node.id)
                                .set("node_state", node_state::replacing)
                                .del("topology_request");
-                        co_await update_topology_state(take_guard(std::move(node)), {builder.build(), rtbuilder.build()},
+                        co_await update_topology_state(take_guard(std::move(node)), {canonical_mutation(builder.build()), canonical_mutation(rtbuilder.build())},
                                                        "replace: accept node");
                         break;
                         }
@@ -4216,7 +4216,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                                .with_node(node.id)
                                .set("node_state", node_state::rebuilding)
                                .del("topology_request");
-                        co_await update_topology_state(take_guard(std::move(node)), {builder.build(), rtbuilder.build()},
+                        co_await update_topology_state(take_guard(std::move(node)), {canonical_mutation(builder.build()), canonical_mutation(rtbuilder.build())},
                                                        "start rebuilding");
                         break;
                     }
@@ -4254,7 +4254,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                 builder.del_session().with_node(node.id)
                        .set("node_state", node_state::normal)
                        .del("rebuild_option");
-                co_await update_topology_state(take_guard(std::move(node)), {builder.build(), rtbuilder.build()}, "rebuilding completed");
+                co_await update_topology_state(take_guard(std::move(node)), {canonical_mutation(builder.build()), canonical_mutation(rtbuilder.build())}, "rebuilding completed");
             }
                 break;
             case node_state::bootstrapping:
@@ -4379,7 +4379,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
             if (node.id != id) {
                 topology_mutation_builder builder(node.guard.write_timestamp());
                 builder.with_node(id).set("cleanup_status", cleanup_status::needed);
-                muts.emplace_back(builder.build());
+                muts.emplace_back(canonical_mutation(builder.build()));
                 rtlogger.debug("mark node {} as needed for cleanup", id);
             }
         }
@@ -4451,9 +4451,9 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                 builder.del_global_topology_request_id()
                        .drop_first_global_topology_request_id(_topo_sm._topology.global_requests_queue, *global_request_id);
                 rtbuilder.done();
-                muts.emplace_back(rtbuilder.build());
+                muts.emplace_back(canonical_mutation(rtbuilder.build()));
             }
-            muts.emplace_back(builder.build());
+            muts.emplace_back(canonical_mutation(builder.build()));
         } else {
             muts.reserve(topo.normal_nodes.size());
         }
@@ -4463,7 +4463,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
             if (rs.cleanup == cleanup_status::needed) {
                 topology_mutation_builder builder(guard.write_timestamp());
                 builder.with_node(id).set("cleanup_status", cleanup_status::running);
-                muts.emplace_back(builder.build());
+                muts.emplace_back(canonical_mutation(builder.build()));
                 rtlogger.debug("mark node {} as cleanup running", id);
                 ++nodes_to_cleanup;
             }
@@ -4533,11 +4533,11 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
         auto resize_finalization_transition_state = [this] {
             return _feature_service.tablet_merge ? topology::transition_state::tablet_resize_finalization : topology::transition_state::tablet_split_finalization;
         };
-        updates.emplace_back(
+        updates.emplace_back(canonical_mutation(
             topology_mutation_builder(guard.write_timestamp())
                 .set_transition_state(resize_finalization_transition_state())
                 .set_version(_topo_sm._topology.version + 1)
-                .build());
+                .build()));
     }
 
     // Returns true if the state machine was transitioned into tablet migration path.
@@ -4645,11 +4645,11 @@ future<std::optional<group0_guard>> topology_coordinator::maybe_start_tablet_mig
     auto tm = get_token_metadata_ptr();
     if (has_tablet_transitions()) {
         utils::chunked_vector<canonical_mutation> updates;
-        updates.emplace_back(
+        updates.emplace_back(canonical_mutation(
             topology_mutation_builder(guard.write_timestamp())
                 .set_transition_state(topology::transition_state::tablet_migration)
                 .set_version(_topo_sm._topology.version + 1)
-                .build());
+                .build()));
         co_await update_topology_state(std::move(guard), std::move(updates), "Resuming tablet migration");
         co_return std::nullopt;
     }
@@ -4679,11 +4679,11 @@ future<bool> topology_coordinator::generate_tablet_migration_state_updates(
     co_await generate_migration_updates(updates, guard, plan);
 
     if (updates.change_counter() != initial_change_counter) {
-        updates.emplace_back(
+        updates.emplace_back(canonical_mutation(
             topology_mutation_builder(guard.write_timestamp())
                 .set_transition_state(topology::transition_state::tablet_migration)
                 .set_version(_topo_sm._topology.version + 1)
-                .build());
+                .build()));
         co_return true;
     }
     co_return false;
@@ -4766,11 +4766,11 @@ future<bool> topology_coordinator::maybe_retry_failed_rf_change_tablet_rebuilds(
         co_return false;
     }
 
-    updates.emplace_back(
+    updates.emplace_back(canonical_mutation(
         topology_mutation_builder(guard.write_timestamp())
             .set_transition_state(topology::transition_state::tablet_migration)
             .set_version(_topo_sm._topology.version + 1)
-            .build());
+            .build()));
 
     sstring reason = "Retry failed tablet rebuilds";
     co_await update_topology_state(std::move(guard), std::move(updates), reason);
@@ -4966,7 +4966,7 @@ future<> topology_coordinator::fence_previous_coordinator() {
         try {
             auto guard = co_await start_operation();
             topology_mutation_builder builder(guard.write_timestamp());
-            co_await update_topology_state(std::move(guard), {builder.build()}, fmt::format("Starting new topology coordinator {}", _group0.group0_server().id()));
+            co_await update_topology_state(std::move(guard), {canonical_mutation(builder.build())}, fmt::format("Starting new topology coordinator {}", _group0.group0_server().id()));
             break;
         } catch (group0_concurrent_modification&) {
             // If we failed to write because of concurrent modification lets retry
@@ -5035,8 +5035,8 @@ future<> topology_coordinator::rollback_current_topology_op(group0_guard&& guard
     // We are in the process of aborting remove or decommission which may have streamed some
     // ranges to other nodes. Cleanup is needed.
     muts = mark_nodes_as_cleanup_needed(node, true);
-    muts.emplace_back(builder.build());
-    muts.emplace_back(rtbuilder.build());
+    muts.emplace_back(canonical_mutation(builder.build()));
+    muts.emplace_back(canonical_mutation(rtbuilder.build()));
 
     std::string str = fmt::format("rollback {} after {} failure, moving transition state to {} and setting cleanup flag",
             node.id, node.rs->state, transition_state);

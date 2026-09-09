@@ -200,14 +200,14 @@ cql3::statements::alter_keyspace_statement::prepare_schema_mutations(query_proce
                          .set_new_keyspace_rf_change_data(_name, _attrs->flattened());
 
             };
-            service::topology_change change{{builder.build()}};
+            service::topology_change change{{canonical_mutation(builder.build())}};
 
             auto topo_schema = qp.db().find_schema(db::system_keyspace::NAME, db::system_keyspace::TOPOLOGY);
             std::ranges::transform(change.mutations, std::back_inserter(muts), [topo_schema] (const canonical_mutation& cm) {
                 return cm.to_mutation(topo_schema);
             });
 
-            service::topology_change req_change{{rtbuilder.build()}};
+            service::topology_change req_change{{canonical_mutation(rtbuilder.build())}};
 
             auto topo_req_schema = qp.db().find_schema(db::system_keyspace::NAME, db::system_keyspace::TOPOLOGY_REQUESTS);
             std::ranges::transform(req_change.mutations, std::back_inserter(muts), [topo_req_schema] (const canonical_mutation& cm) {

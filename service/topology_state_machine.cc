@@ -342,11 +342,11 @@ void topology_state_machine::generate_cancel_request_update(utils::chunked_vecto
             break;
     }
 
-    muts.emplace_back(builder.build());
+    muts.emplace_back(canonical_mutation(builder.build()));
 
     topology_request_tracking_mutation_builder rtbuilder(request_id);
     rtbuilder.done(std::move(reason));
-    muts.emplace_back(rtbuilder.build());
+    muts.emplace_back(canonical_mutation(rtbuilder.build()));
 }
 
 future<> topology_state_machine::abort_request(service::raft_group0& group0,

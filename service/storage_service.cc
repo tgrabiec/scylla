@@ -1108,7 +1108,7 @@ future<> storage_service::sstable_vnodes_cleanup_fiber(raft::server& server, gat
                 topology_mutation_builder builder(guard.write_timestamp());
                 builder.with_node(server.id()).set("cleanup_status", cleanup_status::clean);
 
-                topology_change change{{builder.build()}};
+                topology_change change{{canonical_mutation(builder.build())}};
                 group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard, ::format("cleanup completed for {}", server.id()));
 
                 try {
@@ -1261,7 +1261,7 @@ utils::chunked_vector<canonical_mutation> storage_service::build_mutation_from_j
         rtbuilder.set("target_host", target);
     }
 
-    utils::chunked_vector<canonical_mutation> muts = {builder.build(), rtbuilder.build()};
+    utils::chunked_vector<canonical_mutation> muts = {canonical_mutation(builder.build()), canonical_mutation(rtbuilder.build())};
 
     if (old_request_id) {
         // If this is a replace operation, we need to mark the old request for replaced node as done if exists
@@ -1271,8 +1271,8 @@ utils::chunked_vector<canonical_mutation> storage_service::build_mutation_from_j
         builder.with_node(*params.replaced_id).del("topology_request");
         topology_request_tracking_mutation_builder rtbuilder(old_request_id, _feature_service.topology_requests_type_column);
         rtbuilder.done("node was replaced before the request could start");
-        muts.push_back(builder.build());
-        muts.push_back(rtbuilder.build());
+        muts.push_back(canonical_mutation(builder.build()));
+        muts.push_back(canonical_mutation(rtbuilder.build()));
     }
 
     return muts;
@@ -1386,7 +1386,7 @@ future<> storage_service::raft_initialize_discovery_leader(const join_node_reque
     builder.add_enabled_features(params.supported_features | std::ranges::to<std::set<sstring>>())
             .set_upgrade_state_done(); // Start right in the topology-on-raft mode
     auto enable_features_mutation = builder.build();
-    insert_join_request_mutations.push_back(std::move(enable_features_mutation));
+    insert_join_request_mutations.push_back(canonical_mutation(std::move(enable_features_mutation)));
 
     auto skip_service_levels_v2_initialization = utils::get_local_injector().enter("skip_service_levels_v2_initialization");
     auto sl_status_mutation = co_await _sys_ks.local().make_service_levels_version_mutation(skip_service_levels_v2_initialization ? 1 : 2, write_timestamp);
@@ -1493,7 +1493,7 @@ future<> storage_service::update_topology_with_local_metadata(raft::server& raft
                .set("release_version", local_release_version)
                .set("supported_features", local_supported_features);
 
-        topology_change change{{builder.build()}};
+        topology_change change{{canonical_mutation(builder.build())}};
         group0_command g0_cmd = _group0->client().prepare_command(
                 std::move(change), guard, ::format("{}: update topology with local metadata", raft_server.id()));
 
@@ -2723,7 +2723,7 @@ future<> storage_service::raft_decommission() {
         if (_feature_service.topology_requests_target_host_column) {
             rtbuilder.set("target_host", raft_server.id().uuid());
         }
-        topology_change change{{builder.build(), rtbuilder.build()}};
+        topology_change change{{canonical_mutation(builder.build()), canonical_mutation(rtbuilder.build())}};
         group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard, ::format("decommission: request decommission for {}", raft_server.id()));
 
         request_id = guard.new_group0_state_id();
@@ -2874,7 +2874,7 @@ future<> storage_service::raft_removenode(locator::host_id host_id, locator::hos
         if (_feature_service.topology_requests_target_host_column) {
             rtbuilder.set("target_host", id.uuid());
         }
-        topology_change change{{builder.build(), rtbuilder.build()}};
+        topology_change change{{canonical_mutation(builder.build()), canonical_mutation(rtbuilder.build())}};
         group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard, ::format("removenode: request remove for {}", id));
 
         request_id = guard.new_group0_state_id();
@@ -2926,7 +2926,7 @@ future<> storage_service::mark_excluded(const std::vector<locator::host_id>& hos
 
         topology_mutation_builder builder(guard.write_timestamp());
         builder.add_ignored_nodes(raft_hosts);
-        topology_change change{{builder.build()}};
+        topology_change change{{canonical_mutation(builder.build())}};
         group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard, ::format("Mark as excluded: {}", hosts));
         rtlogger.info("Marking nodes as excluded: {}, previous set: {}", hosts, _topology_state_machine._topology.ignored_nodes);
         try {
@@ -3082,11 +3082,11 @@ future<> storage_service::do_clusterwide_vnodes_cleanup() {
             rtbuilder.set("done", false)
                      .set("start_time", db_clock::now())
                      .set("request_type", global_topology_request::cleanup);
-            muts.push_back(rtbuilder.build());
+            muts.push_back(canonical_mutation(rtbuilder.build()));
         } else {
             builder.set_global_topology_request(global_topology_request::cleanup);
         }
-        muts.push_back(builder.build());
+        muts.push_back(canonical_mutation(builder.build()));
         topology_change change{std::move(muts)};
         group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard, ::format("vnodes cleanup: cluster-wide cleanup requested"));
 
@@ -3138,7 +3138,7 @@ future<> storage_service::reset_cleanup_needed() {
         topology_mutation_builder builder(guard.write_timestamp());
         builder.with_node(server.id()).set("cleanup_status", cleanup_status::clean);
 
-        topology_change change{{builder.build()}};
+        topology_change change{{canonical_mutation(builder.build())}};
         group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard, ::format("cleanup status reset by force for {}", server.id()));
 
         try {
@@ -3552,7 +3552,7 @@ future<> storage_service::raft_rebuild(utils::optional_param sdc_param) {
         if (_feature_service.topology_requests_target_host_column) {
             rtbuilder.set("target_host", raft_server.id().uuid());
         }
-        topology_change change{{builder.build(), rtbuilder.build()}};
+        topology_change change{{canonical_mutation(builder.build()), canonical_mutation(rtbuilder.build())}};
         group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard, ::format("rebuild: request rebuild for {} ({})", raft_server.id(), source_dc));
 
         request_id = guard.new_group0_state_id();
@@ -3625,11 +3625,11 @@ future<> storage_service::raft_check_and_repair_cdc_streams() {
                 rtbuilder.set("done", false)
                          .set("start_time", db_clock::now())
                          .set("request_type", global_topology_request::new_cdc_generation);
-                muts.push_back(rtbuilder.build());
+                muts.push_back(canonical_mutation(rtbuilder.build()));
             } else {
                 builder.set_global_topology_request(global_topology_request::new_cdc_generation);
             }
-            muts.push_back(builder.build());
+            muts.push_back(canonical_mutation(builder.build()));
             topology_change change{std::move(muts)};
             group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard,
                     ::format("request check+repair CDC generation from {}", _group0->group0_server().id()));
@@ -4485,7 +4485,7 @@ future<> storage_service::set_node_intended_storage_mode(intended_storage_mode m
         builder.with_node(raft_server.id())
                .set("intended_storage_mode", mode);
 
-        topology_change change{{builder.build()}};
+        topology_change change{{canonical_mutation(builder.build())}};
         group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard,
             ::format("set intended storage mode for node {} to {}", raft_server.id(), mode));
 
@@ -4678,7 +4678,7 @@ future<> storage_service::finalize_tablets_migration(const sstring& ks_name) {
                  .set("request_type", global_topology_request::finalize_migration)
                  .set_finalize_migration_data(ks_name);
 
-        topology_change change{{builder.build(), rtbuilder.build()}};
+        topology_change change{{canonical_mutation(builder.build()), canonical_mutation(rtbuilder.build())}};
         group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard,
             fmt::format("finalize vnodes-to-tablets migration for keyspace '{}'", ks_name));
 
@@ -5756,9 +5756,9 @@ future<bool> storage_service::exec_tablet_update(service::group0_guard guard, gr
     rtlogger.info("{}", reason);
     auto updates = co_await uc.collect();
     rtlogger.trace("do update {} reason {}", updates, reason);
-    updates.emplace_back(topology_mutation_builder(guard.write_timestamp())
+    updates.emplace_back(canonical_mutation(topology_mutation_builder(guard.write_timestamp())
             .set_version(_topology_state_machine._topology.version + 1)
-            .build());
+            .build()));
     topology_change change{std::move(updates)};
     group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard, reason);
     try {
@@ -6225,7 +6225,7 @@ future<> storage_service::restore_tablets(table_id table, sstring snap_name) {
         builder.queue_global_topology_request_id(request_id);
         trbuilder.set("request_type", global_topology_request::restore_tablets);
 
-        topology_change change{{builder.build(), trbuilder.build()}};
+        topology_change change{{canonical_mutation(builder.build()), canonical_mutation(trbuilder.build())}};
         group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard, "Restore tablets");
         try {
             co_await _group0->client().add_entry(std::move(g0_cmd), std::move(guard), _group0_as, raft_timeout{});
@@ -6383,7 +6383,7 @@ future<bool> storage_service::try_transit_tablet(table_id table, dht::token toke
                 builder.set_transition_state(topology::transition_state::tablet_migration);
             }
             builder.set_version(_topology_state_machine._topology.version + 1);
-            uc.emplace_back(builder.build());
+            uc.emplace_back(canonical_mutation(builder.build()));
         }
 
         auto updates = co_await uc.collect();
@@ -6471,7 +6471,7 @@ future<utils::UUID> storage_service::submit_quiesce_topology_request() {
         rtbuilder.set("done", false)
                  .set("request_type", global_topology_request::quiesce);
 
-        topology_change change{{builder.build(), rtbuilder.build()}};
+        topology_change change{{canonical_mutation(builder.build()), canonical_mutation(rtbuilder.build())}};
         group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard,
             ::format("quiesce topology request from {}", _group0->group0_server().id()));
 
