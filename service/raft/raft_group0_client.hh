@@ -122,6 +122,9 @@ class raft_group0_client {
     template<typename Command>
     group0_command make_command(Command change, group0_guard& guard, std::string_view description);
 
+    // Validates the update and serializes it.
+    future<utils::chunked_vector<canonical_mutation>> validate_and_collect(group0_update_collector& updates);
+
 public:
     raft_group0_client(service::raft_group_registry&, gms::gossiper&,
                        db::system_keyspace&, locator::shared_token_metadata&, maintenance_mode_enabled);
@@ -158,6 +161,19 @@ public:
     template<typename Command>
     requires std::same_as<Command, schema_change> || std::same_as<Command, topology_change> || std::same_as<Command, write_mutations> || std::same_as<Command, mixed_change>
     group0_command prepare_command(Command change, group0_guard& guard, std::string_view description);
+
+    // Builds a group0 command out of the collected update. Validates the
+    // update before serializing it, which is cheaper than deserializing the
+    // command to validate it.
+    template<typename Command>
+    requires std::same_as<Command, schema_change> || std::same_as<Command, topology_change>
+            || std::same_as<Command, write_mutations> || std::same_as<Command, mixed_change>
+    future<group0_command> prepare_command(group0_update_collector&& updates, group0_guard& guard, std::string_view description);
+
+    // Same, for a command which is applied unconditionally, without a guard.
+    template<typename Command>
+    requires std::same_as<Command, write_mutations>
+    future<group0_command> prepare_command(group0_update_collector&& updates, std::string_view description);
     // Checks maximum allowed serialized command size, server rejects bigger commands with command_is_too_big_error exception
     size_t max_command_size() const;
 
