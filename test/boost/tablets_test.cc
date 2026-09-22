@@ -3930,6 +3930,53 @@ SEASTAR_THREAD_TEST_CASE(test_load_balancing_with_colocated_tablets) {
   }).get();
 }
 
+SEASTAR_THREAD_TEST_CASE(test_load_sketch_counts_colocated_tablets_once) {
+  do_with_cql_env_thread([] (auto& e) {
+    // The load balancer counts a group of co-located tablets as one tablet
+    // (get_tablet_group_size()). load_sketch::populate() visits every table
+    // in all_tables_ungrouped(), so it must not count the shared tablet map
+    // once per table in the group. When the two disagree, the inter-node
+    // planner fills the shard which the sketch deems least loaded and the
+    // intra-node planner, working on per-group counts, empties it again,
+    // so rebuilds after replace funnel into a single shard (SCYLLADB-1763).
+    //
+    // Shard 0 holds 2 tablets of a 2-table group, shard 1 holds 3 tablets
+    // of a standalone table. Shard 0 is the least loaded one.
+
+    topology_builder topo(e);
+    auto host = topo.add_node(node_state::normal, 2);
+
+    auto ks_name = add_keyspace(e, {{topo.dc(), 1}}, 1);
+    auto base_table = add_table(e, ks_name).get();
+    auto colocated_table = add_table(e, ks_name).get();
+    auto other_table = add_table(e, ks_name).get();
+
+    mutate_tablets(e, [&] (tablet_metadata& tmeta) -> future<> {
+        tablet_map group_tmap(2);
+        for (auto tid : group_tmap.tablet_ids()) {
+            group_tmap.set_tablet(tid, tablet_info{tablet_replica_set{tablet_replica{host, 0}}});
+        }
+        tmeta.set_tablet_map(base_table, std::move(group_tmap));
+        co_await tmeta.set_colocated_table(colocated_table, base_table);
+
+        tablet_map other_tmap(3);
+        for (auto tid : other_tmap.tablet_ids()) {
+            other_tmap.set_tablet(tid, tablet_info{tablet_replica_set{tablet_replica{host, 1}}});
+        }
+        tmeta.set_tablet_map(other_table, std::move(other_tmap));
+    });
+
+    load_sketch load(e.shared_token_metadata().local().get());
+    // Every tablet weighs one target tablet size, like get_tablet_group_size() in this mode.
+    load.set_force_capacity_based_load(true);
+    load.populate().get();
+
+    // Load is in units of tablets here (capacity defaults to one tablet size).
+    BOOST_REQUIRE_EQUAL(load.get_load(host), 5);
+    BOOST_REQUIRE_EQUAL(load.get_least_loaded_shard(host), 0);
+  }).get();
+}
+
 SEASTAR_THREAD_TEST_CASE(test_decommission_rf_met) {
     // Verifies that load balancer moves tablets out of the decommissioned node.
     // The scenario is such that replication factor of tablets can be satisfied after decommission.
