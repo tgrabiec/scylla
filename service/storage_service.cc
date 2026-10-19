@@ -5378,20 +5378,11 @@ future<tablet_operation_result> storage_service::do_tablet_operation(locator::gl
 
     locator::tablet_metadata_guard guard(_db.local().find_column_family(tablet.table), tablet);
     auto& as = guard.get_abort_source();
-    auto abort = [&as] () noexcept {
-        as.request_abort();
-    };
-    auto sub = _group0_as.subscribe(abort);
+    auto sub = _group0_as.propagate_to(as);
     // Also follow the node's abort source, so that the guard's abort source is a superset
     // of both and operations can rely on it alone to cover shutdown as well as changes to
     // the tablet's transition.
-    auto shutdown_sub = _abort_source.subscribe(abort);
-    if (!sub || !shutdown_sub) {
-        // subscribe() leaves the subscription unlinked and doesn't invoke the callback if
-        // the source was already aborted, so propagate the abort by hand. Must happen before
-        // the operation is registered in _tablet_ops, so that nobody joins an aborted one.
-        abort();
-    }
+    auto shutdown_sub = _abort_source.propagate_to(as);
 
     auto async_gate_holder = _async_gate.hold();
     promise<tablet_operation_result> p;
