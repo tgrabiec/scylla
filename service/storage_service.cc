@@ -104,6 +104,7 @@
 #include <seastar/coroutine/parallel_for_each.hh>
 #include <seastar/coroutine/as_future.hh>
 #include <seastar/coroutine/exception.hh>
+#include <seastar/coroutine/switch_to.hh>
 #include "utils/pretty_printers.hh"
 #include "utils/stall_free.hh"
 #include "utils/error_injection.hh"
@@ -654,6 +655,10 @@ future<> storage_service::topology_state_load(state_change_hint hint) {
     });
     running = true;
 #endif
+
+    // Reload is CPU-heavy but not latency-sensitive, so keep it from
+    // competing with user workload. The caller resumes in its own group.
+    co_await coroutine::switch_to(_db.local().get_maintenance_scheduling_group());
 
     co_await utils::get_local_injector().inject("topology_state_load_error", [] {
         return std::make_exception_ptr(std::runtime_error("topology_state_load_error"));
