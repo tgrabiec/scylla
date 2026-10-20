@@ -240,7 +240,7 @@ void hint_sender::start() {
 
                 // If we got here means that either there are no more hints to send or we failed to send hints we have.
                 // In both cases it makes sense to wait a little before continuing.
-                sleep_abortable(next_sleep_duration(), _stop_as).get();
+                sleep_abortable<clock>(next_sleep_duration(), _stop_as).get();
             } catch (seastar::sleep_aborted&) {
                 break;
             } catch (...) {
