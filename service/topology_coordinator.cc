@@ -5618,7 +5618,7 @@ future<> topology_coordinator::start_tablet_load_stats_refresher() {
         auto refresh_interval = std::chrono::seconds(_tablet_load_stats_refresh_interval_in_seconds.get());
         if (sleep && can_proceed()) {
             try {
-                co_await seastar::sleep_abortable(refresh_interval, _as);
+                co_await seastar::sleep_abortable<lowres_clock>(refresh_interval, _as);
             } catch (...) {
                 rtlogger.debug("raft topology: Tablet load stats refresher: sleep failed: {:t}", std::current_exception());
             }
