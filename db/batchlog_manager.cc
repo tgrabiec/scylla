@@ -210,7 +210,7 @@ future<> db::batchlog_manager::batchlog_replay_loop() {
     auto delay = _delay;
     while (!_stop.abort_requested()) {
         try {
-            co_await sleep_abortable(delay, _stop);
+            co_await sleep_abortable<lowres_clock>(delay, _stop);
         } catch (sleep_aborted&) {
             co_return;
         }
