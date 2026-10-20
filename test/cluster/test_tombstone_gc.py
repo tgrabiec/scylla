@@ -345,7 +345,7 @@ async def test_tombstone_gc_rf_one(manager: ScyllaClusterManager, tablets: bool)
 
         check_tombstone_count(await get_partition_tombstone_count(table, p))
 
-        await asyncio.sleep(1) # wait a bit to ensure the tombstone timestamp is in the past
+        await manager.forward_jump_clocks(1) # move gc_clock past the tombstone's deletion time
 
         await asyncio.gather(*[manager.api.flush_all_keyspaces(srv.ip_addr) for srv in servers])
         await asyncio.gather(*[manager.api.keyspace_compaction(srv.ip_addr, keyspace) for srv in servers])
