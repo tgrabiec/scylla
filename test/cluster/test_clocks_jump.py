@@ -1,0 +1,28 @@
+#
+# Copyright (C) 2026-present ScyllaDB
+#
+# SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
+#
+
+import time
+
+from test.pylib.scylla_cluster_manager import ScyllaClusterManager
+
+
+async def test_forward_jump_clocks_carries_to_new_and_restarted_servers(manager: ScyllaClusterManager):
+    jump = 30
+
+    async def check_offset(servers):
+        cql, hosts = await manager.get_ready_cql(servers)
+        for server, host in zip(servers, hosts):
+            assert await manager.api.get_clocks_offset(server.ip_addr) == jump
+            row = (await cql.run_async("SELECT toUnixTimestamp(now()) AS t FROM system.local", host=host))[0]
+            assert row.t / 1000 - time.time() > jump - 5
+
+    s0 = await manager.server_add()
+    await manager.forward_jump_clocks(jump)
+    await check_offset([s0])
+
+    s1 = await manager.server_add()
+    await manager.server_restart(s0.server_id)
+    await check_offset([s0, s1])
