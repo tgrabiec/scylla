@@ -1568,6 +1568,12 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             auto stop_config_api = defer_verbose_shutdown("config API", [&ctx] {
                 api::unset_server_config(ctx).get();
             });
+#ifdef SCYLLA_ENABLE_ERROR_INJECTION
+            api::set_server_clocks_test(ctx, *cfg).get();
+            auto stop_clocks_test_api = defer_verbose_shutdown("clocks test API", [&ctx] {
+                api::unset_server_clocks_test(ctx).get();
+            });
+#endif
 
             static sharded<db::system_distributed_keyspace> sys_dist_ks;
             static sharded<db::system_keyspace> sys_ks;
