@@ -1215,7 +1215,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                     std::chrono::seconds(1) : cdc_streams_gc_refresh_interval;
             if (sleep && can_proceed()) {
                 try {
-                    co_await seastar::sleep_abortable(refresh_interval, _as);
+                    co_await seastar::sleep_abortable<lowres_clock>(refresh_interval, _as);
                 } catch (...) {
                     rtlogger.debug("CDC streams GC: sleep failed: {:t}", std::current_exception());
                 }
