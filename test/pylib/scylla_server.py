@@ -567,14 +567,14 @@ class ScyllaServer:
         """
         return copy.deepcopy(self.config)
 
-    def update_config(self, config_options: dict[str, Any]) -> None:
+    def update_config(self, config_options: dict[str, Any], reload: bool = True) -> None:
         """Update conf/scylla.yaml with `config_options` dict.
 
-        If we're running, reload the config with a SIGHUP.
+        If we're running and `reload` is set, reload the config with a SIGHUP.
         """
         self.config.update(config_options)
         self._write_config_file()
-        if self.cmd:
+        if self.cmd and reload:
             self.cmd.send_signal(signal.SIGHUP)
 
     def remove_config_option(self, key: str) -> None:
