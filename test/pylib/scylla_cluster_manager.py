@@ -226,6 +226,9 @@ class ScyllaClusterManager:
         # called from.
         self._loop: asyncio.AbstractEventLoop | None = None
 
+        # Sum of forward_jump_clocks() jumps, which servers added later start with.
+        self.clocks_offset = 0
+
         # tasks_history holds the running test's operations: after_test()
         # drains it, and whatever is left over is the leak it reports.
         self.tasks_history: dict[asyncio.Task, str] = {}
@@ -492,7 +495,7 @@ class ScyllaClusterManager:
         return await self.cluster.add_server(
             replace_cfg=replace_cfg,
             cmdline=cmdline,
-            config=config,
+            config=self._with_clocks_offset(config),
             version=version,
             property_file=property_file,
             start=start,
@@ -515,7 +518,7 @@ class ScyllaClusterManager:
                            expected_error: str | None = None) -> list[ServerInfo]:
         """Add new servers concurrently."""
 
-        return await self.cluster.add_servers(servers_num, cmdline, config, version, property_file,
+        return await self.cluster.add_servers(servers_num, cmdline, self._with_clocks_offset(config), version, property_file,
                                               start, seeds, server_encryption, expected_error)
 
     @manager_op(timeout=None)
@@ -1052,6 +1055,31 @@ class ScyllaClusterManager:
         Each live server will mark "host" as DOWN and drop connections to it.
         """
         await gather_safely(*(self.api.convict(server.ip_addr, host) for server in await self.running_servers()))
+
+    async def forward_jump_clocks(self, seconds: int) -> None:
+        """Move the clocks of all running servers forward by `seconds`.
+
+        Lets a test expire TTLs, gc_grace_seconds and lowres_clock timeouts
+        without sleeping. Steady clock timers are not affected. Restarted and
+        added servers start with the total offset in test_clocks_offset_seconds,
+        so all servers agree on gc_clock and db_clock. Not available in release
+        mode.
+        """
+        await gather_safely(*(self.api.forward_jump_clocks(server.ip_addr, seconds) for server in await self.running_servers()))
+        await self._set_clocks_offset(self.clocks_offset + seconds)
+
+    @manager_op
+    async def _set_clocks_offset(self, offset: int) -> None:
+        self.clocks_offset = offset
+        # Running servers already have the offset, a reload could only race
+        # with a later jump.
+        for server in self.cluster.servers.values():
+            server.update_config({"test_clocks_offset_seconds": offset}, reload=False)
+
+    def _with_clocks_offset(self, config: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not self.clocks_offset:
+            return config
+        return {"test_clocks_offset_seconds": self.clocks_offset} | (config or {})
 
     async def server_start(self,
                            server_id: ServerNum,
