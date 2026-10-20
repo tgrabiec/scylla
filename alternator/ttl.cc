@@ -910,7 +910,7 @@ future<> expiration_service::run() {
         if (scan_duration < period) {
             try {
                 tlogger.info("sleeping {} seconds until next period", (period - scan_duration).count()/1000.0);
-                co_await seastar::sleep_abortable(period - scan_duration, _abort_source);
+                co_await seastar::sleep_abortable<lowres_clock>(period - scan_duration, _abort_source);
             } catch(seastar::sleep_aborted&) {}
         } else {
                 tlogger.warn("scan took {} seconds, longer than period - not sleeping", scan_duration.count()/1000.0);
