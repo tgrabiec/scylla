@@ -424,7 +424,7 @@ future<> snapshot_ctl::delete_expired_snapshots() {
             });
         });
     };
-    auto expiration_timer = timer([this] {
+    auto expiration_timer = timer<lowres_clock>([this] {
         snap_log.debug("Expiration timer fired: queued={}", _expiration_queue.size());
         _expiration_cond.signal();
     });
@@ -441,7 +441,7 @@ future<> snapshot_ctl::delete_expired_snapshots() {
             } else {
                 auto wait_duration = _expiration_queue.front().expires_at - now;
                 snap_log.debug("Expiration waiting for {}: queued={}", wait_duration, _expiration_queue.size());
-                expiration_timer.rearm(timer<>::clock::now() + wait_duration);
+                expiration_timer.rearm(lowres_clock::now() + wait_duration);
             }
         } else {
             snap_log.debug("Expiration waiting indefinitely: queue is empty");
