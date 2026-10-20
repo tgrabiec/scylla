@@ -372,7 +372,7 @@ async def test_batchlog_replay_failure_during_repair(manager: ScyllaClusterManag
 
         await cql.run_async(f"DELETE FROM {ks}.my_table WHERE pk=0 AND ck=0")
 
-        await asyncio.sleep((write_timeout_ms // 1000) * 2 + 1)
+        await manager.forward_jump_clocks((write_timeout_ms // 1000) * 2 + 1)
 
         batchlog_row_count = await get_batchlog_row_count()
         assert batchlog_row_count > 0
