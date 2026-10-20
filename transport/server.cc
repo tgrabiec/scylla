@@ -751,7 +751,7 @@ cql_server::connection::read_frame() {
 // because storage proxy was blocking ERM (thus topology changes).
 future<foreign_ptr<std::unique_ptr<cql_server::response>>> cql_server::sleep_until_timeout_passes(const seastar::lowres_clock::time_point& timeout, foreign_ptr<std::unique_ptr<cql_server::response>>&& resp) {
     auto time_left = timeout - seastar::lowres_clock::now();
-    return seastar::sleep_abortable(time_left, _abort_source).then_wrapped([resp = std::move(resp)](auto&& f) mutable {
+    return seastar::sleep_abortable<seastar::lowres_clock>(time_left, _abort_source).then_wrapped([resp = std::move(resp)](auto&& f) mutable {
         if (f.failed()) {
             clogger.debug("Got exception {} while waiting for a request timeout.", f.get_exception());
         }
