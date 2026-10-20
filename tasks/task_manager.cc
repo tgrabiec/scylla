@@ -324,7 +324,7 @@ void task_manager::task::start() {
             if (drop_after_complete) {
                 return make_ready_future<>();
             }
-            return sleep_abortable(user_task ? module->get_task_manager().get_user_task_ttl() : module->get_task_manager().get_task_ttl(), module->abort_source());
+            return sleep_abortable<lowres_clock>(user_task ? module->get_task_manager().get_user_task_ttl() : module->get_task_manager().get_task_ttl(), module->abort_source());
         }).then_wrapped([module, id = id()] (auto f) {
             f.ignore_ready_future();
             module->unregister_task(id);
