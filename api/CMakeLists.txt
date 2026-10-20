@@ -31,6 +31,7 @@ set(swagger_files
   api-doc/commitlog.json
   api-doc/compaction_manager.json
   api-doc/client_routes.json
+  api-doc/clocks_test.json
   api-doc/config.json
   api-doc/cql_server_test.json
   api-doc/endpoint_snitch_info.json
@@ -70,6 +71,7 @@ target_sources(api
     api.cc
     cache_service.cc
     client_routes.cc
+    clocks_test.cc
     column_family.cc
     commitlog.cc
     compaction_manager.cc

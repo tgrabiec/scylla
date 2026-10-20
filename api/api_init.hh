@@ -100,6 +100,10 @@ struct http_context {
 future<> set_server_init(http_context& ctx);
 future<> set_server_config(http_context& ctx, db::config& cfg);
 future<> unset_server_config(http_context& ctx);
+#ifdef SCYLLA_ENABLE_ERROR_INJECTION
+future<> set_server_clocks_test(http_context& ctx, db::config& cfg);
+future<> unset_server_clocks_test(http_context& ctx);
+#endif
 future<> set_server_snitch(http_context& ctx, sharded<locator::snitch_ptr>& snitch);
 future<> unset_server_snitch(http_context& ctx);
 future<> set_server_storage_service(http_context& ctx, sharded<service::storage_service>& ss, sharded<db::snapshot_ctl>&, service::raft_group0_client&);

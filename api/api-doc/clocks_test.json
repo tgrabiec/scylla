@@ -1,0 +1,50 @@
+{
+    "apiVersion":"0.0.1",
+    "swaggerVersion":"1.2",
+    "basePath":"{{Protocol}}://{{Host}}",
+    "resourcePath":"/clocks_test",
+    "produces":[
+        "application/json"
+    ],
+    "apis":[
+        {
+            "path":"/clocks_test/forward_jump",
+            "operations":[
+                {
+                    "method":"POST",
+                    "summary":"Move the clocks forward by the given number of seconds: gc_clock, db_clock and the write timestamp clock (by adding to test_clocks_offset_seconds), and lowres_clock, which expires due timeouts. The lowres_clock offset lasts until restart.",
+                    "type":"void",
+                    "nickname":"forward_jump",
+                    "produces":[
+                        "application/json"
+                    ],
+                    "parameters":[
+                        {
+                            "name":"seconds",
+                            "description":"Number of seconds to move the clocks forward by, must not be negative",
+                            "required":true,
+                            "allowMultiple":false,
+                            "type":"long",
+                            "paramType":"query"
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "path":"/clocks_test/offset",
+            "operations":[
+                {
+                    "method":"GET",
+                    "summary":"Get test_clocks_offset_seconds",
+                    "type":"long",
+                    "nickname":"get_offset",
+                    "produces":[
+                        "application/json"
+                    ],
+                    "parameters":[]
+                }
+            ]
+        }
+    ]
+}

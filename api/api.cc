@@ -11,6 +11,7 @@
 #include <seastar/http/transformers.hh>
 #include <seastar/http/api_docs.hh>
 #include "cql_server_test.hh"
+#include "clocks_test.hh"
 #include "storage_service.hh"
 #include "token_metadata.hh"
 #include "commitlog.hh"
@@ -373,6 +374,20 @@ future<> set_hinted_handoff_test(http_context& ctx, sharded<service::storage_pro
 
 future<> unset_hinted_handoff_test(http_context& ctx) {
     return ctx.http_server.set_routes([&ctx] (routes& r) { unset_hinted_handoff_test(ctx, r); });
+}
+
+#endif
+
+#ifdef SCYLLA_ENABLE_ERROR_INJECTION
+
+future<> set_server_clocks_test(http_context& ctx, db::config& cfg) {
+    return register_api(ctx, "clocks_test", "The clocks test API", [&cfg] (http_context& ctx, routes& r) {
+        set_clocks_test(ctx, r, cfg);
+    });
+}
+
+future<> unset_server_clocks_test(http_context& ctx) {
+    return ctx.http_server.set_routes([&ctx] (routes& r) { unset_clocks_test(ctx, r); });
 }
 
 #endif
