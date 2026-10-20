@@ -281,6 +281,21 @@ class ScyllaRESTAPIClient:
         """
         return await self.client.get_json(f"/v2/error_injection/injection/{quote(injection, safe='')}", host=node_ip)
 
+    async def forward_jump_clocks(self, node_ip: str, seconds: int) -> None:
+        """Move gc_clock, db_clock, the write timestamp clock and lowres_clock on `node_ip`
+           forward by `seconds`. Not available in release mode.
+        """
+        if self.build_mode == "release":
+            pytest.fail("The clocks test API is not available in release mode, so the test must be "
+                        "marked with skip_mode(mode='release')")
+        await self.client.post("/clocks_test/forward_jump", host=node_ip, params={"seconds": str(seconds)})
+
+    async def get_clocks_offset(self, node_ip: str) -> int:
+        """Return the clock offset on `node_ip`, in seconds."""
+        data = await self.client.get_json("/clocks_test/offset", host=node_ip)
+        assert isinstance(data, int)
+        return data
+
     async def move_tablet(self, node_ip: str, ks: str, table: str, src_host: HostID, src_shard: int, dst_host: HostID, dst_shard: int, token: int, timeout: Optional[float] = None) -> None:
         await self.client.post(f"/storage_service/tablets/move", host=node_ip, timeout=timeout, params={
             "ks": ks,
