@@ -243,7 +243,7 @@ def test_update_ttl_errors(dynamodb):
 # items with very short delays, "duration" can be set much lower so this
 # test will finish in a much more reasonable time.
 @pytest.mark.veryslow
-def test_ttl_expiration(dynamodb):
+def test_ttl_expiration(dynamodb, clock):
     duration = 1200 if is_aws(dynamodb) else 10
     # delta is a quarter of the test duration, but no less than one second,
     # and we use it to schedule some expirations a bit after the test starts,
@@ -330,6 +330,11 @@ def test_ttl_expiration(dynamodb):
         # minute, and it also allows us to test what happens when an item
         # p5's expiration time is continuously pushed back into the future:
         start_time = time.time()
+        # Jump to p4's expiration time. Push p5's expiration past it first,
+        # and keep it delta ahead of the server's (jumped) clock below.
+        table.update_item(Key={'p': p5},
+            AttributeUpdates={'expiration': {'Value': int(time.time())+2*delta, 'Action': 'PUT'}})
+        clock.jump(delta)
         while time.time() < start_time + duration:
             print(f"--- {int(time.time()-start_time)} seconds")
             if 'Item' in table.get_item(Key={'p': p0}):
@@ -354,7 +359,7 @@ def test_ttl_expiration(dynamodb):
                 print("p9 alive")
             # Always keep p5's expiration delta into the future
             table.update_item(Key={'p': p5},
-                AttributeUpdates={'expiration': {'Value': int(time.time())+delta, 'Action': 'PUT'}})
+                AttributeUpdates={'expiration': {'Value': int(time.time())+clock.offset+delta, 'Action': 'PUT'}})
             if check_expired():
                 break
             time.sleep(duration/15.0)
