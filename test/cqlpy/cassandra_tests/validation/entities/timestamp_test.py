@@ -10,7 +10,6 @@
 
 from ...porting import *
 
-import time
 from cassandra.query import UNSET_VALUE
 
 
@@ -130,7 +129,7 @@ def testTimestampsOnUnsetColumnsWide(cql, test_keyspace):
                    [3, 3, 3, 1])
 
 @pytest.mark.tier2
-def testTimestampAndTTLPrepared(cql, test_keyspace):
+def testTimestampAndTTLPrepared(cql, test_keyspace, clock):
     with create_table(cql, test_keyspace, "(k int, c int, i int, PRIMARY KEY (k, c))") as table:
         execute(cql, table, "INSERT INTO %s (k, c, i) VALUES (1, 1, 1) USING TIMESTAMP ? AND TTL ?;", 1, 5)
         execute(cql, table, "INSERT INTO %s (k, c) VALUES (1, 2) USING TIMESTAMP ? AND TTL ? ;", 1, 5)
@@ -143,11 +142,11 @@ def testTimestampAndTTLPrepared(cql, test_keyspace):
                 [1, 3, 1, 1],
                 [2, 2, None, None],
                 [3, 3, 3, 1])
-        time.sleep(6)
+        clock.jump(6)
         assert_empty(execute(cql, table, "SELECT k, c, i, writetime(i) FROM %s "))
 
 @pytest.mark.tier2
-def testTimestampAndTTLUpdatePrepared(cql, test_keyspace):
+def testTimestampAndTTLUpdatePrepared(cql, test_keyspace, clock):
     with create_table(cql, test_keyspace, "(k int, c int, i int, PRIMARY KEY (k, c))") as table:
         execute(cql, table, "UPDATE %s USING TIMESTAMP ? AND TTL ? SET i=1 WHERE k=1 AND c = 1 ;", 1, 5)
         execute(cql, table, "UPDATE %s USING TIMESTAMP ? AND TTL ? SET i=1 WHERE k=1 AND c = 3 ;", 1, 5)
@@ -158,5 +157,5 @@ def testTimestampAndTTLUpdatePrepared(cql, test_keyspace):
                 [1, 3, 1, 1],
                 [2, 2, 1, 2],
                 [3, 3, 3, 1])
-        time.sleep(6)
+        clock.jump(6)
         assert_empty(execute(cql, table, "SELECT k, c, i, writetime(i) FROM %s "))
