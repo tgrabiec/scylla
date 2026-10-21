@@ -7,7 +7,6 @@ from test.pylib.scylla_cluster_manager import ScyllaClusterManager
 from test.pylib.tablets import get_tablet_replica
 import pytest
 import logging
-import asyncio
 import os
 import glob
 import requests
@@ -100,8 +99,8 @@ async def test_resurrection_while_file_streaming(manager: ScyllaClusterManager):
     logger.info(f'additional data file: {additional_file}')
     logger.info(f'shadowed file:        {shadowed_file}')
 
-    # make sure gc grace has elapsed, so that the tombstone can be garbage collected
-    await asyncio.sleep(1)
+    # move gc_clock past gc grace, so that the tombstone can be garbage collected
+    await manager.forward_jump_clocks(1)
 
     # send the name of the file which needs to be streamed last
     await manager.api.enable_injection(src_server.ip_addr, 'order_sstables_for_streaming', one_shot=False, parameters={'shadowed_file': shadowed_file})

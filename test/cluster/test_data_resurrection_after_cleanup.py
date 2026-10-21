@@ -58,7 +58,7 @@ async def test_data_resurrection_after_cleanup(manager: ScyllaClusterManager):
         await asyncio.gather(*[cql.run_async(f"DELETE FROM {table} WHERE pk={k};") for k in deleted_keys])
         # Make sures tombstones are gone
         await manager.api.flush_keyspace(servers[1].ip_addr, ks)
-        time.sleep(1)
+        await manager.forward_jump_clocks(1)
         await manager.api.keyspace_compaction(servers[1].ip_addr, ks)
 
         # Regains ownership of deleted data
