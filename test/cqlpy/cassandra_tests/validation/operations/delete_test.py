@@ -947,7 +947,7 @@ def testDeleteWithSecondaryIndices(cql, test_keyspace, forceFlush):
         assertInvalid(cql, table,
                              "DELETE FROM %s WHERE values CONTAINS ?", 3)
 
-def testDeleteWithOnlyPK(cql, test_keyspace):
+def testDeleteWithOnlyPK(cql, test_keyspace, clock):
     with create_table(cql, test_keyspace, "(k int, v int, primary key (k, v)) WITH gc_grace_seconds=1") as table:
         # This is a regression test for CASSANDRA-11102
         execute(cql, table, "INSERT INTO %s(k, v) VALUES (?, ?)", 1, 2)
@@ -966,7 +966,7 @@ def testDeleteWithOnlyPK(cql, test_keyspace):
 
         assertRows(execute(cql, table, "SELECT * FROM %s"), row(1, 2))
 
-        time.sleep(1.0)
+        clock.jump(1.0)
         compact(cql, table)
 
         assertRows(execute(cql, table, "SELECT * FROM %s"), row(1, 2))

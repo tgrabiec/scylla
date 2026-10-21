@@ -1702,7 +1702,7 @@ def test_shadowable_tombstone_and_newer_atomic_cells(cql, test_keyspace):
 # This test reaches the same code paths as cassandra_tests/validation/entities/
 # secondary_index_test.py::testIndexOnRegularColumnInsertExpiringColumn
 # but uses a materialized view - not a secondary index.
-def test_view_update_with_ttl(cql, test_keyspace):
+def test_view_update_with_ttl(cql, test_keyspace, clock):
     # To be able to set a TTL on a view key column x, obviously it needs to
     # be a *regular* column in the base (key columns do not have TTLs).
     with new_test_table(cql, test_keyspace, 'p int, x int, y int, primary key (p)') as table:
@@ -1710,23 +1710,22 @@ def test_view_update_with_ttl(cql, test_keyspace):
             # Unfortunately, because we can't read the TTL of a row marker
             # (issue #14019) we can't verify that the correct TTL was set
             # on the view row marker - such that it would cause it to
-            # eventually expire. So we are forced to actually sleep waiting
-            # for the data to expire to verify the entire row is gone.
+            # eventually expire. So we are forced to let the data expire
+            # to verify the entire row is gone.
             # A wrong TTL on the row marker would have left an empty row,
             # and a wrong TTL on the cell y would have left that in the view.
-            # This means this test takes two seconds :-(
             cql.execute(f'insert into {table} (p,x,y) values (1,2,3) using ttl 1')
-            time.sleep(1.1)
+            clock.jump(1.1)
             assert [] == list(cql.execute(f'select * from {mv}'))
             # Updating x without a TTL will make this row appear again
             # We assume that on a single node, view updates are synchronous
             # so we don't need to loop the read.
             cql.execute(f'update {table} set x=4, y=5 where p=1')
             assert [(4,1,5)] == list(cql.execute(f'select * from {mv}'))
-            # Update x again with a TTL of 1 and sleep. The view row should
-            # disappear completely (including the row marker and y)
+            # Update x again with a TTL of 1 and let it expire. The view row
+            # should disappear completely (including the row marker and y)
             cql.execute(f'update {table} using ttl 1 set x=5 where p=1')
-            time.sleep(1.1)
+            clock.jump(1.1)
             assert [] == list(cql.execute(f'select * from {mv}'))
 
 # Test view representation in REST API

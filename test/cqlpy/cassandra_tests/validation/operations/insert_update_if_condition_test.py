@@ -163,7 +163,7 @@ def testNonEqConditionalUpdate(cql, test_keyspace, is_scylla):
                              "UPDATE %s SET v1 = 3, v2 = 'bar' WHERE k = 0 IF v1 != ?", unset())
 
 # Migrated from cql_tests.py:TestCQL.conditional_delete_test()
-def testConditionalDelete(cql, test_keyspace, is_scylla):
+def testConditionalDelete(cql, test_keyspace, is_scylla, clock):
     with create_table(cql, test_keyspace, "(k int PRIMARY KEY, v1 int,)") as table:
         assertRows(execute(cql, table, "DELETE FROM %s WHERE k=1 IF EXISTS"), row(false, null, null) if is_scylla else row(false))
 
@@ -173,12 +173,12 @@ def testConditionalDelete(cql, test_keyspace, is_scylla):
         assertRows(execute(cql, table, "DELETE FROM %s WHERE k=1 IF EXISTS"), row(false, null, null) if is_scylla else row(false))
 
         execute(cql, table, "UPDATE %s USING TTL 1 SET v1=2 WHERE k=1")
-        time.sleep(1.01)
+        clock.jump(1.01)
         assertRows(execute(cql, table, "DELETE FROM %s WHERE k=1 IF EXISTS"), row(false, null, null) if is_scylla else row(false))
         assertEmpty(execute(cql, table, "SELECT * FROM %s WHERE k=1"))
 
         execute(cql, table, "INSERT INTO %s (k, v1) VALUES (2, 2) USING TTL 1")
-        time.sleep(1.01)
+        clock.jump(1.01)
         assertRows(execute(cql, table, "DELETE FROM %s WHERE k=2 IF EXISTS"), row(false, null, null) if is_scylla else row(false))
         assertEmpty(execute(cql, table, "SELECT * FROM %s WHERE k=2"))
 
@@ -190,7 +190,7 @@ def testConditionalDelete(cql, test_keyspace, is_scylla):
 
         execute(cql, table, "INSERT INTO %s (k, v1) VALUES (4, 2)")
         execute(cql, table, "UPDATE %s USING TTL 1 SET v1=2 WHERE k=4")
-        time.sleep(1.01)
+        clock.jump(1.01)
         assertRows(execute(cql, table, "SELECT * FROM %s WHERE k=4"), row(4, null))
         assertRows(execute(cql, table, "DELETE FROM %s WHERE k=4 IF EXISTS"), row(true, 4, null) if is_scylla else row(true))
         assertEmpty(execute(cql, table, "SELECT * FROM %s WHERE k=4"))
@@ -277,12 +277,12 @@ def testConditionalDelete(cql, test_keyspace, is_scylla):
                    row(true, 1) if is_scylla else row(true))
 
 # Migrated from cql_tests.py:TestCQL.cas_and_ttl_test()
-def testCasAndTTL(cql, test_keyspace, is_scylla):
+def testCasAndTTL(cql, test_keyspace, is_scylla, clock):
     with create_table(cql, test_keyspace, "(k int PRIMARY KEY, v int, lock boolean)") as table:
         execute(cql, table, "INSERT INTO %s (k, v, lock) VALUES (0, 0, false)")
         execute(cql, table, "UPDATE %s USING TTL 1 SET lock=true WHERE k=0")
 
-        time.sleep(1.01)
+        clock.jump(1.01)
         assertRows(execute(cql, table, "UPDATE %s SET v = 1 WHERE k = 0 IF lock = null"),
                    row(true, null) if is_scylla else row(true))
 
