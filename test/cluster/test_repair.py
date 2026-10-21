@@ -197,7 +197,7 @@ async def do_batchlog_flush_in_repair(manager, cache_time_in_ms):
     duration = await repair("First")
     total_repair_duration += duration
 
-    await asyncio.sleep(1 + (cache_time_in_ms / 1000))
+    await manager.forward_jump_clocks(1 + cache_time_in_ms // 1000)
 
     count_before = await manager.api.get_injection_enter_count(node1.ip_addr, "repair_flush_hints_batchlog_handler")
     duration = await repair("Second")
@@ -270,7 +270,7 @@ async def test_repair_batchlog_flush_bounded_when_replay_is_stuck(manager):
 
         # A batch is only replayed once it is older than twice
         # write_request_timeout_in_ms, 4s with the default of 2s.
-        await asyncio.sleep(5)
+        await manager.forward_jump_clocks(5)
 
         await manager.api.enable_injection(node1.ip_addr, "repair_flush_hints_batchlog_timeout", one_shot=False,
                                            parameters={"batchlog_timeout_in_s": "2"})
@@ -781,11 +781,11 @@ async def test_data_resurrection_from_repair_range_spanning_replica_sets(manager
             assert dead, f"expected the tombstone on replica {ip} of ({a}, {b}]"
 
         # gc_before is derived from the repair time, at gc_clock's second
-        # granularity; wait out the granularity so the tombstone is strictly
-        # older than the repair. This is a fixed clock gap, not a condition that
-        # can be polled for, and USING TIMESTAMP would not help: tombstone GC
-        # compares the tombstone's deletion time, not its write timestamp.
-        await asyncio.sleep(2)
+        # granularity; move gc_clock past the granularity so the tombstone is
+        # strictly older than the repair. USING TIMESTAMP would not help:
+        # tombstone GC compares the tombstone's deletion time, not its write
+        # timestamp.
+        await manager.forward_jump_clocks(2)
 
         logger.info(f"Repairing merged range ({a}, {c}] from {coordinator_ip}")
         await _repair_range(manager, coordinator_ip, ks, "tbl", a, c)
