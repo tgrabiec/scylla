@@ -396,6 +396,8 @@ async def test_cdc_stream_garbage_collection(manager: ScyllaClusterManager):
 
         # set short TTL to trigger garbage collection
         await cql.run_async(f"ALTER TABLE {ks}.test WITH cdc = {{'enabled': true, 'ttl': 5}}")
+        # Move db_clock past the TTL of the old stream set.
+        await manager.forward_jump_clocks(6)
 
         async def streams_garbage_collected():
             rows = await cql.run_async(f"SELECT * FROM system.cdc_timestamps WHERE keyspace_name='{ks}' AND table_name='test'")
