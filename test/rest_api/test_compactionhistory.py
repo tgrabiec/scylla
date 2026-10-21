@@ -7,7 +7,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from ..cqlpy.util import new_test_table, new_test_keyspace, sleep_till_whole_second
+from ..cqlpy.util import new_test_table, new_test_keyspace
 
 @dataclass
 class TombstonePurgeStats:
@@ -183,7 +183,7 @@ def test_compactionhistory_rows_merged_time_window_compaction_strategy(cql, rest
             assert extractRowsMergedAsSortedList(response, ks) == [{"key": 1, "value": 27}, {"key": 2, "value": 10}]
 
 
-def test_compactionhistory_tombstone_purge_statistics(cql, rest_api):
+def test_compactionhistory_tombstone_purge_statistics(cql, rest_api, clock):
     with new_test_keyspace(cql, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1}") as ks:
         with new_test_table(cql, ks, "pk int, ck int, v int, PRIMARY KEY (pk, ck)",
                             "WITH compaction = {'class': 'NullCompactionStrategy'} AND tombstone_gc = {'mode': 'immediate'};") as cf:
@@ -196,8 +196,8 @@ def test_compactionhistory_tombstone_purge_statistics(cql, rest_api):
             alterSomeData(cql, cf, timestamp - 5)
             flushAllTablesTwice(rest_api)
 
-            # Sleep a second to let the commitlog minimum gc time, in seconds, be greater than the tombstone deletion time
-            sleep_till_whole_second(1)
+            # Move the clocks a second ahead to let the commitlog minimum gc time, in seconds, be greater than the tombstone deletion time
+            clock.jump(1)
             response = rest_api.send("POST", f"storage_service/keyspace_compaction/{ks}")
             assert response.status_code == requests.codes.ok
 
@@ -209,7 +209,7 @@ def test_compactionhistory_tombstone_purge_statistics(cql, rest_api):
             assert len(stats.input) == 4 and len(stats.output) == 2
 
 
-def test_compactionhistory_tombstone_purge_statistics_overlapping_with_memtable(cql, rest_api):
+def test_compactionhistory_tombstone_purge_statistics_overlapping_with_memtable(cql, rest_api, clock):
     with new_test_keyspace(cql, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1}") as ks:
         with new_test_table(cql, ks, "pk int, ck int, v int, PRIMARY KEY (pk, ck)",
                             "WITH compaction = {'class': 'NullCompactionStrategy'} AND tombstone_gc = {'mode': 'immediate'};") as cf:
@@ -219,8 +219,8 @@ def test_compactionhistory_tombstone_purge_statistics_overlapping_with_memtable(
             alterSomeData(cql, cf, timestamp - 5)
             flushAllTablesTwice(rest_api)
 
-            # Sleep a second to let the commitlog minimum gc time, in seconds, be greater than the tombstone deletion time
-            sleep_till_whole_second(1)
+            # Move the clocks a second ahead to let the commitlog minimum gc time, in seconds, be greater than the tombstone deletion time
+            clock.jump(1)
             populateSomeData(cql, cf, (1, 11), timestamp - 10)
             flushAllTablesTwice(rest_api)
 
@@ -236,7 +236,7 @@ def test_compactionhistory_tombstone_purge_statistics_overlapping_with_memtable(
             assert stats == TombstonePurgeStats(4, 1, 0)
 
 
-def test_compactionhistory_tombstone_purge_statistics_overlapping_with_other_sstables(cql, rest_api):
+def test_compactionhistory_tombstone_purge_statistics_overlapping_with_other_sstables(cql, rest_api, clock):
     with new_test_keyspace(cql, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1}") as ks:
         compaction_opt = "{'class': 'SizeTieredCompactionStrategy', 'min_threshold': 2, 'min_sstable_size': 0}"
         with new_test_table(cql, ks, "pk int, ck int, v int, PRIMARY KEY (pk, ck)",
@@ -257,8 +257,8 @@ def test_compactionhistory_tombstone_purge_statistics_overlapping_with_other_sst
             alterSomeData(cql, cf, timestamp - 5)
             flushAllTablesTwice(rest_api)
 
-            # Sleep a second to let the commitlog minimum gc time, in seconds, be greater than the tombstone deletion time
-            sleep_till_whole_second(1)
+            # Move the clocks a second ahead to let the commitlog minimum gc time, in seconds, be greater than the tombstone deletion time
+            clock.jump(1)
             populateSomeData(cql, cf, (1, 11), timestamp - 10)
             flushAllTablesTwice(rest_api)
 
