@@ -146,15 +146,31 @@ async def test_client_routes_lost_quorum(request, manager: ScyllaClusterManager)
     await manager.api.client.post("/v2/client-routes", host=servers[0].ip_addr, json=[generate_client_routes_entry(0)], timeout=timeout + 60)
     await wait_for_expected_client_routes_size(cql, 1)
 
+    stopped_host_ids = [await manager.get_host_id(server.server_id) for server in servers[1:]]
+    log_file = await manager.server_open_log(servers[0].server_id)
+    mark = await log_file.mark()
     for server in servers[1:]:
         await manager.server_stop(server.server_id, convict=False)
+
+    # The no-quorum message requires the failure detector to see the stopped nodes dead.
+    for host_id in stopped_host_ids:
+        await log_file.wait_for(f"marking Raft server {host_id} as dead for raft groups", from_mark=mark, timeout=60)
 
     async def fail_req(f):
         with pytest.raises(HTTPError) as exc:
             await f("/v2/client-routes", host=servers[0].ip_addr, json=[generate_client_routes_entry(0)], timeout=timeout + 60)
         assert "raft operation [read_barrier] timed out, there is no raft quorum" in exc.value.message
 
-    await asyncio.gather(fail_req(manager.api.client.post), fail_req(manager.api.client.delete))
+    reqs = asyncio.gather(fail_req(manager.api.client.post), fail_req(manager.api.client.delete))
+    # The requests serialize on the group 0 operation mutex, so each one arms
+    # its read_barrier timeout only after the previous one fails. Jump past the
+    # timeout until both fail, repeating jumps which land before a request arms it.
+    for _ in range(4):
+        await manager.forward_jump_clocks(timeout)
+        done, _ = await asyncio.wait([reqs], timeout=1)
+        if done:
+            break
+    await reqs
     await wait_for_expected_client_routes_size(cql, 1)
 
 def setup_events_test(cql, received_events, monkeypatch):
