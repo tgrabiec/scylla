@@ -88,8 +88,15 @@ async def test_raft_recovery_during_join(manager: ScyllaClusterManager):
     await asyncio.gather(*(manager.server_stop(server_id=srv.server_id, convict=False) for srv in dead_servers))
 
     logging.info('Checking that group 0 has no majority')
+    barrier = asyncio.ensure_future(read_barrier(manager.api, live_servers[0].ip_addr, timeout=2))
+    # Repeat jumps which land before the request arms its timeout.
+    for _ in range(3):
+        await manager.forward_jump_clocks(2)
+        done, _ = await asyncio.wait([barrier], timeout=1)
+        if done:
+            break
     with pytest.raises(Exception, match="raft operation \\[read_barrier\\] timed out"):
-        await read_barrier(manager.api, live_servers[0].ip_addr, timeout=2)
+        await barrier
 
     logging.info(f'Unblocking the topology coordinator on server {coordinator}')
     await manager.api.message_injection(coordinator.ip_addr, 'delay_node_bootstrap')
