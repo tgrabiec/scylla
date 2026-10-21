@@ -9,6 +9,7 @@ from test.pylib.util import wait_for_first_completed
 
 import asyncio
 from datetime import datetime, timedelta
+import math
 import pytest
 import logging
 import time
@@ -55,7 +56,8 @@ async def test_long_query_timeout_erm(request, manager: ScyllaClusterManager, qu
     # Override config:
     #  - rf_rack_valid_keyspaces=False to keep number of nodes small as in-rack redundancy is required
     #  - request_timeout_on_shutdown_in_seconds=10 to shorten waiting afters cylladb#24499 was implemented
-    servers = await manager.servers_add(4, config={"rf_rack_valid_keyspaces": False, "request_timeout_on_shutdown_in_seconds": 10})
+    request_timeout_on_shutdown = 10
+    servers = await manager.servers_add(4, config={"rf_rack_valid_keyspaces": False, "request_timeout_on_shutdown_in_seconds": request_timeout_on_shutdown})
 
     selected_server = servers[0]
     logger.info(f"Creating a client with selected_server: {selected_server}")
@@ -121,13 +123,31 @@ async def test_long_query_timeout_erm(request, manager: ScyllaClusterManager, qu
         logger.warning("Too much time passed and query already might be timed-out")
 
     if shutdown_nodes:
+        # On shutdown, the CQL server waits request_timeout_on_shutdown_in_seconds on
+        # lowres_clock for the pending query before it closes the connection.
+        await manager.api.set_logger_level(selected_server.ip_addr, "cql_server", "debug")
+        selected_log = await manager.server_open_log(selected_server.server_id)
+        selected_mark = await selected_log.mark()
+
+        stop = asyncio.create_task(manager.server_stop_gracefully(selected_server.server_id))
+        await selected_log.wait_for("Waiting for connections to stop", from_mark=selected_mark)
+        if not stop.done():
+            await manager.forward_jump_clocks(request_timeout_on_shutdown)
+        await stop
         for server in servers:
             await manager.server_stop_gracefully(server.server_id)
     else:
         if should_wait_for_timeout:
+            # The coordinator sleeps on lowres_clock until the query timeout passes.
+            jump = 0
+            remaining = (expected_timeout_time - datetime.now()).total_seconds()
+            if remaining > 0:
+                assert not query_future.done()
+                jump = math.ceil(remaining) + 1
+                await manager.forward_jump_clocks(jump)
             with pytest.raises(Exception, match="Operation time"):
                 await query_future
-            assert datetime.now() > expected_timeout_time
+            assert datetime.now() + timedelta(seconds=jump) > expected_timeout_time
         else:
             with pytest.raises(Exception, match="Operation failed for"):
                 await query_future
