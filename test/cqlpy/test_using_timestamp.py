@@ -153,7 +153,7 @@ def test_rewrite_different_values_using_same_timestamp(cql, table1):
         cql.execute(f"INSERT INTO {table} (k, v) VALUES ({k}, {v2}) USING TIMESTAMP {ts} and TTL 10")
         assert_value(k, v1)
 
-def test_rewrite_different_values_using_same_timestamp_and_expiration(scylla_only, cql, table1):
+def test_rewrite_different_values_using_same_timestamp_and_expiration(scylla_only, cql, table1, clock):
     """
     Rewriting cells more than once with the same timestamp
     requires tie-breaking to decide which of the cells prevails.
@@ -176,11 +176,11 @@ def test_rewrite_different_values_using_same_timestamp_and_expiration(scylla_onl
         ensure_sync_with_tick()
         k = unique_key_int()
         cql.execute(f"INSERT INTO {table} (k, v) VALUES ({k}, {v1}) USING TIMESTAMP {ts} and TTL 3")
-        time.sleep(1)
+        clock.jump(1)
         cql.execute(f"INSERT INTO {table} (k, v) VALUES ({k}, {v2}) USING TIMESTAMP {ts} and TTL 2")
         assert_value(k, v2)
 
-def test_rewrite_using_same_timestamp_select_after_expiration(cql, table1):
+def test_rewrite_using_same_timestamp_select_after_expiration(cql, table1, clock):
     """
     Reproducer for https://github.com/scylladb/scylladb/issues/14182
 
@@ -209,7 +209,7 @@ def test_rewrite_using_same_timestamp_select_after_expiration(cql, table1):
 
         # wait until first insert expires, and expect 2nd value.
         # Null value was returned due to #14182 when v1 > v2
-        time.sleep(1)
+        clock.jump(1)
         assert_value(k, v2)
 
 def test_rewrite_multiple_cells_using_same_timestamp(cql, table1):

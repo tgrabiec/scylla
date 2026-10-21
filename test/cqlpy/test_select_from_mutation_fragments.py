@@ -18,7 +18,6 @@ from . import util
 import pytest
 import requests
 import subprocess
-import time
 
 
 @pytest.fixture(scope="module")
@@ -715,12 +714,12 @@ def test_mutation_fragments_vs_token(cql, test_keyspace, scylla_only):
         cql.execute(f'SELECT * FROM MUTATION_FRAGMENTS({table}) WHERE token(pk) <= -1')
 
 
-def test_mutation_fragments_scan_includes_dead_partitions(cql, test_keyspace, scylla_only):
+def test_mutation_fragments_scan_includes_dead_partitions(cql, test_keyspace, scylla_only, clock):
     with util.new_test_table(cql, test_keyspace, 'pk int PRIMARY KEY, c int',
                              " WITH compaction = {'class':'NullCompactionStrategy'}"
                              " AND tombstone_gc = {'mode': 'immediate', 'propagation_delay_in_seconds': 0}") as table:
         cql.execute(f'DELETE FROM {table} WHERE pk = 0')
-        time.sleep(1) # need one second sleep to make the above tombstone gc-eligible
+        clock.jump(1) # the above tombstone becomes gc-eligible after one second
         res = list(cql.execute(f'SELECT * FROM MUTATION_FRAGMENTS({table})'))
         assert len(res) == 2 # partition start and end fragments
 

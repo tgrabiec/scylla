@@ -1045,39 +1045,35 @@ def testIndexOnNonFrozenUDT(cql, test_keyspace):
             assert_invalid(cql, table, "CREATE INDEX ON %s (values(v))")
             assert_invalid(cql, table, "CREATE INDEX ON %s (full(v))")
 
-# TODO: The following tests unfortunately take 1-2 second each. It would
-# have been nice to provide a REST API to move the server's clock forward -
-# like we do in C++ unit tests. Alternatively, could we have a sub-second
-# TTL feature?
-def testIndexOnPartitionKeyInsertExpiringColumn(cql, test_keyspace):
+def testIndexOnPartitionKeyInsertExpiringColumn(cql, test_keyspace, clock):
     with create_table(cql, test_keyspace, f"(k1 int, k2 int, a int, b int, PRIMARY KEY ((k1, k2)))") as table:
         execute(cql, table, "CREATE INDEX on %s(k1)")
         execute(cql, table, "INSERT INTO %s (k1, k2, a, b) VALUES (1, 2, 3, 4)")
         assert_rows(execute(cql, table, "SELECT * FROM %s WHERE k1 = 1"), [1, 2, 3, 4])
         execute(cql, table, "UPDATE %s USING TTL 1 SET b = 10 WHERE k1 = 1 AND k2 = 2")
-        time.sleep(1.1)
+        clock.jump(1.1)
         assert_rows(execute(cql, table, "SELECT * FROM %s WHERE k1 = 1"), [1, 2, 3, None])
 
-def testIndexOnClusteringKeyInsertExpiringColumn(cql, test_keyspace):
+def testIndexOnClusteringKeyInsertExpiringColumn(cql, test_keyspace, clock):
     with create_table(cql, test_keyspace, f"(pk int, ck int, a int, b int, PRIMARY KEY (pk, ck))") as table:
         execute(cql, table, "CREATE INDEX on %s(ck)")
         execute(cql, table, "INSERT INTO %s (pk, ck, a, b) VALUES (1, 2, 3, 4)")
         assert_rows(execute(cql, table, "SELECT * FROM %s WHERE ck = 2"), [1, 2, 3, 4])
         execute(cql, table, "UPDATE %s USING TTL 1 SET b = 10 WHERE pk = 1 AND ck = 2")
-        time.sleep(1.1)
+        clock.jump(1.1)
         assert_rows(execute(cql, table, "SELECT * FROM %s WHERE ck = 2"), [1, 2, 3, None])
 
-def testIndexOnRegularColumnInsertExpiringColumn(cql, test_keyspace):
+def testIndexOnRegularColumnInsertExpiringColumn(cql, test_keyspace, clock):
     with create_table(cql, test_keyspace, f"(pk int, ck int, a int, b int, PRIMARY KEY (pk, ck))") as table:
         execute(cql, table, "CREATE INDEX on %s(a)")
         execute(cql, table, "INSERT INTO %s (pk, ck, a, b) VALUES (1, 2, 3, 4)")
         assert_rows(execute(cql, table, "SELECT * FROM %s WHERE a = 3"), [1, 2, 3, 4])
 
         execute(cql, table, "UPDATE %s USING TTL 1 SET b = 10 WHERE pk = 1 AND ck = 2")
-        time.sleep(1.1)
+        clock.jump(1.1)
         assert_rows(execute(cql, table, "SELECT * FROM %s WHERE a = 3"), [1, 2, 3, None])
 
         execute(cql, table, "UPDATE %s USING TTL 1 SET a = 5 WHERE pk = 1 AND ck = 2")
-        time.sleep(1.1)
+        clock.jump(1.1)
         assert_empty(execute(cql, table, "SELECT * FROM %s WHERE a = 3"))
         assert_empty(execute(cql, table, "SELECT * FROM %s WHERE a = 5"))
