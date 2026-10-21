@@ -5,6 +5,7 @@
 # Various utility functions which are useful for multiple tests
 
 import string
+import math
 import random
 import collections
 import re
@@ -16,6 +17,7 @@ import pytest
 from cassandra import InvalidRequest
 from contextlib import contextmanager
 from botocore import UNSIGNED
+from botocore.exceptions import ClientError
 from botocore.hooks import HierarchicalEmitter
 import boto3
 
@@ -393,6 +395,64 @@ def scylla_config_temporary(dynamodb, name, value, nop = False):
         yield
     finally:
         scylla_config_write(dynamodb, name, original_value)
+
+# ServerClock lets a test move Scylla's clocks forward, so a TTL or a server
+# timer expires without really waiting. It mirrors ServerClock in
+# test/cqlpy/util.py - see there for what a jump moves and its caveats. In
+# short: jump(n) calls the REST API's /clocks_test/forward_jump, cumulatively
+# and rounded up to whole seconds, and restore() puts the
+# test_clocks_offset_seconds option back to its value before the first jump.
+# Alternator writes always get server-generated timestamps, so a write after
+# restore() loses to a write to the same item made while ahead. Each test
+# using its own unique table avoids that.
+#
+# Where the server can't jump - on AWS, on a release build, without a REST
+# API, or when the system.config table isn't writable (so restore() would
+# fail) - jump(n) sleeps n seconds, so the test runs everywhere, only slower.
+class ServerClock:
+    def __init__(self, dynamodb, rest_api):
+        self._dynamodb = dynamodb
+        self._rest_api = None
+        self._original = None
+        # Seconds by which jump() moved the server's clocks ahead of real time.
+        self.offset = 0
+        if rest_api is None:
+            return
+        response = requests.get(f'{rest_api}/clocks_test/offset')
+        if not response.ok:
+            return
+        original = int(response.json())
+        try:
+            scylla_config_write(dynamodb, 'test_clocks_offset_seconds', str(original))
+        except ClientError:
+            return
+        self._rest_api = rest_api
+        self._original = original
+
+    @property
+    def can_jump(self):
+        return self._rest_api is not None
+
+    def jump(self, seconds):
+        if not self.can_jump:
+            time.sleep(seconds)
+            return
+        seconds = math.ceil(seconds)
+        requests.post(f'{self._rest_api}/clocks_test/forward_jump', params={'seconds': seconds}).raise_for_status()
+        self.offset += seconds
+
+    def restore(self):
+        if self.offset:
+            scylla_config_write(self._dynamodb, 'test_clocks_offset_seconds', str(self._original))
+            self.offset = 0
+
+@contextmanager
+def server_clock(dynamodb, rest_api):
+    clock = ServerClock(dynamodb, rest_api)
+    try:
+        yield clock
+    finally:
+        clock.restore()
 
 # get_cert() returns the (cert_file, key_file) tuple that should be passed
 # as the "cert" parameter of requests.get()/post() to authenticate to the
