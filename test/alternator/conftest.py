@@ -15,7 +15,7 @@ import requests
 import re
 from botocore import UNSIGNED
 
-from test.alternator.util import create_test_table, is_aws, scylla_log
+from test.alternator.util import create_test_table, is_aws, scylla_log, server_clock
 from test.conftest import dynamic_scope
 from test.cqlpy.conftest import host  # add required fixtures
 from test.pylib.driver_utils import safe_driver_shutdown
@@ -475,6 +475,14 @@ def optional_rest_api(dynamodb):
     except:
         return None
     return url
+
+# The "clock" fixture gives a test a ServerClock (see util.py), which moves
+# the server's clocks forward, and restores the clock offset when the test
+# ends.
+@pytest.fixture(scope="function")
+def clock(dynamodb, optional_rest_api):
+    with server_clock(dynamodb, optional_rest_api) as c:
+        yield c
 
 # Fixture to check once whether newly created Alternator tables use the
 # tablet feature. It is used by the xfail_tablets and skip_tablets fixtures
