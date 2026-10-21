@@ -324,6 +324,7 @@ def run_scylla_cmd(pid, dir):
         '--experimental-features=logstor',
         '--enable-tablets=true',
         '--enable-user-defined-functions', '1',
+        '--enable-test-api', '1',
         # Views with tablets refuse to work if this option is not on :-(
         '--rf-rack-valid-keyspaces=1',
         # Set up authentication in order to allow testing this module
@@ -423,6 +424,8 @@ def run_precompiled_scylla_cmd(exe, pid, dir):
         cmd.remove('--logstor-file-size-in-mb=4')
     if major < [2026,4]:
         cmd.remove('--logstor-sparse-files=true')
+        i = cmd.index('--enable-test-api')
+        del cmd[i:i+2]
     return (cmd, env)
 
 # Get a Cluster object to connect to CQL at the given IP address (and with
