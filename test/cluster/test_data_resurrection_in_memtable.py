@@ -82,9 +82,9 @@ async def run_test_cache_tombstone_gc(manager: ScyllaClusterManager, statement_p
 
         await manager.api.tablet_repair(node1.ip_addr, ks, "tbl", "all", await_completion=True)
 
-        # Give time for immediate-mode tombstone gc to take effect.
+        # Move gc_clock forward for immediate-mode tombstone gc to take effect.
         # It needs tombstone.expiry < now(), with second resolution.
-        time.sleep(2)
+        await manager.forward_jump_clocks(2)
 
         dump_mutation_fragments("after repair")
 
