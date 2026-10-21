@@ -14,7 +14,7 @@ import requests
 
 from test.conftest import dynamic_scope
 from test.cqlpy.conftest import host, cql, this_dc  # add required fixtures
-from test.cqlpy.util import unique_name, new_test_keyspace, keyspace_has_tablets, is_scylla
+from test.cqlpy.util import unique_name, new_test_keyspace, keyspace_has_tablets, is_scylla, server_clock
 from test.pylib.skip_types import skip_env
 from test.pylib.connect_options import add_host_option, add_cql_connection_options
 
@@ -55,6 +55,14 @@ class RestApiSession:
 def rest_api(request, host):
     port = request.config.getoption('api_port')
     return RestApiSession(host, port)
+
+# The "clock" fixture gives a test a ServerClock (see test/cqlpy/util.py),
+# which moves the server's clocks forward, and restores the clock offset when
+# the test ends.
+@pytest.fixture(scope="function")
+def clock(cql, rest_api):
+    with server_clock(cql, f"http://{rest_api.host}:{rest_api.port}") as c:
+        yield c
 
 # The "scylla_only" fixture can be used by tests for Scylla-only features,
 # which do not exist on Apache Cassandra. A test using this fixture will be
