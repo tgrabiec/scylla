@@ -6,7 +6,7 @@ import time
 
 from ..cqlpy.util import new_test_table, new_test_keyspace
 from test.rest_api.rest_util import new_test_module, new_test_task, set_tmp_task_ttl, ThreadWrapper, scylla_inject_error, set_tmp_user_task_ttl
-from test.rest_api.task_manager_utils import check_field_correctness, check_status_correctness, assert_task_does_not_exist, list_modules, get_task_status, list_tasks, get_task_status_recursively, wait_for_task, wait_for_task_allow_unregistered, wait_for_task_unregistration, drain_module_tasks, abort_task
+from test.rest_api.task_manager_utils import check_field_correctness, check_status_correctness, list_modules, get_task_status, list_tasks, get_task_status_recursively, wait_for_task, wait_for_task_allow_unregistered, wait_for_task_unregistration, drain_module_tasks, abort_task
 
 long_time = 1000000000
 
@@ -113,7 +113,7 @@ def test_task_manager_wait(rest_api):
             x.join()
 
 @pytest.mark.skip_mode(mode='release', reason='task_manager components is not available in release')
-def test_task_manager_ttl(rest_api):
+def test_task_manager_ttl(rest_api, clock):
     with new_test_module(rest_api):
         args0 = {"keyspace": "keyspace0", "table": "table0"}
         args1 = {"keyspace": "keyspace0", "table": "table0", "shard": "1"}
@@ -128,12 +128,12 @@ def test_task_manager_ttl(rest_api):
                     resp = rest_api.send("POST", f"task_manager_test/finish_test_task/{task1}")
                     resp.raise_for_status()
 
-                    time.sleep(ttl + 1)
-                    assert_task_does_not_exist(rest_api, task0)
-                    assert_task_does_not_exist(rest_api, task1)
+                    clock.jump(ttl)
+                    wait_for_task_unregistration(rest_api, task0)
+                    wait_for_task_unregistration(rest_api, task1)
 
 @pytest.mark.skip_mode(mode='release', reason='task_manager components is not available in release')
-def test_task_manager_user_ttl(rest_api):
+def test_task_manager_user_ttl(rest_api, clock):
     with new_test_module(rest_api):
         args0 = {"keyspace": "keyspace0", "table": "table0", "user_task": True}
         args1 = {"keyspace": "keyspace0", "table": "table0", "shard": "1", "user_task": True}
@@ -150,9 +150,9 @@ def test_task_manager_user_ttl(rest_api):
                         resp = rest_api.send("POST", f"task_manager_test/finish_test_task/{task1}")
                         resp.raise_for_status()
 
-                        time.sleep(user_ttl + 1)
-                        assert_task_does_not_exist(rest_api, task0)
-                        assert_task_does_not_exist(rest_api, task1)
+                        clock.jump(user_ttl)
+                        wait_for_task_unregistration(rest_api, task0)
+                        wait_for_task_unregistration(rest_api, task1)
 
 @pytest.mark.skip_mode(mode='release', reason='task_manager components is not available in release')
 def test_task_manager_sequence_number(rest_api):
