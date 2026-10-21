@@ -57,7 +57,7 @@ def test_snapshots_table(scylla_only, cql, test_keyspace, scylla_data_dir):
         verify_snapshot_dir(scylla_data_dir, keyspace_name, table_name, test_tag, False)
 
 @pytest.mark.parametrize("ttl", [0, 5])
-def test_snapshots_dropped_table(scylla_only, cql, test_keyspace, scylla_data_dir, ttl):
+def test_snapshots_dropped_table(scylla_only, cql, test_keyspace, scylla_data_dir, ttl, clock):
     cql.execute(f"UPDATE system.config SET value = '{ttl}' WHERE name = 'auto_snapshot_ttl'")
     test_tag = util.unique_name()
     with util.new_test_table(cql, test_keyspace, 'pk int PRIMARY KEY, v int') as table:
@@ -68,9 +68,9 @@ def test_snapshots_dropped_table(scylla_only, cql, test_keyspace, scylla_data_di
         keyspace_name, table_name = table.split('.')
         if ttl:
             deadline = expiry + 10
-            time.sleep(ttl)
+            clock.jump(ttl)
             while snapshot_dir_exists(scylla_data_dir, keyspace_name, table_name, test_tag)[1] and time.time() < deadline:
-                time.sleep(1)
+                time.sleep(0.1)
         else:
             # For ttl == 0, explicitly delete the snapshot and verify removal.
             nodetool.del_snapshot(cql, test_tag)
