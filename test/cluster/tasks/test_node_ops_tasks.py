@@ -226,7 +226,7 @@ async def test_node_ops_tasks_ttl(manager: ScyllaClusterManager):
     tm = TaskManagerClient(manager.api)
     servers = [await manager.server_add(cmdline=cmdline) for _ in range(2)]
     [await tm.set_user_task_ttl(server.ip_addr, 3) for server in servers]
-    time.sleep(3)
+    await manager.forward_jump_clocks(3)
     await get_new_virtual_tasks_statuses(tm, module_name, servers, [], expected_task_num=0)
 
 @pytest.mark.skip_mode(mode='release', reason='error injections are not supported in release mode')
