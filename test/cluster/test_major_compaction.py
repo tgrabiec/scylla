@@ -55,8 +55,8 @@ async def test_major_compaction_consider_only_existing_data(manager: ScyllaClust
         await asyncio.gather(*[cql.run_async(f"DELETE FROM {ks}.{cf} WHERE pk = {k};") for k in range(10)])
         await manager.api.keyspace_flush(server.ip_addr, ks, cf)
 
-        # let a second pass, so that the tombstones are eligible for gc
-        await asyncio.sleep(1)
+        # move gc_clock a second forward, so that the tombstones are eligible for gc
+        await manager.forward_jump_clocks(1)
 
         # error injection to make compaction wait after collecting sstables
         injection = "major_compaction_wait"
@@ -97,7 +97,7 @@ async def test_major_compaction_flush_all_tables(manager: ScyllaClusterManager, 
     3. Run major compaction and verify if all tables were flushed
        - if compaction_flush_all_tables_before_major_seconds == 0, expect no flush to happen
        - if compaction_flush_all_tables_before_major_seconds == 2 or 10, expect all tables to be flushed
-    4. Sleep for 2 seconds
+    4. Move the clocks 2 seconds forward
     3. Run major compaction again and verify if all tables were flushed
        - if compaction_flush_all_tables_before_major_seconds == 0, expect no flush to happen
        - if compaction_flush_all_tables_before_major_seconds == 2, expect all tables to be flushed as 2 seconds have elapsed already
@@ -132,8 +132,8 @@ async def test_major_compaction_flush_all_tables(manager: ScyllaClusterManager, 
         await check_all_table_flush_in_major_compaction(compaction_flush_all_tables_before_major_seconds != 0)
 
         if compaction_flush_all_tables_before_major_seconds == 2:
-            # let 2 seconds pass before trying again
-            await asyncio.sleep(compaction_flush_all_tables_before_major_seconds)
+            # move db_clock 2 seconds forward before trying again
+            await manager.forward_jump_clocks(compaction_flush_all_tables_before_major_seconds)
 
         # for the second time, all tables should be flushed only if
         # compaction_flush_all_tables_before_major_seconds == 2 as only 2 seconds have passed
