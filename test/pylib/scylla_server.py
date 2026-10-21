@@ -77,6 +77,7 @@ def make_scylla_conf(mode: str, host_addr: str, seed_addrs: List[str], cluster_n
             }],
 
         'developer_mode': True,
+        'enable_test_api': True,
 
         # Allow testing experimental features. Following issue #9467, we need
         # to add here specific experimental features as they are introduced.
