@@ -104,7 +104,13 @@ async def test_unfinished_audit_write_during_topology_change(manager: ScyllaClus
                                                   "pause_before_barrier_and_drain", threshold=2)
 
         logger.info("Releasing barrier_and_drain so it reaches stale_versions_in_use()")
+        target_log = await manager.server_open_log(target_server.server_id)
+        target_mark = await target_log.mark()
         await release_barrier_pause()
+        await target_log.wait_for("Got raft_topology_cmd::barrier_and_drain", from_mark=target_mark)
+
+        # The audit write handler's five-second timeout runs on lowres_clock.
+        await manager.forward_jump_clocks(5)
 
         try:
             # Generous relative to the five-second audit write timeout, tight enough that
