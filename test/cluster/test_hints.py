@@ -160,6 +160,23 @@ async def flush_hints(client: TCPRESTClient, server_ip: IPAddress) -> None:
     await client.post("/hinted_handoff_test/flush", host=server_ip, port=10_000)
 
 
+# hint_sender flushes in-memory hints to a segment once per hints_flush_period
+# (db/hints/manager.hh) and sleeps on lowres_clock in between.
+HINTS_FLUSH_PERIOD = 10
+
+
+async def jump_past_hints_flush_period(manager: ScyllaClusterManager) -> None:
+    """
+    Make the hint senders on all running servers flush their in-memory hints.
+    A sender with flushed segments retries sending every second, so the hints
+    reach a target soon after it comes up.
+
+    Jumping fires lowres_clock deadlines, so don't call it while a sync point
+    is awaited with a finite timeout.
+    """
+    await manager.forward_jump_clocks(HINTS_FLUSH_PERIOD)
+
+
 async def update_hh_enabled_via_http_api(manager: ScyllaClusterManager, server: ServerInfo, new_value: str) -> None:
     """Change hint generation options at runtime and verify the change is visible."""
     if new_value in ("true", "false"):
@@ -303,6 +320,7 @@ async def test_sync_point(manager: ScyllaClusterManager):
 
         deadline = time.time() + 30
         await wait_for(lambda: check_written_hints(2 * mutation_count), deadline)
+        await jump_past_hints_flush_period(manager)
 
         sync_point1 = await create_sync_point(manager.api.client, node1.ip_addr)
 
@@ -745,6 +763,8 @@ async def test_hint_to_pending(manager: ScyllaClusterManager):
         await cql.run_async(SimpleStatement(f"INSERT INTO {table} (pk, v) VALUES (0, 0)", consistency_level=ConsistencyLevel.ANY))
 
         await manager.api.enable_injection(servers[0].ip_addr, "hinted_handoff_pause_hint_replay", False)
+        await wait_until_hint_writing_settled(manager, [servers[0]])
+        await jump_past_hints_flush_period(manager)
         await manager.server_start(servers[1].server_id)
         sync_point = await create_sync_point(manager.api.client, servers[0].ip_addr)
 
@@ -1047,6 +1067,8 @@ async def test_hints_counter(manager: ScyllaClusterManager):
     await gather_safely(*[cql.run_async(stmt, (value, pk)) for pk, value in expected.items()])
 
     await manager.api.enable_injection(s1.ip_addr, "hinted_handoff_pause_hint_replay", one_shot=False)
+    await wait_until_hint_writing_settled(manager, [s1])
+    await jump_past_hints_flush_period(manager)
 
     logger.info("Starting s2...")
     await manager.server_start(s2.server_id)
@@ -1170,6 +1192,8 @@ async def test_hints_dont_revive(manager: ScyllaClusterManager):
     await wait_until_hint_writing_settled(manager, [s2])
     s2_written = await get_hint_metrics(manager.metrics, s2.ip_addr, "written")
     assert s2_written > 0
+    # s1 closed its segment on shutdown, s2 holds its hint in memory.
+    await jump_past_hints_flush_period(manager)
 
     await manager.server_start(s1.server_id)
     await wait_until_hints_are_sent_from(manager, [s1], s1_written)
@@ -1233,6 +1257,8 @@ async def test_support_max_hh_concurrency_param(manager: ScyllaClusterManager,
     stmt = cql.prepare("INSERT INTO ks.t (pk, v) VALUES (?, ?)")
     stmt.consistency_level = ConsistencyLevel.ONE
     await gather_safely(*[cql.run_async(stmt, (pk, pk + 1)) for pk in range(row_count)])
+    await wait_until_hint_writing_settled(manager, [s2])
+    await jump_past_hints_flush_period(manager)
 
     await manager.server_start(s1.server_id)
     await manager.servers_see_each_other([s1, s2])
@@ -1328,6 +1354,8 @@ async def test_hints_switch_config_in_runtime_via_http_api(manager: ScyllaCluste
     await update_hh_enabled_via_http_api(manager, s1, ",".join([s3.datacenter, "some-dc", "some-other-dc"]))
     await insert(keys_dc3_only)
     expected_hints += len(keys_dc3_only)
+    await wait_until_hint_writing_settled(manager, [s1])
+    await jump_past_hints_flush_period(manager)
 
     await gather_safely(*[
         manager.server_start(s2.server_id),
@@ -1452,6 +1480,8 @@ async def test_hintedhandoff_sync_point_api(manager: ScyllaClusterManager):
 
     logger.info("Unpause hint replay on s1")
     await manager.api.disable_injection(s1.ip_addr, "hinted_handoff_pause_hint_replay")
+    # The waiter has no deadline, so the jump doesn't resolve it.
+    await jump_past_hints_flush_period(manager)
 
     # Waiting should resolve soon - successfully
     logger.info("Join with the future waiting for the point")
@@ -1615,6 +1645,7 @@ async def test_hint_storage_proxy_metrics(manager: ScyllaClusterManager):
     await wait_until_hint_writing_settled(manager, [s1])
     written = await get_hint_metrics(manager.metrics, s1.ip_addr, "written")
     assert written > 0
+    await jump_past_hints_flush_period(manager)
 
     await manager.server_start(s2.server_id)
     await wait_until_hints_are_sent_from(manager, [s1], written)
