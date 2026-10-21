@@ -4,11 +4,11 @@
 
 import pytest
 import requests
-from .util import new_materialized_view, new_test_table, unique_name, sleep_till_whole_second
+from .util import new_materialized_view, new_test_table, unique_name
 from . import nodetool
 from .test_materialized_view import wait_for_view_built
 
-def test_tombstone_gc_with_conflict_in_memtable(scylla_only, cql, test_keyspace):
+def test_tombstone_gc_with_conflict_in_memtable(scylla_only, cql, test_keyspace, clock):
     """
     Regression test for fixed https://github.com/scylladb/scylladb/issues/20423
     """
@@ -28,7 +28,9 @@ def test_tombstone_gc_with_conflict_in_memtable(scylla_only, cql, test_keyspace)
             # Flush all tables explicitly now, since this is skipped in the test on purpose by next major compaction.
             nodetool.flush_all(cql)
 
-            sleep_till_whole_second()
+            # Get gc_clock, and so the commitlog min gc time of the writes
+            # below, past the deletion time of the tombstones above.
+            clock.jump(1)
             # Re-insert backdated data into the memtable.  It should inhibit tombstone_gc
             cql.execute(f"insert into {table} (k, v) values (1, 3) using timestamp 2")
             # do not flush before major compaction
@@ -52,7 +54,7 @@ def test_tombstone_gc_with_conflict_in_memtable(scylla_only, cql, test_keyspace)
             assert keys == {1}, f"Expected keys=={1} but got {keys}: res={list(res)}"
             assert rows == {2}, f"Expected rows=={2} but got {rows}: res={list(res)}"
 
-def test_tombstone_gc_with_delete_in_memtable(scylla_only, cql, test_keyspace):
+def test_tombstone_gc_with_delete_in_memtable(scylla_only, cql, test_keyspace, clock):
     """
     Reproduce https://github.com/scylladb/scylladb/issues/20423
     """
@@ -70,7 +72,9 @@ def test_tombstone_gc_with_delete_in_memtable(scylla_only, cql, test_keyspace):
             # Flush all tables explicitly now, since this is skipped in the test on purpose by next major compaction.
             nodetool.flush_all(cql)
 
-            sleep_till_whole_second()
+            # Get gc_clock, and so the commitlog min gc time of the writes
+            # below, past the deletion time of the tombstones above.
+            clock.jump(1)
             # Insert backdated delete into the memtable.  It should not inhibit tombstone_gc
             cql.execute(f"delete from {table} using timestamp 2 where k=1 and v=3")
             # The following insert should not inhibit tombstone_gc since its timestamp is greater than the tombstones
@@ -96,7 +100,7 @@ def test_tombstone_gc_with_delete_in_memtable(scylla_only, cql, test_keyspace):
             assert keys == {1}, f"Expected keys=={1} but got {keys}: res={list(res)}"
             assert rows == {3}, f"Expected rows=={3} but got {rows}: res={list(res)}"
 
-def test_tombstone_gc_with_materialized_view_update_in_memtable(scylla_only, cql, test_keyspace):
+def test_tombstone_gc_with_materialized_view_update_in_memtable(scylla_only, cql, test_keyspace, clock):
     """
     Reproduce https://github.com/scylladb/scylladb/issues/20424
     """
@@ -116,7 +120,9 @@ def test_tombstone_gc_with_materialized_view_update_in_memtable(scylla_only, cql
                 # Flush all tables explicitly now, since this is skipped in the test on purpose by next major compaction.
                 nodetool.flush_all(cql)
 
-                sleep_till_whole_second()
+                # Get gc_clock, and so the commitlog min gc time of the writes
+                # below, past the deletion time of the tombstones above.
+                clock.jump(1)
                 # Insert new view update into the memtable by updating the regular column in the base table.
                 # It will generate a view update with a shadowable row tombstone for the previous value
                 # and the value of a new row with the old value of `w` (with timestamp 1) - that inhibits the purging
