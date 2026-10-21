@@ -185,12 +185,13 @@ def testBatchWithInRestriction(cql, test_keyspace):
                    [1,2,2],
                    [1,3,3])
 
-# This test is marked "veryslow" because it has multi-second sleeps to check
-# TTLs. These sleeps also make it dependent on timing - in the very unlikely
-# case that the test code is delayed by a large fraction of a second, we can
-# end up with the wrong TTL.
+# This test is marked "tier2" because it waits seconds for TTLs to expire -
+# by jumping the server's clock where it can, but otherwise by sleeping.
+# These waits also make it dependent on timing - in the very unlikely case
+# that the test code is delayed by a large fraction of a second, we can end
+# up with the wrong TTL.
 @pytest.mark.tier2
-def testBatchTTLConditionalInteraction(cql, test_keyspace):
+def testBatchTTLConditionalInteraction(cql, test_keyspace, clock):
     with create_table(cql, test_keyspace, "(id int, clustering1 int, clustering2 int, clustering3 int, val int, PRIMARY KEY (id, clustering1, clustering2, clustering3))") as clustering:
         execute(cql, clustering, "DELETE FROM %s WHERE id=1")
 
@@ -294,7 +295,7 @@ def testBatchTTLConditionalInteraction(cql, test_keyspace):
                 [1, 3, 4, 5, 5]  # 10 second TTL
         )
 
-        time.sleep(6)
+        clock.jump(6)
 
         assert_rows(execute(cql, clustering, "SELECT * FROM %s WHERE id=1"),
                 [1, 3, 4, 5, 5] # now 4 second TTL
@@ -311,7 +312,7 @@ def testBatchTTLConditionalInteraction(cql, test_keyspace):
                 [1, 4, 5, 6, 7]  # This one has no TTL
         )
 
-        time.sleep(6)
+        clock.jump(6)
 
         assert_rows(execute(cql, clustering, "SELECT * FROM %s WHERE id=1"),
                 [1, 3, 4, 5, None], # We had a row here before from cmd9, but we've ttl'd out the value in cmd11
@@ -327,19 +328,20 @@ def testBatchTTLConditionalInteraction(cql, test_keyspace):
                 [1, 3, 4, 5, 5],
                 [1, 4, 5, 6, 8])
 
-        time.sleep(6)
+        clock.jump(6)
 
         assert_rows(execute(cql, clustering, "SELECT * FROM %s WHERE id=1"),
                 [1, 3, 4, 5, None],
                 [1, 4, 5, 6, None])
 
 
-# This test is marked "veryslow" because it has multi-second sleeps to check
-# TTLs. These sleeps also make it dependent on timing - in the very unlikely
-# case that the test code is delayed by a large fraction of a second, we can
-# end up with the wrong TTL.
+# This test is marked "tier2" because it waits seconds for TTLs to expire -
+# by jumping the server's clock where it can, but otherwise by sleeping.
+# These waits also make it dependent on timing - in the very unlikely case
+# that the test code is delayed by a large fraction of a second, we can end
+# up with the wrong TTL.
 @pytest.mark.tier2
-def testBatchStaticTTLConditionalInteraction(cql, test_keyspace):
+def testBatchStaticTTLConditionalInteraction(cql, test_keyspace, clock):
     with create_table(cql, test_keyspace, "(id int, clustering1 int, clustering2 int, clustering3 int, sval int static, val int, PRIMARY KEY (id, clustering1, clustering2, clustering3))") as clustering_static:
         execute(cql, clustering_static, f"DELETE FROM {clustering_static} WHERE id=1")
 
@@ -393,7 +395,7 @@ def testBatchStaticTTLConditionalInteraction(cql, test_keyspace):
                 [1, 1, 2, 3, 22, 23],
                 [1, 2, 3, 4, 22, 1234])
 
-        time.sleep(6)
+        clock.jump(6)
         assert_rows(execute(cql, clustering_static, "SELECT * FROM %s WHERE id=1"),
                 [1, 1, 1, 2, 22, None],
                 [1, 1, 2, 3, 22, 23],
@@ -455,7 +457,7 @@ def testBatchStaticTTLConditionalInteraction(cql, test_keyspace):
                 [1, 3, 4, 5, 22, 5]  # 10 second TTL
         )
 
-        time.sleep(6)
+        clock.jump(6)
 
         assert_rows(execute(cql, clustering_static, "SELECT * FROM %s WHERE id=1"),
                 [1, 3, 4, 5, 22, 5] # now 4 second TTL
@@ -472,7 +474,7 @@ def testBatchStaticTTLConditionalInteraction(cql, test_keyspace):
                 [1, 4, 5, 6, 22, 7]  # This one has no TTL
         )
 
-        time.sleep(6)
+        clock.jump(6)
 
         assert_rows(execute(cql, clustering_static, "SELECT * FROM %s WHERE id=1"),
                 [1, 3, 4, 5, 22, None], # We had a row here before from cmd9, but we've ttl'd out the value in cmd11
@@ -487,7 +489,7 @@ def testBatchStaticTTLConditionalInteraction(cql, test_keyspace):
                 [1, 3, 4, 5, 22, 5],
                 [1, 4, 5, 6, 22, 8])
 
-        time.sleep(6)
+        clock.jump(6)
 
         assert_rows(execute(cql, clustering_static, "SELECT * FROM %s WHERE id=1"),
                 [1, 3, 4, 5, 22, None],
