@@ -6,8 +6,6 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-#ifdef SCYLLA_ENABLE_ERROR_INJECTION
-
 #pragma once
 
 namespace db {
@@ -25,5 +23,3 @@ void set_clocks_test(http_context& ctx, seastar::httpd::routes& r, db::config& c
 void unset_clocks_test(http_context& ctx, seastar::httpd::routes& r);
 
 }
-
-#endif

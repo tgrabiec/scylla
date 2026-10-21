@@ -178,6 +178,9 @@ public:
     /// True iff the feature is enabled.
     bool check_experimental(experimental_features_t::feature f) const;
 
+    /// True iff the test-only APIs are enabled, see enable_test_api.
+    bool test_api_enabled() const;
+
     void setup_directories();
 
     /**
@@ -405,9 +408,8 @@ public:
     named_value<bool> enable_cache;
     named_value<bool> enable_commitlog;
     named_value<bool> volatile_system_keyspace_for_testing;
-#ifdef SCYLLA_ENABLE_ERROR_INJECTION
+    named_value<bool> enable_test_api;
     named_value<int64_t> test_clocks_offset_seconds;
-#endif
     named_value<uint16_t> api_port;
     named_value<sstring> api_address;
     named_value<sstring> api_ui_dir;

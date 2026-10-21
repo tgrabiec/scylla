@@ -1122,7 +1122,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             });
             set_abort_on_internal_error(cfg->abort_on_internal_error());
 
-#ifdef SCYLLA_ENABLE_ERROR_INJECTION
             // A test-only knob, which lets a test move this node's clocks
             // forward instead of really waiting - e.g., to expire a TTL. It is
             // live-updatable, so a test can set it through the system.config
@@ -1133,18 +1132,20 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // until the real time catches up. Config values, and therefore their
             // observers, are per shard, so we observe the option on every shard.
             static thread_local std::optional<utils::observer<int64_t>> test_clocks_offset_observer;
-            smp::invoke_on_all([&cfg] {
-                test_clocks_offset_observer = cfg->test_clocks_offset_seconds.observe([] (int64_t val) {
-                    set_clocks_offset(std::chrono::seconds(val));
-                    service::client_state::reset_last_timestamp();
-                    utils::UUID_gen::reset_last_used_time();
+            std::any stop_test_clocks_offset_observer;
+            if (cfg->test_api_enabled()) {
+                smp::invoke_on_all([&cfg] {
+                    test_clocks_offset_observer = cfg->test_clocks_offset_seconds.observe([] (int64_t val) {
+                        set_clocks_offset(std::chrono::seconds(val));
+                        service::client_state::reset_last_timestamp();
+                        utils::UUID_gen::reset_last_used_time();
+                    });
+                }).get();
+                stop_test_clocks_offset_observer = defer_verbose_shutdown("test clocks offset observer", [] {
+                    smp::invoke_on_all([] { test_clocks_offset_observer.reset(); }).get();
                 });
-            }).get();
-            auto stop_test_clocks_offset_observer = defer_verbose_shutdown("test clocks offset observer", [] {
-                smp::invoke_on_all([] { test_clocks_offset_observer.reset(); }).get();
-            });
-            set_clocks_offset(std::chrono::seconds(cfg->test_clocks_offset_seconds()));
-#endif
+                set_clocks_offset(std::chrono::seconds(cfg->test_clocks_offset_seconds()));
+            }
 
             auto abort_on_malformed_sstable_error_observer = cfg->abort_on_malformed_sstable_error.observe([] (bool val) {
                 sstables::set_abort_on_malformed_sstable_error(val);
@@ -1568,12 +1569,13 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             auto stop_config_api = defer_verbose_shutdown("config API", [&ctx] {
                 api::unset_server_config(ctx).get();
             });
-#ifdef SCYLLA_ENABLE_ERROR_INJECTION
-            api::set_server_clocks_test(ctx, *cfg).get();
-            auto stop_clocks_test_api = defer_verbose_shutdown("clocks test API", [&ctx] {
-                api::unset_server_clocks_test(ctx).get();
-            });
-#endif
+            std::any stop_clocks_test_api;
+            if (cfg->test_api_enabled()) {
+                api::set_server_clocks_test(ctx, *cfg).get();
+                stop_clocks_test_api = defer_verbose_shutdown("clocks test API", [&ctx] {
+                    api::unset_server_clocks_test(ctx).get();
+                });
+            }
 
             static sharded<db::system_distributed_keyspace> sys_dist_ks;
             static sharded<db::system_keyspace> sys_ks;

@@ -6,8 +6,6 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.1
  */
 
-#ifdef SCYLLA_ENABLE_ERROR_INJECTION
-
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/lowres_clock.hh>
 #include <seastar/http/exception.hh>
@@ -50,5 +48,3 @@ void unset_clocks_test(http_context& ctx, routes& r) {
 }
 
 }
-
-#endif
