@@ -7,6 +7,7 @@
 # Note that fixtures aren't here - they are in conftest.py.
 
 import string
+import math
 import random
 import time
 import socket
@@ -22,6 +23,8 @@ from cassandra.cluster import Cluster, ConsistencyLevel, ExecutionProfile, EXEC_
 from cassandra.policies import RoundRobinPolicy
 
 from test.pylib.driver_utils import safe_driver_shutdown
+
+from . import nodetool
 
 def random_string(length=10, chars=string.ascii_uppercase + string.digits):
     return ''.join(random.choice(chars) for x in range(length))
@@ -352,6 +355,73 @@ class config_value_context:
 
     def __exit__(self, exc_type, exc_value, exc_traceback):
         self._cql.execute(self._update, (self._original_value, self._key))
+
+# ServerClock lets a test move the server's clocks forward, so a TTL, a
+# tombstone's grace period or a server timer expires without really waiting.
+# jump(n) calls the REST API's /clocks_test/forward_jump, which moves
+# gc_clock, db_clock, write timestamps and time UUIDs (by adding n to the
+# test_clocks_offset_seconds option) and lowres_clock, whose due timers then
+# fire. Jumps are cumulative and round up to whole seconds.
+#
+# Release builds, Cassandra and servers without a reachable REST API lack the
+# endpoint. There jump(n) sleeps n seconds, so the test runs everywhere, only
+# slower there.
+#
+# restore() sets test_clocks_offset_seconds back to its value before the
+# first jump, so later tests on the shared server see the real time.
+# lowres_clock cannot move back and stays ahead, which is harmless. Like any
+# system.config update, the restore only reaches the node we are connected
+# to, so this needs a single-node cluster.
+#
+# Until restore(), timestamps the server generates (e.g., for LWT writes) run
+# "offset" seconds ahead of the client-side timestamps the driver sends, so a
+# client write which follows such a write to the same cell loses to it. After
+# restore(), the server's own timestamps fall behind those it generated while
+# ahead, with the same effect. Each test using its own unique table avoids
+# that.
+#
+# Use server_clock() or the "clock" fixture, which restore when done.
+class ServerClock:
+    def __init__(self, cql, rest_url=None):
+        self._cql = cql
+        self._rest_url = None
+        self._original = None
+        # Seconds by which jump() moved the server's clocks ahead of real time.
+        self.offset = 0
+        if rest_url is None:
+            if not nodetool.has_rest_api(cql):
+                return
+            rest_url = nodetool.rest_api_url(cql)
+        response = requests.get(f'{rest_url}/clocks_test/offset')
+        if response.ok:
+            self._rest_url = rest_url
+            self._original = int(response.json())
+
+    @property
+    def can_jump(self):
+        return self._rest_url is not None
+
+    def jump(self, seconds):
+        if not self.can_jump:
+            time.sleep(seconds)
+            return
+        seconds = math.ceil(seconds)
+        requests.post(f'{self._rest_url}/clocks_test/forward_jump', params={'seconds': seconds}).raise_for_status()
+        self.offset += seconds
+
+    def restore(self):
+        if self.offset:
+            self._cql.execute("UPDATE system.config SET value = %s WHERE name = 'test_clocks_offset_seconds'",
+                              (str(self._original),))
+            self.offset = 0
+
+@contextmanager
+def server_clock(cql, rest_url=None):
+    clock = ServerClock(cql, rest_url)
+    try:
+        yield clock
+    finally:
+        clock.restore()
 
 class ScyllaMetrics:
     def __init__(self, lines):
