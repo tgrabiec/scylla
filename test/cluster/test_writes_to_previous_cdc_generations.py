@@ -11,7 +11,7 @@ from cassandra.cluster import ConsistencyLevel, NoHostAvailable, Session
 from cassandra.protocol import InvalidRequest
 from cassandra.query import SimpleStatement
 
-import asyncio
+import math
 import pytest
 import logging
 import time
@@ -124,10 +124,10 @@ async def test_writes_to_old_previous_cdc_generation(request, manager: ScyllaClu
     await cql.run_async("CREATE TABLE test.test (pk int PRIMARY KEY, c int) WITH cdc = {'enabled': true}")
 
     ts2 = max(gen_timestamps)
-    time_diff = (ts2 / (1000 * 1000)) - time.time()
+    time_diff = (ts2 / (1000 * 1000)) - (time.time() + manager.clocks_offset)
     if time_diff > 0:
-        logger.info("Waiting for the second generation to become active")
-        await asyncio.sleep(time_diff)
+        logger.info("Moving the clocks forward until the second generation becomes active")
+        await manager.forward_jump_clocks(math.ceil(time_diff))
 
     try:
         # Writes with timestamps from the interval (now - generation_leeway, ts2) should succeed.
@@ -135,11 +135,11 @@ async def test_writes_to_old_previous_cdc_generation(request, manager: ScyllaClu
     except InvalidRequest:
         # If the write has failed, we check that its timestamp is not greater than (now - generation_leeway). Then,
         # the failure is expected. This situation can happen if the test is running too slowly.
-        # We use time.time() because we don't know "the real now" used by the node for verification. time.time() is for
-        # sure not lower, so if the assertion below fails, it would also fail for "the real now". However, if the
-        # assertion doesn't fail, we don't know if the write has been correct. We prefer a non-flaky test that catches
-        # some bugs over a flaky one that catches more bugs.
-        assert (ts2 - 1) / (1000 * 1000) <= time.time() - 5
+        # We use time.time() shifted by the clocks offset because we don't know "the real now" used by the node for
+        # verification. It is for sure not lower, so if the assertion below fails, it would also fail for "the real now".
+        # However, if the assertion doesn't fail, we don't know if the write has been correct. We prefer a non-flaky test
+        # that catches some bugs over a flaky one that catches more bugs.
+        assert (ts2 - 1) / (1000 * 1000) <= time.time() + manager.clocks_offset - 5
 
     # Writes with timestamps not greater than (now - generation_leeway) should fail.
     with pytest.raises(InvalidRequest):
