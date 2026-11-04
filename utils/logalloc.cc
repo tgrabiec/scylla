@@ -33,7 +33,6 @@
 #include "utils/log_heap.hh"
 #include "utils/preempt.hh"
 #include "utils/vle.hh"
-#include "utils/coarse_steady_clock.hh"
 #include "utils/labels.hh"
 
 #include <random>
@@ -472,7 +471,7 @@ public:
 
 class segment_pool;
 struct reclaim_timer;
-using reclaim_duration = utils::coarse_steady_clock::duration;
+using reclaim_duration = std::chrono::steady_clock::duration;
 
 struct tracker_stats {
     reclaim_duration reclaim_time;
@@ -1139,13 +1138,11 @@ public:
 struct reclaim_timer {
     using extra_logger = noncopyable_function<void(log_level)>;
 
-    // CLOCK_MONOTONIC_COARSE is not quite what we want -- to look for stalls,
-    // we want thread time, not wall time. Wall time will give false positives
-    // if the process is descheduled.
-    // For this reason Seastar uses CLOCK_THREAD_CPUTIME_ID in its stall detector.
-    // Unfortunately, CLOCK_THREAD_CPUTIME_ID_COARSE does not exist.
-    // It's not an important problem, though.
-    using clock = utils::coarse_steady_clock;
+    // Wall time gives false positives if the process is descheduled, unlike
+    // the thread time which Seastar's stall detector uses. It's not an
+    // important problem, though. Reclaims during which the stall detector
+    // fires are reported regardless of the measured duration.
+    using clock = std::chrono::steady_clock;
 private:
     struct stats {
         occupancy_stats region_occupancy;
@@ -1194,6 +1191,7 @@ private:
     size_t _memory_released = 0;
 
     clock::time_point _start;
+    uint64_t _start_stalls_detected = 0;
     stats _start_stats, _end_stats, _stat_diff;
 
     clock::duration _duration;
@@ -1508,28 +1506,7 @@ reclaim_timer::reclaim_timer(const char* name,
                              tracker::impl& tracker,
                              segment_pool& segment_pool,
                              extra_logger extra_logs)
-    : _duration_threshold(
-            // We only report reclaim stalls when their measured duration is
-            // bigger than the threshold by at least one measurement error
-            // (clock resolution). This prevents false positives.
-            //
-            // Explanation for the 10us: The clock value is not always an
-            // integral multiply of its resolution. In the case of coarse
-            // clocks, resolution only describes the frequency of syncs with
-            // the hardware clock -- no effort is made to round the values to
-            // resolution. Therefore, tick durations vary slightly in both
-            // directions. We subtract something slightly bigger than these
-            // variations, to accommodate blocked-reactor-notify-ms values which
-            // are multiplies of resolution.
-            // E.g. with kernel CONFIG_HZ=250, coarse clock resolution is 4ms.
-            // If also we also have blocked-reactor-notify-ms=4, then we would
-            // like to report two-tick stalls, since they have durations of
-            // 4ms-8ms. But two-tick durations can be just slightly smaller
-            // than 8ms (e.g. 7999us) due to the inaccuracy. So we set the
-            // threshold not to (blocked_reactor_notify_ms + resolution) = 8000us,
-            // but to (blocked_reactor_notify_ms + resolution - 10us) = 7990us,
-            // to account for this.
-            engine().get_blocked_reactor_notify_ms() + std::max(0ns, clock::get_resolution() - 10us))
+    : _duration_threshold(engine().get_blocked_reactor_notify_ms())
     , _total_duration(total_duration)
     , _name(name)
     , _preemptible(preemptible)
@@ -1547,6 +1524,7 @@ reclaim_timer::reclaim_timer(const char* name,
     }
 
     _start = clock::now();
+    _start_stalls_detected = engine().stalls_detected();
     sample_stats(_start_stats);
 }
 
@@ -1557,7 +1535,8 @@ reclaim_timer::~reclaim_timer() {
 
     _duration = clock::now() - _start;
     _total_duration += _duration;
-    _stall_detected = _duration >= _duration_threshold;
+    _stall_detected = _duration >= _duration_threshold
+            || engine().stalls_detected() != _start_stalls_detected;
     if (_debug_enabled || _stall_detected) {
         sample_stats(_end_stats);
         _stat_diff = _end_stats - _start_stats;
