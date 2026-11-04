@@ -369,6 +369,10 @@ static future<> test_load_topology_state(app_template& app) {
         }
         const unsigned tokens_per_node = app.configuration()["tokens-per-node"].as<unsigned>();
         const int nr_left_nodes = app.configuration()["left-nodes"].as<int>();
+        const int nr_leaving = app.configuration()["leaving-nodes"].as<int>();
+        if (nr_leaving > nr_nodes) {
+            throw std::runtime_error(format("--leaving-nodes={} exceeds --nodes={}", nr_leaving, nr_nodes));
+        }
         const int iterations = app.configuration()["iterations"].as<int>();
 
         e.get_storage_service().local().set_tablet_balancing_enabled(false).get();
@@ -387,8 +391,15 @@ static future<> test_load_topology_state(app_template& app) {
         }
 
         topology_builder topo(e);
+        std::vector<locator::host_id> normal_hosts;
         for (int i = 0; i < nr_nodes; ++i) {
-            topo.add_node(service::node_state::normal, 1, std::nullopt, tokens_per_node, features);
+            normal_hosts.push_back(topo.add_node(service::node_state::normal, 1, std::nullopt, tokens_per_node, features));
+        }
+        // A decommission whose leave request is paused while tablets drain off
+        // the node: the node stays normal with the request queued. That is the
+        // topology every reload sees during the drain's tablet migrations.
+        for (int i = 0; i < nr_leaving; ++i) {
+            topo.add_draining_request(normal_hosts[i]);
         }
         // A cluster keeps a row for every node it has ever lost. The coordinator
         // deletes their tokens on the way out but not their supported features,
@@ -416,10 +427,20 @@ static future<> test_load_topology_state(app_template& app) {
                     ++matching;
                 }
             }
-            testlog.info("system.topology: {} rows, {} normal nodes ({} with {} tokens and {} features), "
-                         "{} left nodes, {} tokens total",
-                         nr_rows, state.normal_nodes.size(), matching, tokens_per_node, features.size(),
+            size_t leaving = 0;
+            for (auto& [id, req] : state.requests) {
+                if (req == service::topology_request::leave && state.normal_nodes.contains(id)) {
+                    ++leaving;
+                }
+            }
+            testlog.info("system.topology: {} rows, {} normal nodes ({} with a pending leave request, "
+                         "{} with {} tokens and {} features), {} left nodes, {} tokens total",
+                         nr_rows, state.normal_nodes.size(), leaving, matching, tokens_per_node, features.size(),
                          state.left_nodes.size(), total_tokens);
+            if (std::cmp_not_equal(leaving, nr_leaving)) {
+                throw std::runtime_error(format("expected {} normal nodes with a pending leave request, got {}",
+                                                nr_leaving, leaving));
+            }
             if (std::cmp_less(state.left_nodes.size(), nr_left_nodes)) {
                 throw std::runtime_error(format("only {} of {} left nodes made it into the topology",
                                                 state.left_nodes.size(), nr_left_nodes));
@@ -510,12 +531,12 @@ static future<> test_load_topology_state(app_template& app) {
         const auto mean = std::accumulate(lat.begin(), lat.end(), 0.0) / lat.size();
         std::sort(lat.begin(), lat.end());
 
-        testlog.info("load_topology_state nodes={} left={} rows={} tokens_per_node={} features={} cdc_ranges={} iterations={} wall={:.1f}ms",
-                     nr_nodes, nr_left_nodes, nr_rows, tokens_per_node, features.size(), cdc_ranges, iterations, run_ms);
-        testlog.info("RESULT nodes={} left={} rows={} tokens={} cdc_ranges={} mean={:.3f} p50={:.3f} p95={:.3f} max={:.3f} "
+        testlog.info("load_topology_state nodes={} leaving={} left={} rows={} tokens_per_node={} features={} cdc_ranges={} iterations={} wall={:.1f}ms",
+                     nr_nodes, nr_leaving, nr_left_nodes, nr_rows, tokens_per_node, features.size(), cdc_ranges, iterations, run_ms);
+        testlog.info("RESULT nodes={} leaving={} left={} rows={} tokens={} cdc_ranges={} mean={:.3f} p50={:.3f} p95={:.3f} max={:.3f} "
                      "stall_p99={:.3f} stall_max={:.3f} idle_stall_p999={:.3f} idle_stall_max={:.3f} "
                      "gaps={} [ms]",
-                     nr_nodes, nr_left_nodes, nr_rows, tokens_per_node, cdc_ranges, mean, percentile(lat, 0.5), percentile(lat, 0.95),
+                     nr_nodes, nr_leaving, nr_left_nodes, nr_rows, tokens_per_node, cdc_ranges, mean, percentile(lat, 0.5), percentile(lat, 0.95),
                      lat.back(), percentile(gaps, 0.99), gaps.back(), idle_p999, idle_max, gaps.size());
     }, tablet_cql_test_config(app.configuration()["schema-commitlog-segment-size-mb"].as<unsigned>()));
 }
@@ -544,6 +565,9 @@ int scylla_tablets_main(int argc, char** argv) {
                     "Number of tokens per node in the topology built by --load-topology-state.")
             ("features", bpo::value<int>()->default_value(-1),
                     "Cap the number of supported features per node (-1 = everything this build supports).")
+            ("leaving-nodes", bpo::value<int>()->default_value(0),
+                    "Number of the --nodes nodes with a pending leave request, as during a decommission "
+                    "whose request is paused while tablets drain off the node.")
             ("left-nodes", bpo::value<int>()->default_value(0),
                     "Number of extra system.topology rows in the 'left' state (no tokens, full feature "
                     "set), as a cluster accumulates one per node it ever lost.")
