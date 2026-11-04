@@ -66,6 +66,9 @@ public:
         size_t lsa_reclamation_step;
         scheduling_group background_reclaim_sched_group;
         std::chrono::nanoseconds background_reclaim_shares_adjust_period = std::chrono::milliseconds(50);
+        // Reactor task quota. Lets lsa-timing report every reclaim which can
+        // cause a reactor stall.
+        std::chrono::nanoseconds task_quota{};
     };
 
     struct stats {

@@ -489,6 +489,7 @@ class tracker::impl {
     size_t _reclamation_step = 1;
     bool _abort_on_bad_alloc = false;
     bool _sanitizer_report_backtrace = false;
+    std::chrono::nanoseconds _task_quota{};
     reclaim_timer* _active_timer = nullptr;
     tracker_stats _stats;
 private:
@@ -561,6 +562,8 @@ public:
     // const bool&, so interested parties can save a reference and see updates.
     const bool& sanitizer_report_backtrace() const { return _sanitizer_report_backtrace; }
     void set_sanitizer_report_backtrace(bool rb) { _sanitizer_report_backtrace = rb; }
+    std::chrono::nanoseconds task_quota() const { return _task_quota; }
+    void set_task_quota(std::chrono::nanoseconds q) { _task_quota = q; }
     bool try_set_active_timer(reclaim_timer& timer) {
         if (_active_timer) {
             return false;
@@ -1509,9 +1512,15 @@ reclaim_timer::reclaim_timer(const char* name,
                              segment_pool& segment_pool,
                              extra_logger extra_logs)
     : _duration_threshold(
-            // We only report reclaim stalls when their measured duration is
-            // bigger than the threshold by at least one measurement error
-            // (clock resolution). This prevents false positives.
+            // We report every reclaim which can cause a reactor stall on its
+            // own. The task may have run for up to task_quota before entering
+            // reclaim without reaching a preemption point, so a reclaim taking
+            // (blocked_reactor_notify_ms - task_quota) can trigger the stall
+            // detector.
+            //
+            // The coarse clock may undercount the duration by one resolution,
+            // so we subtract it from the threshold to never miss such a stall,
+            // at the cost of occasional false positives.
             //
             // Explanation for the 10us: The clock value is not always an
             // integral multiply of its resolution. In the case of coarse
@@ -1519,17 +1528,9 @@ reclaim_timer::reclaim_timer(const char* name,
             // the hardware clock -- no effort is made to round the values to
             // resolution. Therefore, tick durations vary slightly in both
             // directions. We subtract something slightly bigger than these
-            // variations, to accommodate blocked-reactor-notify-ms values which
-            // are multiplies of resolution.
-            // E.g. with kernel CONFIG_HZ=250, coarse clock resolution is 4ms.
-            // If also we also have blocked-reactor-notify-ms=4, then we would
-            // like to report two-tick stalls, since they have durations of
-            // 4ms-8ms. But two-tick durations can be just slightly smaller
-            // than 8ms (e.g. 7999us) due to the inaccuracy. So we set the
-            // threshold not to (blocked_reactor_notify_ms + resolution) = 8000us,
-            // but to (blocked_reactor_notify_ms + resolution - 10us) = 7990us,
-            // to account for this.
-            engine().get_blocked_reactor_notify_ms() + std::max(0ns, clock::get_resolution() - 10us))
+            // variations.
+            std::max<clock::duration>(1ns, engine().get_blocked_reactor_notify_ms()
+                    - tracker.task_quota() - clock::get_resolution() - 10us))
     , _total_duration(total_duration)
     , _name(name)
     , _preemptible(preemptible)
@@ -2410,6 +2411,7 @@ void tracker::configure(const config& cfg) {
     }
     _impl->setup_background_reclaim(cfg.background_reclaim_sched_group, cfg.background_reclaim_shares_adjust_period);
     _impl->set_sanitizer_report_backtrace(cfg.sanitizer_report_backtrace);
+    _impl->set_task_quota(cfg.task_quota);
 }
 
 memory::reclaiming_result tracker::reclaim(seastar::memory::reclaimer::request r) {

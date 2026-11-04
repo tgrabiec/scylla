@@ -1032,8 +1032,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                     cfg->maintenance_io_throughput_mb_per_sec.is_set() ? cfg->maintenance_io_throughput_mb_per_sec : cfg->stream_io_throughput_mb_per_sec);
             auto maintenance_scheduling_group = create_scheduling_group("maintenance", "mant", 200, maintenance_supergroup).get();
 
-            smp::invoke_on_all([&cfg, background_reclaim_scheduling_group] {
+            auto task_quota = std::chrono::duration_cast<std::chrono::nanoseconds>(opts["task-quota-ms"].as<double>() * 1ms);
+            smp::invoke_on_all([&cfg, background_reclaim_scheduling_group, task_quota] {
                 logalloc::tracker::config st_cfg;
+                st_cfg.task_quota = task_quota;
                 st_cfg.defragment_on_idle = cfg->defragment_memory_on_idle();
                 st_cfg.abort_on_lsa_bad_alloc = cfg->abort_on_lsa_bad_alloc();
                 st_cfg.lsa_reclamation_step = cfg->lsa_reclamation_step();
