@@ -370,6 +370,12 @@ static future<> test_load_topology_state(app_template& app) {
         const unsigned tokens_per_node = app.configuration()["tokens-per-node"].as<unsigned>();
         const int nr_left_nodes = app.configuration()["left-nodes"].as<int>();
         const int nr_leaving = app.configuration()["leaving-nodes"].as<int>();
+        const unsigned shards_per_node = app.configuration()["shards-per-node"].as<unsigned>();
+        const int tablets_per_shard = app.configuration()["tablets-per-shard"].as<int>();
+        const int nr_tablet_tables = app.configuration()["tablet-tables"].as<int>();
+        const int rf = app.configuration()["rf"].as<int>();
+        const bool leaving_drained = app.configuration().contains("leaving-drained");
+        const bool via_group0 = app.configuration().contains("reload-via-group0");
         if (nr_leaving > nr_nodes) {
             throw std::runtime_error(format("--leaving-nodes={} exceeds --nodes={}", nr_leaving, nr_nodes));
         }
@@ -393,7 +399,7 @@ static future<> test_load_topology_state(app_template& app) {
         topology_builder topo(e);
         std::vector<locator::host_id> normal_hosts;
         for (int i = 0; i < nr_nodes; ++i) {
-            normal_hosts.push_back(topo.add_node(service::node_state::normal, 1, std::nullopt, tokens_per_node, features));
+            normal_hosts.push_back(topo.add_node(service::node_state::normal, shards_per_node, std::nullopt, tokens_per_node, features));
         }
         // A decommission whose leave request is paused while tablets drain off
         // the node: the node stays normal with the request queued. That is the
@@ -499,8 +505,111 @@ static future<> test_load_topology_state(app_template& app) {
             testlog.info("system.cdc_generations_v3: generation {} has {} ranges", cdc_gen_id, cdc_ranges);
         }
 
+        // Tablet metadata sized by replicas per shard. Replicas go round-robin over
+        // the nodes' shards; with --leaving-drained the leaving nodes hold none, as
+        // at the end of the drain, which is the worst case for has_replica_on().
+        struct tablet_ref {
+            table_id table;
+            dht::token last_token;
+            locator::tablet_replica_set replicas;
+        };
+        std::vector<tablet_ref> all_tablets;
+        size_t nr_tablets = 0;
+        if (tablets_per_shard > 0) {
+            std::vector<locator::host_id> holders;
+            for (int i = 0; i < nr_nodes; ++i) {
+                if (!(leaving_drained && i < nr_leaving)) {
+                    holders.push_back(normal_hosts[i]);
+                }
+            }
+            if (std::cmp_less(holders.size(), rf)) {
+                throw std::runtime_error(format("{} tablet-holding nodes is fewer than rf={}", holders.size(), rf));
+            }
+            const size_t total_tablets = holders.size() * shards_per_node * tablets_per_shard / rf;
+            const int tablets_per_table = (total_tablets + nr_tablet_tables - 1) / nr_tablet_tables;
+            locator::tablet_metadata tm;
+            size_t slot = 0;
+            for (int t = 0; t < nr_tablet_tables; ++t) {
+                auto id = add_table(e, tablets_per_table).get();
+                locator::tablet_map tmap(tablets_per_table);
+                for (auto tid : tmap.tablet_ids()) {
+                    thread::maybe_yield();
+                    locator::tablet_replica_set replicas;
+                    for (int k = 0; k < rf; ++k, ++slot) {
+                        replicas.push_back({holders[slot % holders.size()], shard_id((slot / holders.size()) % shards_per_node)});
+                    }
+                    all_tablets.push_back({id, tmap.get_last_token(tid), replicas});
+                    tmap.set_tablet(tid, locator::tablet_info{std::move(replicas)});
+                    ++nr_tablets;
+                }
+                tm.set_tablet_map(id, std::move(tmap));
+            }
+            // Load it the way the write path does: save, then commit the tablet
+            // mutations through group0 so the in-memory token metadata holds them.
+            save_tablet_metadata(e.local_db(), tm, api::new_timestamp()).get();
+            utils::chunked_vector<canonical_mutation> muts;
+            replica::read_tablet_mutations(e.db(), [&] (canonical_mutation m) {
+                muts.emplace_back(std::move(m));
+            }).get();
+            const auto tablets_schema = db::system_keyspace::tablets();
+            service::group0_update_collector collector(
+                    app.configuration()["command-max-mutation-size-mb"].as<size_t>() * MiB);
+            for (auto& cm : muts) {
+                collector.add(to_mutation_gently(cm, tablets_schema).get()).get();
+            }
+            auto collected = collector.collect().get();
+            topo.modify_group0([&] (service::group0_guard&, utils::chunked_vector<canonical_mutation>& out) {
+                out = std::move(collected);
+            });
+
+            auto tmptr = e.local_token_metadata_ptr();
+            size_t loaded = 0;
+            for (auto& [id, map] : tmptr->tablets().all_tables_ungrouped()) {
+                loaded += map->tablet_count();
+            }
+            testlog.info("tablets: {} tables, {} tablets loaded ({} generated), {} holder nodes x {} shards, rf={}",
+                         nr_tablet_tables, loaded, nr_tablets, holders.size(), shards_per_node, rf);
+            if (loaded < nr_tablets) {
+                throw std::runtime_error(format("only {} of {} generated tablets are in token metadata", loaded, nr_tablets));
+            }
+            for (int i = 0; i < nr_leaving; ++i) {
+                auto host = normal_hosts[i];
+                bool has = tmptr->tablets().has_replica_on(host);
+                if (has == leaving_drained) {
+                    throw std::runtime_error(format("has_replica_on(leaving {}) = {}, expected {}", host, has, !leaving_drained));
+                }
+                constexpr int n = 100;
+                auto start = clk::now();
+                for (int j = 0; j < n; ++j) {
+                    has = tmptr->tablets().has_replica_on(host);
+                }
+                testlog.info("has_replica_on(leaving {}) = {}: {:.3f} ms per call", host, has,
+                             std::chrono::duration<double, std::milli>(clk::now() - start).count() / n);
+            }
+        }
+        if (via_group0 && all_tablets.empty()) {
+            throw std::runtime_error("--reload-via-group0 needs --tablets-per-shard");
+        }
+
+        // One measured step: either load_topology_state() alone, or a group0 command
+        // rewriting one tablet's replicas as they are, which is what a tablet
+        // migration stage commits; its apply runs the full topology reload.
+        size_t next_tablet = 0;
+        auto step = [&] {
+            if (!via_group0) {
+                sys_ks.load_topology_state({}).get();
+                return;
+            }
+            auto& t = all_tablets[next_tablet++ % all_tablets.size()];
+            topo.modify_group0([&] (service::group0_guard& guard, utils::chunked_vector<canonical_mutation>& out) {
+                out.emplace_back(replica::tablet_mutation_builder(guard.write_timestamp(), t.table)
+                        .set_replicas(t.last_token, t.replicas)
+                        .build());
+            });
+        };
+
         for (int i = 0; i < 3; ++i) {
-            sys_ks.load_topology_state({}).get();
+            step();
         }
 
         preemption_probe probe;
@@ -521,7 +630,7 @@ static future<> test_load_topology_state(app_template& app) {
         const auto run_start = clk::now();
         for (int i = 0; i < iterations; ++i) {
             auto start = clk::now();
-            sys_ks.load_topology_state({}).get();
+            step();
             lat.push_back(std::chrono::duration<double, std::milli>(clk::now() - start).count());
         }
         const auto run_ms = std::chrono::duration<double, std::milli>(clk::now() - run_start).count();
@@ -533,9 +642,10 @@ static future<> test_load_topology_state(app_template& app) {
 
         testlog.info("load_topology_state nodes={} leaving={} left={} rows={} tokens_per_node={} features={} cdc_ranges={} iterations={} wall={:.1f}ms",
                      nr_nodes, nr_leaving, nr_left_nodes, nr_rows, tokens_per_node, features.size(), cdc_ranges, iterations, run_ms);
-        testlog.info("RESULT nodes={} leaving={} left={} rows={} tokens={} cdc_ranges={} mean={:.3f} p50={:.3f} p95={:.3f} max={:.3f} "
+        testlog.info("RESULT mode={} shards={} tablets={} drained={} nodes={} leaving={} left={} rows={} tokens={} cdc_ranges={} mean={:.3f} p50={:.3f} p95={:.3f} max={:.3f} "
                      "stall_p99={:.3f} stall_max={:.3f} idle_stall_p999={:.3f} idle_stall_max={:.3f} "
                      "gaps={} [ms]",
+                     via_group0 ? "group0" : "load", shards_per_node, nr_tablets, leaving_drained,
                      nr_nodes, nr_leaving, nr_left_nodes, nr_rows, tokens_per_node, cdc_ranges, mean, percentile(lat, 0.5), percentile(lat, 0.95),
                      lat.back(), percentile(gaps, 0.99), gaps.back(), idle_p999, idle_max, gaps.size());
     }, tablet_cql_test_config(app.configuration()["schema-commitlog-segment-size-mb"].as<unsigned>()));
@@ -565,6 +675,16 @@ int scylla_tablets_main(int argc, char** argv) {
                     "Number of tokens per node in the topology built by --load-topology-state.")
             ("features", bpo::value<int>()->default_value(-1),
                     "Cap the number of supported features per node (-1 = everything this build supports).")
+            ("shards-per-node", bpo::value<unsigned>()->default_value(1),
+                    "Shard count of the nodes added by --load-topology-state.")
+            ("tablets-per-shard", bpo::value<int>()->default_value(0),
+                    "With --load-topology-state, create tablet metadata with this many tablet replicas per "
+                    "shard of the normal nodes (0 = no tablets).")
+            ("tablet-tables", bpo::value<int>()->default_value(16),
+                    "Number of tables the --tablets-per-shard tablets are spread over.")
+            ("leaving-drained", "Give the --leaving-nodes no tablet replicas, as at the end of the drain.")
+            ("reload-via-group0", "Measure a group0 command rewriting one tablet, whose apply runs the full "
+                    "topology reload, instead of load_topology_state() alone. Needs --tablets-per-shard.")
             ("leaving-nodes", bpo::value<int>()->default_value(0),
                     "Number of the --nodes nodes with a pending leave request, as during a decommission "
                     "whose request is paused while tablets drain off the node.")
