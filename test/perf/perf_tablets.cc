@@ -525,6 +525,23 @@ static future<> test_load_topology_state(app_template& app) {
             testlog.info("system.cdc_generations_v3: generation {} has {} ranges", cdc_gen_id, cdc_ranges);
         }
 
+        // Production clusters run the distributed system keyspaces with
+        // NetworkTopologyStrategy, which changes how a reload recomputes their
+        // replication maps.
+        if (!app.configuration().contains("keep-simple-system-keyspaces")) {
+            for (auto ks : {"system_distributed", "system_traces", "system_auth"}) {
+                if (!e.local_db().has_keyspace(ks)) {
+                    continue;
+                }
+                e.execute_cql(format("ALTER KEYSPACE {} WITH replication = {{'class': 'NetworkTopologyStrategy', 'dc1': 3}}", ks)).get();
+                auto type = e.local_db().find_keyspace(ks).get_replication_strategy().get_type();
+                if (type != locator::replication_strategy_type::network_topology) {
+                    throw std::runtime_error(format("{} is not NetworkTopologyStrategy after ALTER", ks));
+                }
+                testlog.info("system keyspace {}: NetworkTopologyStrategy dc1=3", ks);
+            }
+        }
+
         // Tablet metadata sized by replicas per shard. Replicas go round-robin over
         // the nodes' shards; with --leaving-drained the leaving nodes hold none, as
         // at the end of the drain, which is the worst case for has_replica_on().
@@ -706,6 +723,8 @@ int scylla_tablets_main(int argc, char** argv) {
                     "shard of the normal nodes (0 = no tablets).")
             ("tablet-tables", bpo::value<int>()->default_value(16),
                     "Number of tables the --tablets-per-shard tablets are spread over.")
+            ("keep-simple-system-keyspaces", "Leave system_distributed, system_traces and system_auth on "
+                    "SimpleStrategy instead of altering them to NetworkTopologyStrategy.")
             ("leaving-drained", "Give the --leaving-nodes no tablet replicas, as at the end of the drain.")
             ("reload-via-group0", "Measure a group0 command rewriting one tablet, whose apply runs the full "
                     "topology reload, instead of load_topology_state() alone. Needs --tablets-per-shard.")
