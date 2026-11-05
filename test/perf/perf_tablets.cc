@@ -315,8 +315,12 @@ static future<> test_basic_operations(app_template& app) {
 // work cheaper - it changes when the work becomes preemptible.
 class preemption_probe {
     using clk = std::chrono::steady_clock;
+    // Gaps at or below this are counted but not kept: the probe sees tens of
+    // millions of them in a busy run, and only the long ones matter.
+    static constexpr double short_gap_ms = 0.05;
     bool _stop = true;
-    std::vector<double> _gaps_ms;
+    uint64_t _count = 0;
+    std::vector<double> _long_gaps_ms;
     future<> _done = make_ready_future<>();
 private:
     future<> run() {
@@ -324,26 +328,42 @@ private:
         while (!_stop) {
             co_await seastar::yield();
             auto now = clk::now();
-            _gaps_ms.push_back(std::chrono::duration<double, std::milli>(now - prev).count());
+            auto gap = std::chrono::duration<double, std::milli>(now - prev).count();
+            ++_count;
+            if (gap > short_gap_ms) {
+                _long_gaps_ms.push_back(gap);
+            }
             prev = now;
         }
     }
 public:
     void start() {
         _stop = false;
-        _gaps_ms.clear();
-        _gaps_ms.reserve(1 << 20);
+        _count = 0;
+        _long_gaps_ms.clear();
         _done = run();
     }
     // Call from a seastar thread.
     void stop() {
         _stop = true;
         std::exchange(_done, make_ready_future<>()).get();
-        std::sort(_gaps_ms.begin(), _gaps_ms.end());
+        std::sort(_long_gaps_ms.begin(), _long_gaps_ms.end());
     }
-    // Call after stop().
-    const std::vector<double>& gaps_ms() const {
-        return _gaps_ms;
+    // The rest: call after stop(). A percentile among the short gaps reads as
+    // short_gap_ms, an upper bound.
+    double percentile(double p) const {
+        if (_count == 0) {
+            return 0;
+        }
+        auto i = uint64_t(p * (_count - 1) + 0.5);
+        auto nr_short = _count - _long_gaps_ms.size();
+        return i < nr_short ? short_gap_ms : _long_gaps_ms[i - nr_short];
+    }
+    double max_ms() const {
+        return _long_gaps_ms.empty() ? (_count ? short_gap_ms : 0) : _long_gaps_ms.back();
+    }
+    uint64_t count() const {
+        return _count;
     }
 };
 
@@ -620,13 +640,12 @@ static future<> test_load_topology_state(app_template& app) {
         probe.start();
         seastar::sleep(std::chrono::seconds(2)).get();
         probe.stop();
-        const auto idle_gaps = probe.gaps_ms();
-        const auto idle_max = idle_gaps.back();
-        const auto idle_p999 = percentile(idle_gaps, 0.999);
+        const auto idle_max = probe.max_ms();
+        const auto idle_p999 = probe.percentile(0.999);
 
+        // Latency without the probe, which would otherwise compete for the CPU.
         std::vector<double> lat;
         lat.reserve(iterations);
-        probe.start();
         const auto run_start = clk::now();
         for (int i = 0; i < iterations; ++i) {
             auto start = clk::now();
@@ -634,8 +653,13 @@ static future<> test_load_topology_state(app_template& app) {
             lat.push_back(std::chrono::duration<double, std::milli>(clk::now() - start).count());
         }
         const auto run_ms = std::chrono::duration<double, std::milli>(clk::now() - run_start).count();
+
+        // Stalls, in a second pass with the probe running.
+        probe.start();
+        for (int i = 0; i < iterations; ++i) {
+            step();
+        }
         probe.stop();
-        const auto& gaps = probe.gaps_ms();
 
         const auto mean = std::accumulate(lat.begin(), lat.end(), 0.0) / lat.size();
         std::sort(lat.begin(), lat.end());
@@ -647,7 +671,7 @@ static future<> test_load_topology_state(app_template& app) {
                      "gaps={} [ms]",
                      via_group0 ? "group0" : "load", shards_per_node, nr_tablets, leaving_drained,
                      nr_nodes, nr_leaving, nr_left_nodes, nr_rows, tokens_per_node, cdc_ranges, mean, percentile(lat, 0.5), percentile(lat, 0.95),
-                     lat.back(), percentile(gaps, 0.99), gaps.back(), idle_p999, idle_max, gaps.size());
+                     lat.back(), probe.percentile(0.99), probe.max_ms(), idle_p999, idle_max, probe.count());
     }, tablet_cql_test_config(app.configuration()["schema-commitlog-segment-size-mb"].as<unsigned>()));
 }
 
