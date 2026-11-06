@@ -171,6 +171,10 @@ static future<> test_topology_reload(app_template& app) {
         using clk = std::chrono::steady_clock;
 
         const int nr_nodes = app.configuration()["nodes"].as<int>();
+        const int nr_racks = app.configuration()["racks"].as<int>();
+        if (nr_racks < 1) {
+            throw std::runtime_error("--racks must be at least 1");
+        }
         const unsigned tokens_per_node = app.configuration()["tokens-per-node"].as<unsigned>();
         const int nr_left_nodes = app.configuration()["left-nodes"].as<int>();
         const int nr_leaving = app.configuration()["leaving-nodes"].as<int>();
@@ -201,10 +205,15 @@ static future<> test_topology_reload(app_template& app) {
         }
 
         topology_builder topo(e);
+        std::vector<locator::endpoint_dc_rack> racks{topo.rack()};
+        while (std::cmp_less(racks.size(), nr_racks)) {
+            racks.push_back(topo.start_new_rack());
+        }
         std::vector<locator::host_id> normal_hosts;
         for (int i = 0; i < nr_nodes; ++i) {
-            normal_hosts.push_back(topo.add_node(service::node_state::normal, shards_per_node, std::nullopt, tokens_per_node, features));
+            normal_hosts.push_back(topo.add_node(service::node_state::normal, shards_per_node, racks[i % nr_racks], tokens_per_node, features));
         }
+        testlog.info("{} normal nodes over {} racks in {}", nr_nodes, nr_racks, racks.front().dc);
         // A decommission whose leave request is paused while tablets drain off
         // the node: the node stays normal with the request queued. That is the
         // topology every reload sees during the drain's tablet migrations.
@@ -467,10 +476,10 @@ static future<> test_topology_reload(app_template& app) {
 
         testlog.info("load_topology_state nodes={} leaving={} left={} rows={} tokens_per_node={} features={} cdc_ranges={} iterations={} wall={:.1f}ms",
                      nr_nodes, nr_leaving, nr_left_nodes, nr_rows, tokens_per_node, features.size(), cdc_ranges, iterations, run_ms);
-        testlog.info("RESULT mode={} shards={} tablets={} drained={} nodes={} leaving={} left={} rows={} tokens={} cdc_ranges={} mean={:.3f} p50={:.3f} p95={:.3f} max={:.3f} "
+        testlog.info("RESULT mode={} racks={} shards={} tablets={} drained={} nodes={} leaving={} left={} rows={} tokens={} cdc_ranges={} mean={:.3f} p50={:.3f} p95={:.3f} max={:.3f} "
                      "stall_p99={:.3f} stall_max={:.3f} idle_stall_p999={:.3f} idle_stall_max={:.3f} "
                      "gaps={} [ms]",
-                     via_group0 ? "group0" : "load", shards_per_node, nr_tablets, leaving_drained,
+                     via_group0 ? "group0" : "load", nr_racks, shards_per_node, nr_tablets, leaving_drained,
                      nr_nodes, nr_leaving, nr_left_nodes, nr_rows, tokens_per_node, cdc_ranges, mean, percentile(lat, 0.5), percentile(lat, 0.95),
                      lat.back(), probe.percentile(0.99), probe.max_ms(), idle_p999, idle_max, probe.count());
     }, tablet_cql_test_config(app.configuration()["schema-commitlog-segment-size-mb"].as<unsigned>()));
@@ -483,6 +492,7 @@ int scylla_topology_main(int argc, char** argv) {
     app_template app;
     app.add_options()
             ("nodes", bpo::value<int>()->default_value(3), "Number of normal nodes to add to the topology.")
+            ("racks", bpo::value<int>()->default_value(3), "Number of racks the normal nodes are spread over, round-robin.")
             ("tokens-per-node", bpo::value<unsigned>()->default_value(256), "Number of tokens per node.")
             ("features", bpo::value<int>()->default_value(-1),
                     "Cap the number of supported features per node (-1 = everything this build supports).")
