@@ -18,6 +18,7 @@
 #include "types/types.hh"
 #include "utils/base64.hh"
 #include "utils/hashers.hh"
+#include "utils/http.hh"
 #include "utils/rest/client.hh"
 #include "exceptions.hh"
 #include "service_principal_credentials.hh"
@@ -100,7 +101,7 @@ static future<::shared_ptr<tls::certificate_credentials>> make_creds(const sstri
     if (!truststore.empty()) {
         co_await creds->set_x509_trust_file(truststore, seastar::tls::x509_crt_format::PEM);
     } else {
-        co_await creds->set_system_trust();
+        co_await utils::http::set_default_trust(*creds);
     }
     co_return creds;
 }

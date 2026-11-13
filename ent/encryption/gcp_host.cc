@@ -374,7 +374,7 @@ future<> encryption::gcp_host::impl::init() {
     if (!_options.truststore.empty()) {
         co_await _certs->set_x509_trust_file(_options.truststore, seastar::tls::x509_crt_format::PEM);
     } else {
-        co_await _certs->set_system_trust();
+        co_await utils::http::set_default_trust(*_certs);
     }
 
     if (!_options.master_key.empty()) {

@@ -1823,6 +1823,12 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , ldap_bind_passwd(this, "ldap_bind_passwd", value_status::Used, "", "Password used by LDAPRoleManager for binding to LDAP server.")
     , saslauthd_socket_path(this, "saslauthd_socket_path", value_status::Used, "", "UNIX domain socket on which saslauthd is listening.")
     , object_storage_endpoints(this, "object_storage_endpoints", liveness::LiveUpdate, value_status::Used, {}, "Object storage endpoints configuration.")
+    , default_truststore(this, "default_truststore", value_status::Used, "",
+        "Path to a PEM file with the CA certificates which verify TLS servers that Scylla connects to as a client and which have no "
+        "truststore of their own configured: object storage endpoints, and KMS, KMIP, Azure and GCP key providers. "
+        "If empty, Scylla uses the system trust store. Verification against the system trust store takes a process-wide lock "
+        "in p11-kit, which stalls reactors when many shards open connections at once; pointing this at the system CA bundle "
+        "(e.g. /etc/pki/tls/certs/ca-bundle.crt or /etc/ssl/certs/ca-certificates.crt) avoids it.")
     , object_storage_connections(this, "object_storage_connections", liveness::LiveUpdate, value_status::Used, {},
         "Maximum number of S3 connections per shard for each connection pool, as a map from the pool name to a positive count. "
         "A scheduling group uses the pool named after it, except that every service-level group uses service_levels and a group "

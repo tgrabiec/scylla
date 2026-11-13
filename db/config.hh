@@ -635,6 +635,7 @@ public:
     const db::extensions& extensions() const;
 
     named_value<std::vector<object_storage_endpoint_param>> object_storage_endpoints;
+    named_value<sstring> default_truststore;
     named_value<std::unordered_map<sstring, unsigned>> object_storage_connections;
     named_value<unsigned> object_storage_connections_per_shard;
     named_value<double> object_storage_clients_memory_fraction;

@@ -380,6 +380,7 @@ add_scylla_test(combined_tests
     cql_ddl_test.cc
     database_test.cc
     data_listeners_test.cc
+    default_truststore_test.cc
     disk_space_monitor_test.cc
     digest_checked_data_source_test.cc
     error_injection_test.cc

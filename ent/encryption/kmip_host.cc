@@ -320,7 +320,7 @@ future<> kmip_host::impl::connection::connect() {
         });
     } else {
         f = f.then([cred] {
-            return cred->set_system_trust();
+            return utils::http::set_default_trust(*cred);
         });
     }
     return f.then([this, cred] {

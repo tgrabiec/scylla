@@ -18,6 +18,15 @@
 
 namespace utils::http {
 
+// Sets the PEM CA bundle which set_default_trust() loads on this shard.
+// An empty path selects the system trust store.
+void set_default_truststore(std::string path);
+
+// Loads the bundle set by set_default_truststore() into creds, or the
+// system trust store if none is set.
+future<> set_default_trust(tls::certificate_credentials& creds);
+
+// Credentials trusting the CAs set_default_trust() loads, shared by all callers on a shard.
 future<shared_ptr<tls::certificate_credentials>> system_trust_credentials();
 
 class dns_connection_factory : public seastar::http::connection_factory {

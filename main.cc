@@ -74,6 +74,7 @@
 #include "utils/runtime.hh"
 #include "utils/log.hh"
 #include "utils/directories.hh"
+#include "utils/http.hh"
 #include "debug.hh"
 #include "auth/common.hh"
 #include "auth/config.hh"
@@ -957,6 +958,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // See the comment at the definition of sstables::global_cache_index_pages.
             smp::invoke_on_all([&cfg] {
                 sstables::global_cache_index_pages = cfg->cache_index_pages.operator utils::updateable_value<bool>();
+            }).get();
+
+            smp::invoke_on_all([&cfg] {
+                utils::http::set_default_truststore(cfg->default_truststore());
             }).get();
 
             ::sighup_handler sighup_handler(opts, *cfg);

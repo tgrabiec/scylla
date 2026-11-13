@@ -717,7 +717,7 @@ future<encryption::kms_host::impl::result_type> encryption::kms_host::impl::post
         if (!_options.truststore.empty()) {
             co_await creds->set_x509_trust_file(_options.truststore, seastar::tls::x509_crt_format::PEM);
         } else {
-            co_await creds->set_system_trust();
+            co_await utils::http::set_default_trust(*creds);
         }
         _creds = creds;
     }
