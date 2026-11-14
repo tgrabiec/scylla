@@ -194,3 +194,32 @@ BOOST_AUTO_TEST_CASE(test_from_nodetool_style_string_composite_partition_key) {
     BOOST_REQUIRE_THROW(partition_key::from_nodetool_style_string(s2, "value1:value2:extra"), std::invalid_argument);
     BOOST_REQUIRE_THROW(partition_key::from_nodetool_style_string(s2, "value1"), std::invalid_argument);
 }
+
+BOOST_AUTO_TEST_CASE(test_legacy_clustering_key_prefix) {
+    auto s_ptr = schema_builder(1, "", "")
+            .with_column("pk", bytes_type, column_kind::partition_key)
+            .with_column("ck1", int32_type, column_kind::clustering_key)
+            .with_column("ck2", utf8_type, column_kind::clustering_key)
+            .build();
+    const schema& s = *s_ptr;
+
+    std::vector<clustering_key_prefix> keys{
+        clustering_key_prefix::make_empty(s),
+        clustering_key_prefix::from_exploded(s, {int32_type->decompose(7)}),
+        clustering_key_prefix::from_exploded(s, {int32_type->decompose(7), utf8_type->decompose(sstring("x"))}),
+        clustering_key_prefix::from_exploded(s, {bytes(), bytes()}),
+    };
+
+    for (const auto& ck : keys) {
+        auto legacy = ck.to_legacy(s);
+        BOOST_REQUIRE(clustering_key_prefix::from_legacy(s, legacy).equal(s, ck));
+        BOOST_REQUIRE(legacy.explode() == ck.explode(s));
+
+        // The adaptor and clustering_key_prefix share the IDL wire format.
+        auto legacy_buf = ser::serialize_to_buffer<bytes>(legacy);
+        BOOST_REQUIRE(legacy_buf == ser::serialize_to_buffer<bytes>(ck));
+        BOOST_REQUIRE(ser::deserialize_from_buffer(legacy_buf, std::type_identity<clustering_key_prefix>()).equal(s, ck));
+        auto legacy_from_wire = ser::deserialize_from_buffer(ser::serialize_to_buffer<bytes>(ck), std::type_identity<legacy_clustering_key_prefix>());
+        BOOST_REQUIRE(clustering_key_prefix::from_legacy(s, legacy_from_wire).equal(s, ck));
+    }
+}

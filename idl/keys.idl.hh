@@ -10,6 +10,10 @@ class clustering_key_prefix {
     std::vector<bytes> explode();
 };
 
+class legacy_clustering_key_prefix {
+    std::vector<bytes> explode();
+};
+
 class partition_key {
     std::vector<bytes> explode();
 };

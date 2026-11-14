@@ -750,6 +750,47 @@ public:
     }
 };
 
+// A clustering key prefix in the schema-independent legacy format:
+//
+//   <len(value1)><value1><len(value2)><value2>...<len(value_n)><value_n>
+//
+// with 2-byte big-endian lengths. Sstable large data records and system
+// tables persist this format, and the IDL serializes the exploded form of it,
+// identically to clustering_key_prefix. Convert with
+// clustering_key_prefix::to_legacy() and clustering_key_prefix::from_legacy().
+class legacy_clustering_key_prefix {
+    managed_bytes _bytes;
+public:
+    using c_type = compound_type<allow_prefixes::yes>;
+
+    explicit legacy_clustering_key_prefix(managed_bytes b) noexcept : _bytes(std::move(b)) {}
+
+    explicit legacy_clustering_key_prefix(const std::vector<bytes>& v)
+        : _bytes(c_type::serialize_value(v))
+    { }
+
+    const managed_bytes& representation() const {
+        return _bytes;
+    }
+
+    // Returns a range of managed_bytes_view
+    auto components() const {
+        return c_type::components(_bytes);
+    }
+
+    std::vector<bytes> explode() const {
+        std::vector<bytes> result;
+        for (managed_bytes_view c : components()) {
+            result.emplace_back(to_bytes(c));
+        }
+        return result;
+    }
+
+    bool is_empty() const {
+        return _bytes.empty();
+    }
+};
+
 class clustering_key_prefix : public prefix_compound_wrapper<clustering_key_prefix, clustering_key_prefix_view, clustering_key> {
     explicit constexpr clustering_key_prefix(managed_bytes&& b)
             : prefix_compound_wrapper<clustering_key_prefix, clustering_key_prefix_view, clustering_key>(std::move(b))
@@ -814,6 +855,18 @@ public:
 
     static const compound& get_compound_type(const schema& s) {
         return s.clustering_key_prefix_type();
+    }
+
+    legacy_clustering_key_prefix to_legacy(const schema& s) const {
+        return legacy_clustering_key_prefix(legacy_clustering_key_prefix::c_type::serialize_value(components(s)));
+    }
+
+    static clustering_key_prefix from_legacy(const schema& s, managed_bytes_view legacy) {
+        return clustering_key_prefix(get_compound_type(s)->serialize_value(legacy_clustering_key_prefix::c_type::components(legacy)));
+    }
+
+    static clustering_key_prefix from_legacy(const schema& s, const legacy_clustering_key_prefix& legacy) {
+        return from_legacy(s, legacy.representation());
     }
 
     static clustering_key_prefix from_clustering_prefix(const schema& s, const exploded_clustering_prefix& prefix) {
