@@ -73,6 +73,52 @@ Converted:
 | `db/large_data_handler.cc:304,449` | in-memory lookups matched against on-disk records |
 | `db/corrupt_data_handler.cc:92` | `system.corrupt_data.clustering_key` blob |
 
+## primary_key_layout (in progress)
+
+`keys/primary_key_layout.hh` defines the abstract `primary_key_layout`, and
+`schema::clustering_key_layout()` holds one, made by
+`make_primary_key_layout(types)` in `schema::rebuild()`. Today it always
+returns `legacy_primary_key_layout`, which matches
+`compound_type<allow_prefixes::yes>` byte for byte (checked in `keys_test`).
+
+Virtual core:
+
+- iteration: `first(cursor&)` and `next(cursor&)`. The non-virtual
+  `iterator` (forward) wraps a `cursor {key, rest, current, index, at_end}`,
+  so a layout can find component i from the whole key (header-based formats).
+- `size()`, `deserialize_value()` (explode)
+- `compare()`, `prefix_equal_compare()`, `equal()`, `hash()`
+- `serialized_size(sizes)` and `serialize(sizes, component_source&, out)`.
+  The non-virtual template `serialize_value(range)` collects component sizes,
+  then calls `serialize()`, which pulls each value through a type-erased
+  `component_source`. Any FragmentedView range serializes without copying.
+
+The non-virtual API mirrors `compound_type` (`types()`, `begin/end/components`,
+`less`, `is_full`, `is_empty`, `validate`, `serialize_single`,
+`serialize_optionals`, `serialize_value_deep`), so the templates in `keys.hh`
+work unchanged. `clustering_key_prefix{,_view}::compound` is now
+`primary_key_layout_ptr` (`seastar::shared_ptr<const primary_key_layout>`;
+`lw_shared_ptr` cannot hold a derived class), and `get_compound_type(s)`
+returns the layout. The schema-free (deprecated) members decode the legacy
+format explicitly through `compound_type<allow_prefixes::yes>` statics.
+
+Switched to the layout outside `keys.hh`:
+`bound_view::tri_compare` (`clustering_bounds_comparator.hh`), BTI
+(`comparable_bytes_from_compound(const primary_key_layout&, ...)`), and
+`get_unreversed_tri_compare()` (uses `make_primary_key_layout()`).
+
+`schema::clustering_key_type()` / `clustering_key_prefix_type()` remain, for
+legacy-format users: sstables `composite`, `tools/scylla-types`,
+`tools/lua_sstable_consumer` (`validate()` of user hex input), and callers
+that only need `->types()`.
+
+Cost: one virtual call per key comparison, and one per component step when
+iterating. Not measured yet.
+
+Not virtualized yet: `prefix_view_on_prefix_compound::less_compare_with_prefix`
+and `is_prefixed_by()` (they iterate components generically), and
+`validate()` (it iterates generically).
+
 ## IDL (todo)
 
 The generated `serializer<clustering_key_prefix>` calls `explode()` and the
