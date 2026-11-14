@@ -616,7 +616,7 @@ struct large_data_stats_entry {
 struct large_data_record {
     large_data_type type;
     disk_string<uint32_t> partition_key;    // binary serialized partition key (sstables::key::get_bytes())
-    disk_string<uint32_t> clustering_key;   // binary serialized CK (clustering_key_prefix::representation()), empty if N/A
+    disk_string<uint32_t> clustering_key;   // binary serialized CK (legacy_clustering_key_prefix::representation()), empty if N/A
     disk_string<uint32_t> column_name;      // column name as text, empty for partition/row entries
     uint64_t value;                         // size in bytes (partition, row, or cell size depending on type)
     // Type-dependent element count:

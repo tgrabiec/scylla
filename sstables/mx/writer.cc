@@ -1230,7 +1230,7 @@ void writer::maybe_record_large_rows(const sstables::sstable& sst, const sstable
             large_data_type::row_size,
             row_size);
         const auto& pk_bytes = partition_key.get_bytes();
-        auto ck_bytes = clustering_key ? clustering_key->view().representation().linearize() : bytes();
+        auto ck_bytes = clustering_key ? to_bytes(clustering_key->to_legacy(_schema).representation()) : bytes();
         insert_into_ld_heap(_ld_row_size_records, large_data_record{
             .type = large_data_type::row_size,
             .partition_key = disk_string<uint32_t>{bytes(pk_bytes)},
@@ -1274,7 +1274,7 @@ void writer::maybe_record_large_cells(const sstables::sstable& sst, const sstabl
     if (ret.size) {
         trace_log(large_data_type::cell_size);
         const auto& pk_bytes = partition_key.get_bytes();
-        auto ck_bytes = clustering_key ? clustering_key->view().representation().linearize() : bytes();
+        auto ck_bytes = clustering_key ? to_bytes(clustering_key->to_legacy(_schema).representation()) : bytes();
         auto col_name = cdef.name_as_text();
         insert_into_ld_heap(_ld_cell_size_records, large_data_record{
             .type = large_data_type::cell_size,
@@ -1288,7 +1288,7 @@ void writer::maybe_record_large_cells(const sstables::sstable& sst, const sstabl
     if (ret.elements) {
         trace_log(large_data_type::elements_in_collection);
         const auto& pk_bytes = partition_key.get_bytes();
-        auto ck_bytes = clustering_key ? clustering_key->view().representation().linearize() : bytes();
+        auto ck_bytes = clustering_key ? to_bytes(clustering_key->to_legacy(_schema).representation()) : bytes();
         auto col_name = cdef.name_as_text();
         insert_into_ld_heap(_ld_elements_in_collection_records, large_data_record{
             .type = large_data_type::elements_in_collection,

@@ -1914,7 +1914,7 @@ class large_rows_virtual_table : public streaming_virtual_table {
                 auto pk = sstables::key_view(rec.partition_key.value).to_partition_key(*table_schema);
                 auto ck_str = rec.clustering_key.value.empty()
                     ? sstring()
-                    : sstring(key_to_str(clustering_key_prefix::from_bytes(rec.clustering_key.value), *table_schema));
+                    : sstring(key_to_str(clustering_key_prefix::from_legacy(*table_schema, bytes_view(rec.clustering_key.value)), *table_schema));
                 records.push_back(record{
                     .sstable_name = sst_name,
                     .row_size = static_cast<int64_t>(rec.value),
@@ -2082,7 +2082,7 @@ class large_cells_virtual_table : public streaming_virtual_table {
                 auto pk = sstables::key_view(rec.partition_key.value).to_partition_key(*table_schema);
                 auto ck_str = rec.clustering_key.value.empty()
                     ? sstring()
-                    : sstring(key_to_str(clustering_key_prefix::from_bytes(rec.clustering_key.value), *table_schema));
+                    : sstring(key_to_str(clustering_key_prefix::from_legacy(*table_schema, bytes_view(rec.clustering_key.value)), *table_schema));
                 records.push_back(record{
                     .sstable_name = sst_name,
                     .cell_size = static_cast<int64_t>(rec.value),

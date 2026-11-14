@@ -89,7 +89,7 @@ future<corrupt_data_handler::entry_id> system_table_corrupt_data_handler::do_rec
 
     entry_row.apply(row_marker(timestamp, _entry_ttl, gc_clock::now() + _entry_ttl));
     set_cell("partition_key", data_value(to_bytes(pk.representation())));
-    set_cell("clustering_key", data_value(to_bytes(ck.representation())));
+    set_cell("clustering_key", data_value(to_bytes(ck.to_legacy(user_table_schema).representation())));
     set_cell("mutation_fragment_kind", fmt::to_string(kind));
     // FIXME: Exposing knowledge here that bytes are serialized by just storing the raw value.
     // Need to replace with a fragmented-buffer serialize API call, which we don't have yet.
