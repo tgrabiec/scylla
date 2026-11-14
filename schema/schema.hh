@@ -23,6 +23,7 @@
 #include <seastar/core/sstring.hh>
 #include "types/types.hh"
 #include "keys/compound.hh"
+#include "keys/primary_key_layout.hh"
 #include "gc_clock.hh"
 #include "sstables/compressor.hh"
 #include "compaction/compaction_strategy_type.hh"
@@ -606,6 +607,7 @@ private:
     std::unordered_map<bytes, const column_definition*> _columns_by_name;
     lw_shared_ptr<compound_type<allow_prefixes::no>> _partition_key_type;
     lw_shared_ptr<compound_type<allow_prefixes::yes>> _clustering_key_type;
+    primary_key_layout_ptr _clustering_key_layout;
     column_mapping _column_mapping;
     shared_ptr<query::partition_slice> _full_slice;
     column_count_type _clustering_key_size;
@@ -918,6 +920,10 @@ public:
     }
     const lw_shared_ptr<compound_type<allow_prefixes::yes>>& clustering_key_prefix_type() const {
         return _clustering_key_type;
+    }
+    // Layout of clustering_key_prefix::representation().
+    const primary_key_layout_ptr& clustering_key_layout() const {
+        return _clustering_key_layout;
     }
     const data_type& regular_column_name_type() const {
         return _raw._regular_column_name_type;

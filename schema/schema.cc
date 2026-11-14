@@ -384,6 +384,7 @@ const utils::chunked_vector<column_definition>& v3_columns::all_columns() const 
 void schema::rebuild() {
     _partition_key_type = make_lw_shared<compound_type<>>(get_column_types(partition_key_columns()));
     _clustering_key_type = make_lw_shared<compound_prefix>(get_column_types(clustering_key_columns()));
+    _clustering_key_layout = make_primary_key_layout(get_column_types(clustering_key_columns()));
     _clustering_key_size = column_offset(column_kind::static_column) - column_offset(column_kind::clustering_key);
     _regular_column_count = _raw._columns.size() - column_offset(column_kind::regular_column);
     _static_column_count = column_offset(column_kind::regular_column) - column_offset(column_kind::static_column);
