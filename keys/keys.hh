@@ -719,15 +719,25 @@ class clustering_key_prefix_view : public prefix_compound_view_wrapper<clusterin
         : prefix_compound_view_wrapper<clustering_key_prefix_view, clustering_key>(v)
     { }
 public:
-    static clustering_key_prefix_view from_bytes(const managed_bytes& v) {
+    using base_view = prefix_compound_view_wrapper<clustering_key_prefix_view, clustering_key>;
+
+    [[deprecated("ck-raw")]] static clustering_key_prefix_view from_bytes(const managed_bytes& v) {
         return { v };
     }
-    static clustering_key_prefix_view from_bytes(managed_bytes_view v) {
+    [[deprecated("ck-raw")]] static clustering_key_prefix_view from_bytes(managed_bytes_view v) {
         return { v };
     }
-    static clustering_key_prefix_view from_bytes(bytes_view v) {
+    [[deprecated("ck-raw")]] static clustering_key_prefix_view from_bytes(bytes_view v) {
         return { v };
     }
+
+    [[deprecated("ck-raw")]] managed_bytes_view representation() const { return _bytes; }
+    [[deprecated("ck-noschema")]] auto begin() const { return base_view::begin(); }
+    [[deprecated("ck-noschema")]] auto end() const { return base_view::end(); }
+    auto begin(const schema& s) const { return base_view::begin(s); }
+    auto end(const schema& s) const { return base_view::end(s); }
+    [[deprecated("ck-noschema")]] auto components() const { return base_view::components(); }
+    auto components(const schema& s) const { return base_view::components(s); }
 
     using compound = lw_shared_ptr<compound_type<allow_prefixes::yes>>;
 
@@ -745,18 +755,20 @@ class clustering_key_prefix : public prefix_compound_wrapper<clustering_key_pref
             : prefix_compound_wrapper<clustering_key_prefix, clustering_key_prefix_view, clustering_key>(std::move(b))
     { }
 public:
+    using base_wrapper = prefix_compound_wrapper<clustering_key_prefix, clustering_key_prefix_view, clustering_key>;
+
     template<typename RangeOfSerializedComponents>
-    static clustering_key_prefix from_range(RangeOfSerializedComponents&& v) {
+    [[deprecated("ck-noschema")]] static clustering_key_prefix from_range(RangeOfSerializedComponents&& v) {
         return clustering_key_prefix(compound::element_type::serialize_value(std::forward<RangeOfSerializedComponents>(v)));
     }
 
-    clustering_key_prefix(std::vector<bytes> v)
+    [[deprecated("ck-noschema")]] clustering_key_prefix(std::vector<bytes> v)
         : prefix_compound_wrapper(compound::element_type::serialize_value(std::move(v)))
     { }
-    clustering_key_prefix(std::vector<managed_bytes> v)
+    [[deprecated("ck-noschema")]] clustering_key_prefix(std::vector<managed_bytes> v)
         : prefix_compound_wrapper(compound::element_type::serialize_value(std::move(v)))
     { }
-    clustering_key_prefix(std::initializer_list<bytes> v) : clustering_key_prefix(std::vector(v)) {}
+    [[deprecated("ck-noschema")]] clustering_key_prefix(std::initializer_list<bytes> v) : clustering_key_prefix(std::vector(v)) {}
 
     clustering_key_prefix(clustering_key_prefix&& v) = default;
     clustering_key_prefix(const clustering_key_prefix& v) = default;
@@ -771,11 +783,33 @@ public:
 
     using compound = lw_shared_ptr<compound_type<allow_prefixes::yes>>;
 
-    static clustering_key_prefix from_bytes(const managed_bytes& b) { return clustering_key_prefix(managed_bytes(b)); }
-    static constexpr clustering_key_prefix from_bytes(managed_bytes&& b) { return clustering_key_prefix(std::move(b)); }
-    static clustering_key_prefix from_bytes(managed_bytes_view b) { return clustering_key_prefix(managed_bytes(b)); }
-    static clustering_key_prefix from_bytes(bytes_view b) {
+    [[deprecated("ck-raw")]] static clustering_key_prefix from_bytes(const managed_bytes& b) { return clustering_key_prefix(managed_bytes(b)); }
+    [[deprecated("ck-raw")]] static constexpr clustering_key_prefix from_bytes(managed_bytes&& b) { return clustering_key_prefix(std::move(b)); }
+    [[deprecated("ck-raw")]] static clustering_key_prefix from_bytes(managed_bytes_view b) { return clustering_key_prefix(managed_bytes(b)); }
+    [[deprecated("ck-raw")]] static clustering_key_prefix from_bytes(bytes_view b) {
         return clustering_key_prefix(managed_bytes(b));
+    }
+
+    [[deprecated("ck-raw")]] const managed_bytes& representation() const { return _bytes; }
+    [[deprecated("ck-raw")]] operator managed_bytes_view() const { return _bytes; }
+    [[deprecated("ck-noschema")]] auto components() const { return base_wrapper::components(); }
+    auto components(const schema& s) const { return base_wrapper::components(s); }
+    [[deprecated("ck-noschema")]] std::vector<bytes> explode() const { return base_wrapper::explode(); }
+    std::vector<bytes> explode(const schema& s) const { return base_wrapper::explode(s); }
+    [[deprecated("ck-noschema")]] std::vector<managed_bytes> explode_fragmented() const { return base_wrapper::explode_fragmented(); }
+
+    template<typename RangeOfSerializedComponents>
+    [[deprecated("ck-noschema")]] static clustering_key_prefix from_exploded(RangeOfSerializedComponents&& v) {
+        return base_wrapper::from_exploded(std::forward<RangeOfSerializedComponents>(v));
+    }
+    static clustering_key_prefix from_exploded(const schema& s, const std::vector<bytes>& v) {
+        return base_wrapper::from_exploded(s, v);
+    }
+    static clustering_key_prefix from_exploded(const schema& s, const std::vector<managed_bytes>& v) {
+        return base_wrapper::from_exploded(s, v);
+    }
+    [[deprecated("ck-noschema")]] static clustering_key_prefix from_exploded_view(const std::vector<bytes_view>& v) {
+        return base_wrapper::from_exploded_view(v);
     }
 
     static const compound& get_compound_type(const schema& s) {
