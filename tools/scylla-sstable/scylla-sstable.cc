@@ -1791,7 +1791,7 @@ public:
         _writer.String(key_to_str(pk, *_schema));
         _writer.Key("clustering_key");
         if (!val.clustering_key.value.empty()) {
-            auto ck = clustering_key_prefix::from_bytes(val.clustering_key.value);
+            auto ck = clustering_key_prefix::from_legacy(*_schema, bytes_view(val.clustering_key.value));
             _writer.String(key_to_str(ck, *_schema));
         } else {
             _writer.String("");

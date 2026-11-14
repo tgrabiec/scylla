@@ -301,7 +301,7 @@ large_data_violation_type large_data_guardrail::check_rows_and_collections(const
     }
 
     for (const auto& cr : mp.non_dummy_rows()) {
-        auto ck_bytes = cr.key().view().representation().linearize();
+        auto ck_bytes = to_bytes(cr.key().to_legacy(s).representation());
         auto ck_bv = bytes_view(ck_bytes);
         violations |= check_row_size(s, pk_bytes, pk, ck_bv, &cr.key());
         cr.row().cells().for_each_cell([&](column_id id, const atomic_cell_or_collection&) {
@@ -446,7 +446,8 @@ void large_data_cache_tracker::on_row_merged(const schema& s, const rows_entry& 
         // (which copies it into the cache) under the standard allocator the
         // caches are torn down with (see with_standard_allocator()).
         with_standard_allocator([&] {
-            auto ck_bytes_view = row.key().view().representation();
+            auto legacy_ck = row.key().to_legacy(s);
+            auto ck_bytes_view = managed_bytes_view(legacy_ck.representation());
 
             if (row_warn > 0 || row_fail > 0) {
                 size_t row_size = row.memory_usage(s);
