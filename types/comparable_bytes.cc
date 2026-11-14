@@ -1539,8 +1539,9 @@ static bool has_encoding_for_zero_sized_value(const abstract_type& type) {
     return visit(type, has_encoding_for_zero_sized_value_visitor{});
 }
 
-template <allow_prefixes AllowPrefixes>
-comparable_bytes comparable_bytes_from_compound(const compound_type<AllowPrefixes>& p, managed_bytes_view representation, std::byte terminator) {
+// Compound is compound_type<> or primary_key_layout.
+template <typename Compound>
+static comparable_bytes comparable_bytes_from_components(const Compound& p, managed_bytes_view representation, std::byte terminator) {
     bytes_ostream out;
     auto t_it = p.types().begin();
     const auto t_end = p.types().end();
@@ -1582,8 +1583,17 @@ comparable_bytes comparable_bytes_from_compound(const compound_type<AllowPrefixe
     out.write(bytespan_to_bytesview(object_representation(terminator)));
     return std::move(out).to_managed_bytes();
 }
+
+template <allow_prefixes AllowPrefixes>
+comparable_bytes comparable_bytes_from_compound(const compound_type<AllowPrefixes>& p, managed_bytes_view representation, std::byte terminator) {
+    return comparable_bytes_from_components(p, representation, terminator);
+}
 template comparable_bytes comparable_bytes_from_compound<allow_prefixes::yes>(const compound_type<allow_prefixes::yes>&, managed_bytes_view, std::byte);
 template comparable_bytes comparable_bytes_from_compound<allow_prefixes::no>(const compound_type<allow_prefixes::no>&, managed_bytes_view, std::byte);
+
+comparable_bytes comparable_bytes_from_compound(const primary_key_layout& p, managed_bytes_view representation, std::byte terminator) {
+    return comparable_bytes_from_components(p, representation, terminator);
+}
 
 comparable_bytes comparable_bytes_from_legacy_partition_key(const compound_type<allow_prefixes::no>& t, managed_bytes_view v, std::byte terminator) {
     bytes_ostream out;

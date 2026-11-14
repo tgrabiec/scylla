@@ -112,7 +112,7 @@ static std::byte pip_to_terminator(const position_in_partition_view& pipv) {
 
 lazy_comparable_bytes_from_clustering_position::lazy_comparable_bytes_from_clustering_position(const schema& s, position_in_partition_view pipv)
     : _encoded(comparable_bytes_from_compound(
-        *s.clustering_key_prefix_type(),
+        *s.clustering_key_layout(),
         pipv.has_key() ? pipv.key().representation() : managed_bytes_view(),
         pip_to_terminator(pipv)
     ))
@@ -121,7 +121,7 @@ lazy_comparable_bytes_from_clustering_position::lazy_comparable_bytes_from_clust
 
 lazy_comparable_bytes_from_clustering_position::lazy_comparable_bytes_from_clustering_position(const schema& s, const sstables::clustering_info& ci)
     : _encoded(comparable_bytes_from_compound(
-        *s.clustering_key_prefix_type(),
+        *s.clustering_key_layout(),
         ci.clustering.representation(),
         bound_weight_to_terminator(convert_bound_to_bound_weight(ci.kind))
     ))
