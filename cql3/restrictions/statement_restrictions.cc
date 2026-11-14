@@ -2142,7 +2142,7 @@ clustering_key_prefix::prefix_equal_tri_compare get_unreversed_tri_compare(const
             t = t->underlying_type();
         }
     }
-    cmp.prefix_type = make_lw_shared<compound_type<allow_prefixes::yes>>(types);
+    cmp.prefix_type = make_primary_key_layout(std::move(types));
     return cmp;
 }
 

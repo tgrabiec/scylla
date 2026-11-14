@@ -53,11 +53,7 @@ public:
         tri_compare(const schema& s) : _s(s)
         { }
         std::strong_ordering operator()(const clustering_key_prefix& p1, int32_t w1, const clustering_key_prefix& p2, int32_t w2) const {
-            auto type = _s.get().clustering_key_prefix_type();
-            auto res = prefix_equality_tri_compare(type->types().begin(),
-                type->begin(p1.representation()), type->end(p1.representation()),
-                type->begin(p2.representation()), type->end(p2.representation()),
-                ::tri_compare);
+            auto res = _s.get().clustering_key_layout()->prefix_equal_compare(p1.representation(), p2.representation());
             if (res != 0) {
                 return res;
             }

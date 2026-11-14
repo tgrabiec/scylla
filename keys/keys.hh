@@ -11,6 +11,7 @@
 #include "bytes.hh"
 #include "types/types.hh"
 #include "keys/compound_compat.hh"
+#include "keys/primary_key_layout.hh"
 #include "utils/managed_bytes.hh"
 #include "utils/hashing.hh"
 #include "utils/utf8.hh"
@@ -343,7 +344,7 @@ public:
 template <typename TopLevel>
 class prefix_view_on_prefix_compound {
 public:
-    using iterator = typename compound_type<allow_prefixes::yes>::iterator;
+    using iterator = primary_key_layout::iterator;
 private:
     bytes_view _b;
     unsigned _prefix_len;
@@ -458,10 +459,7 @@ public:
         { }
 
         bool operator()(const TopLevel& k1, const TopLevel& k2) const {
-            return prefix_equality_tri_compare(prefix_type->types().begin(),
-                prefix_type->begin(k1.representation()), prefix_type->end(k1.representation()),
-                prefix_type->begin(k2.representation()), prefix_type->end(k2.representation()),
-                ::tri_compare) < 0;
+            return prefix_type->prefix_equal_compare(k1.representation(), k2.representation()) < 0;
         }
     };
 
@@ -502,10 +500,7 @@ public:
         { }
 
         std::strong_ordering operator()(const TopLevel& k1, const TopLevel& k2) const {
-            return prefix_equality_tri_compare(prefix_type->types().begin(),
-                prefix_type->begin(k1.representation()), prefix_type->end(k1.representation()),
-                prefix_type->begin(k2.representation()), prefix_type->end(k2.representation()),
-                ::tri_compare);
+            return prefix_type->prefix_equal_compare(k1.representation(), k2.representation());
         }
     };
 };
@@ -732,17 +727,17 @@ public:
     }
 
     [[deprecated("ck-raw")]] managed_bytes_view representation() const { return _bytes; }
-    [[deprecated("ck-noschema")]] auto begin() const { return base_view::begin(); }
-    [[deprecated("ck-noschema")]] auto end() const { return base_view::end(); }
-    auto begin(const schema& s) const { return base_view::begin(s); }
-    auto end(const schema& s) const { return base_view::end(s); }
-    [[deprecated("ck-noschema")]] auto components() const { return base_view::components(); }
-    auto components(const schema& s) const { return base_view::components(s); }
+    [[deprecated("ck-noschema")]] auto begin() const { return compound_type<allow_prefixes::yes>::begin(_bytes); }
+    [[deprecated("ck-noschema")]] auto end() const { return compound_type<allow_prefixes::yes>::end(_bytes); }
+    auto begin(const schema& s) const { return get_compound_type(s)->begin(_bytes); }
+    auto end(const schema& s) const { return get_compound_type(s)->end(_bytes); }
+    [[deprecated("ck-noschema")]] auto components() const { return compound_type<allow_prefixes::yes>::components(_bytes); }
+    auto components(const schema& s) const { return get_compound_type(s)->components(_bytes); }
 
-    using compound = lw_shared_ptr<compound_type<allow_prefixes::yes>>;
+    using compound = primary_key_layout_ptr;
 
     static const compound& get_compound_type(const schema& s) {
-        return s.clustering_key_prefix_type();
+        return s.clustering_key_layout();
     }
 
     static clustering_key_prefix_view make_empty() {
@@ -800,14 +795,14 @@ public:
 
     template<typename RangeOfSerializedComponents>
     [[deprecated("ck-noschema")]] static clustering_key_prefix from_range(RangeOfSerializedComponents&& v) {
-        return clustering_key_prefix(compound::element_type::serialize_value(std::forward<RangeOfSerializedComponents>(v)));
+        return clustering_key_prefix(legacy_clustering_key_prefix::c_type::serialize_value(std::forward<RangeOfSerializedComponents>(v)));
     }
 
     [[deprecated("ck-noschema")]] clustering_key_prefix(std::vector<bytes> v)
-        : prefix_compound_wrapper(compound::element_type::serialize_value(std::move(v)))
+        : prefix_compound_wrapper(legacy_clustering_key_prefix::c_type::serialize_value(std::move(v)))
     { }
     [[deprecated("ck-noschema")]] clustering_key_prefix(std::vector<managed_bytes> v)
-        : prefix_compound_wrapper(compound::element_type::serialize_value(std::move(v)))
+        : prefix_compound_wrapper(legacy_clustering_key_prefix::c_type::serialize_value(std::move(v)))
     { }
     [[deprecated("ck-noschema")]] clustering_key_prefix(std::initializer_list<bytes> v) : clustering_key_prefix(std::vector(v)) {}
 
@@ -822,7 +817,7 @@ public:
         : clustering_key_prefix(managed_bytes(v.representation()))
     { }
 
-    using compound = lw_shared_ptr<compound_type<allow_prefixes::yes>>;
+    using compound = primary_key_layout_ptr;
 
     [[deprecated("ck-raw")]] static clustering_key_prefix from_bytes(const managed_bytes& b) { return clustering_key_prefix(managed_bytes(b)); }
     [[deprecated("ck-raw")]] static constexpr clustering_key_prefix from_bytes(managed_bytes&& b) { return clustering_key_prefix(std::move(b)); }
@@ -833,28 +828,40 @@ public:
 
     [[deprecated("ck-raw")]] const managed_bytes& representation() const { return _bytes; }
     [[deprecated("ck-raw")]] operator managed_bytes_view() const { return _bytes; }
-    [[deprecated("ck-noschema")]] auto components() const { return base_wrapper::components(); }
-    auto components(const schema& s) const { return base_wrapper::components(s); }
-    [[deprecated("ck-noschema")]] std::vector<bytes> explode() const { return base_wrapper::explode(); }
+    [[deprecated("ck-noschema")]] auto components() const { return legacy_clustering_key_prefix::c_type::components(_bytes); }
+    auto components(const schema& s) const { return get_compound_type(s)->components(_bytes); }
+    [[deprecated("ck-noschema")]] std::vector<bytes> explode() const {
+        std::vector<bytes> result;
+        for (managed_bytes_view c : legacy_clustering_key_prefix::c_type::components(_bytes)) {
+            result.emplace_back(to_bytes(c));
+        }
+        return result;
+    }
     std::vector<bytes> explode(const schema& s) const { return base_wrapper::explode(s); }
-    [[deprecated("ck-noschema")]] std::vector<managed_bytes> explode_fragmented() const { return base_wrapper::explode_fragmented(); }
+    [[deprecated("ck-noschema")]] std::vector<managed_bytes> explode_fragmented() const {
+        std::vector<managed_bytes> result;
+        for (managed_bytes_view c : legacy_clustering_key_prefix::c_type::components(_bytes)) {
+            result.emplace_back(c);
+        }
+        return result;
+    }
 
     template<typename RangeOfSerializedComponents>
     [[deprecated("ck-noschema")]] static clustering_key_prefix from_exploded(RangeOfSerializedComponents&& v) {
-        return base_wrapper::from_exploded(std::forward<RangeOfSerializedComponents>(v));
+        return clustering_key_prefix(legacy_clustering_key_prefix::c_type::serialize_value(std::forward<RangeOfSerializedComponents>(v)));
     }
     static clustering_key_prefix from_exploded(const schema& s, const std::vector<bytes>& v) {
-        return base_wrapper::from_exploded(s, v);
+        return clustering_key_prefix(get_compound_type(s)->serialize_value(v));
     }
     static clustering_key_prefix from_exploded(const schema& s, const std::vector<managed_bytes>& v) {
-        return base_wrapper::from_exploded(s, v);
+        return clustering_key_prefix(get_compound_type(s)->serialize_value(v));
     }
     [[deprecated("ck-noschema")]] static clustering_key_prefix from_exploded_view(const std::vector<bytes_view>& v) {
-        return base_wrapper::from_exploded_view(v);
+        return clustering_key_prefix(legacy_clustering_key_prefix::c_type::serialize_value(v));
     }
 
     static const compound& get_compound_type(const schema& s) {
-        return s.clustering_key_prefix_type();
+        return s.clustering_key_layout();
     }
 
     legacy_clustering_key_prefix to_legacy(const schema& s) const {
@@ -884,7 +891,7 @@ public:
             auto full_ck_size = s.clustering_key_columns().size();
             auto exploded = ck.explode(s);
             exploded.resize(full_ck_size);
-            ck = clustering_key_prefix::from_exploded(std::move(exploded));
+            ck = clustering_key_prefix::from_exploded(s, exploded);
             return true;
         }
         return false;
