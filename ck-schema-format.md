@@ -112,8 +112,33 @@ legacy-format users: sstables `composite`, `tools/scylla-types`,
 `tools/lua_sstable_consumer` (`validate()` of user hex input), and callers
 that only need `->types()`.
 
-Cost: one virtual call per key comparison, and one per component step when
-iterating. Not measured yet.
+Cost: one virtual call per key comparison. Generic iteration costs one per
+component step, so `legacy_primary_key_layout` overrides the hot walkers
+(`size`, `prefix_equal_compare`, `deserialize_value`) with `compound_type`'s
+non-virtual iterator.
+
+### Measurements
+
+`perf_simple_query --smp 1 -m 2G --duration 10 --clustering-rows N`, release
+`--disable-lto`, hal, median of 3 alternating runs. Baseline: ca0516ef14f plus
+`--clustering-rows`. Partitions: 10000 (1000 for 1000 rows). Reads hit the row
+cache. tps change against the baseline:
+
+| rows | mode | generic walkers | legacy overrides | insns/op (overrides) |
+|---|---|---|---|---|
+| 0 | read | -2.8% | -0.9% | +142 (+0.4%) |
+| 0 | write | -3.9% | -0.3% | +446 (+1.1%) |
+| 10 | read | -5.4% | -2.0% | +48 (+0.1%) |
+| 10 | write | -5.7% | -2.1% | +779 (+1.6%) |
+| 1000 | read | -7.4% | -2.5% | -350 (-0.8%) |
+| 1000 | write | -0.1% | -0.2% | -260 (-0.5%) |
+
+Run-to-run spread is 0.1-3.5%. Before the overrides, `perf` showed `first`,
+`prefix_equal_compare`, `size` and `next` at ~9.5% of cycles in the 10-row
+write (2.6% for the inlined comparison in the baseline). Open: the extra ~780
+insns/op in the 10-row write (likely key construction through
+`serialize_value()` and its virtual `component_source`); cycles rise more
+than instructions (indirect calls).
 
 Not virtualized yet: `prefix_view_on_prefix_compound::less_compare_with_prefix`
 and `is_prefixed_by()` (they iterate components generically), and
