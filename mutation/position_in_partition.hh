@@ -504,9 +504,11 @@ public:
             }
             auto&& types = _s.clustering_key_type()->types();
             auto cmp = [&] (const data_type& t, managed_bytes_view c1, managed_bytes_view c2) { return t->compare(c1, c2); };
+            auto a_values = a._ck->components(_s);
+            auto b_values = b._ck->components(_s);
             return lexicographical_tri_compare(types.begin(), types.end(),
-                a._ck->begin(_s), a._ck->end(_s),
-                b._ck->begin(_s), b._ck->end(_s),
+                a_values.begin(), a_values.end(),
+                b_values.begin(), b_values.end(),
                 cmp, a.relation(), b.relation());
         }
 
@@ -522,10 +524,11 @@ public:
                 return std::strong_ordering::equal;
             }
             auto&& types = _s.clustering_key_type()->types();
+            auto a_values = a._ck->components(_s);
             auto b_values = b.values();
             auto cmp = [&] (const data_type& t, managed_bytes_view c1, managed_bytes_view c2) { return t->compare(c1, c2); };
             return lexicographical_tri_compare(types.begin(), types.end(),
-                a._ck->begin(_s), a._ck->end(_s),
+                a_values.begin(), a_values.end(),
                 b_values.begin(), b_values.end(),
                 cmp, a.relation(), relation_for_lower_bound(b));
         }

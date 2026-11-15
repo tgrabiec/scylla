@@ -1545,8 +1545,9 @@ static comparable_bytes comparable_bytes_from_components(const Compound& p, mana
     bytes_ostream out;
     auto t_it = p.types().begin();
     const auto t_end = p.types().end();
-    auto c_it = p.components(representation).begin();
-    const auto c_end = p.components(representation).end();
+    const auto components = p.components(representation);
+    auto c_it = components.begin();
+    const auto c_end = components.end();
     while (c_it != c_end) {
         SCYLLA_ASSERT(t_it != t_end);
 

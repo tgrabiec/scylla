@@ -52,8 +52,9 @@ BOOST_AUTO_TEST_CASE(test_key_component_iterator) {
 
     auto key = clustering_key::from_exploded(s, {bytes("a"), bytes("b"), bytes("c")});
 
-    auto i = key.begin(s);
-    auto end = key.end(s);
+    auto components = key.components(s);
+    auto i = components.begin();
+    auto end = components.end();
 
     BOOST_REQUIRE(i != end);
     BOOST_REQUIRE(*i == bytes_view(bytes("a")));

@@ -40,7 +40,7 @@ class built_indexes_virtual_reader {
                 const schema& built_views_schema,
                 const schema& built_indexes_schema)
         {
-            sstring index_name = value_cast<sstring>(utf8_type->deserialize(*c.begin(built_indexes_schema)));
+            sstring index_name = value_cast<sstring>(utf8_type->deserialize(c.get_component(built_indexes_schema, 0)));
             sstring view_name = ::secondary_index::index_table_name(index_name);
             return clustering_key_prefix::from_single_value(built_views_schema, utf8_type->decompose(view_name));
         }
@@ -124,7 +124,7 @@ class built_indexes_virtual_reader {
         }
 
         bool is_index(const clustering_row& built_view_row) const {
-            auto view_name = value_cast<sstring>(utf8_type->deserialize(*built_view_row.key().begin(*_underlying.schema())));
+            auto view_name = value_cast<sstring>(utf8_type->deserialize(built_view_row.key().get_component(*_underlying.schema(), 0)));
             try {
                 auto s = _db.find_schema(_current_keyspace, view_name);
                 return s->is_view() && _db.find_column_family(s->view_info()->base_id()).get_index_manager().is_index(view_ptr(s));
@@ -147,7 +147,7 @@ class built_indexes_virtual_reader {
                             // xyz. So modify mf:
                             mf.mutate_as_clustering_row(*_underlying.schema(),
                                 [&] (clustering_row& cr) mutable {
-                                    sstring view_name = value_cast<sstring>(utf8_type->deserialize(*cr.key().begin(*_underlying.schema())));
+                                    sstring view_name = value_cast<sstring>(utf8_type->deserialize(cr.key().get_component(*_underlying.schema(), 0)));
                                     sstring index_name = ::secondary_index::index_name_from_table_name(view_name);
                                     cr.key() = clustering_key_prefix::from_single_value(*_underlying.schema(), utf8_type->decompose(index_name));
                                 });
