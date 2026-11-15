@@ -343,25 +343,19 @@ public:
 
 template <typename TopLevel>
 class prefix_view_on_prefix_compound {
+    primary_key_components _components; // the first prefix_len components
 public:
-    using iterator = primary_key_layout::iterator;
-private:
-    bytes_view _b;
-    unsigned _prefix_len;
-    iterator _begin;
-    iterator _end;
-public:
-    prefix_view_on_prefix_compound(const schema& s, bytes_view b, unsigned prefix_len)
-        : _b(b)
-        , _prefix_len(prefix_len)
-        , _begin(TopLevel::get_compound_type(s)->begin(_b))
-        , _end(_begin)
-    {
-        std::advance(_end, prefix_len);
+    using iterator = primary_key_components::const_iterator;
+
+    prefix_view_on_prefix_compound(const schema& s, managed_bytes_view b, unsigned prefix_len) {
+        auto all = TopLevel::get_compound_type(s)->components(b);
+        for (size_t i = 0; i != std::min<size_t>(prefix_len, all.size()); ++i) {
+            _components.push_back(all[i]);
+        }
     }
 
-    iterator begin() const { return _begin; }
-    iterator end() const { return _end; }
+    iterator begin() const { return _components.begin(); }
+    iterator end() const { return _components.end(); }
 
     struct less_compare_with_prefix {
         typename TopLevel::compound prefix_type;
@@ -371,17 +365,19 @@ public:
         { }
 
         bool operator()(const prefix_view_on_prefix_compound& k1, const TopLevel& k2) const {
+            auto c2 = prefix_type->components(k2.representation());
             return lexicographical_tri_compare(
                 prefix_type->types().begin(), prefix_type->types().end(),
                 k1.begin(), k1.end(),
-                prefix_type->begin(k2), prefix_type->end(k2),
+                c2.begin(), c2.end(),
                 tri_compare) < 0;
         }
 
         bool operator()(const TopLevel& k1, const prefix_view_on_prefix_compound& k2) const {
+            auto c1 = prefix_type->components(k1.representation());
             return lexicographical_tri_compare(
                 prefix_type->types().begin(), prefix_type->types().end(),
-                prefix_type->begin(k1), prefix_type->end(k1),
+                c1.begin(), c1.end(),
                 k2.begin(), k2.end(),
                 tri_compare) < 0;
         }
@@ -441,9 +437,11 @@ public:
 
     bool is_prefixed_by(const schema& s, const TopLevel& prefix) const {
         const auto& t = base::get_compound_type(s);
+        auto c = t->components(base::_bytes);
+        auto p = t->components(prefix.representation());
         return ::is_prefixed_by(t->types().begin(),
-            t->begin(*this), t->end(*this),
-            t->begin(prefix), t->end(prefix),
+            c.begin(), c.end(),
+            p.begin(), p.end(),
             equal);
     }
 
@@ -729,8 +727,9 @@ public:
     [[deprecated("ck-raw")]] managed_bytes_view representation() const { return _bytes; }
     [[deprecated("ck-noschema")]] auto begin() const { return compound_type<allow_prefixes::yes>::begin(_bytes); }
     [[deprecated("ck-noschema")]] auto end() const { return compound_type<allow_prefixes::yes>::end(_bytes); }
-    auto begin(const schema& s) const { return get_compound_type(s)->begin(_bytes); }
-    auto end(const schema& s) const { return get_compound_type(s)->end(_bytes); }
+    // Iterate over components(s) instead.
+    void begin(const schema& s) const = delete;
+    void end(const schema& s) const = delete;
     [[deprecated("ck-noschema")]] auto components() const { return compound_type<allow_prefixes::yes>::components(_bytes); }
     auto components(const schema& s) const { return get_compound_type(s)->components(_bytes); }
 
@@ -830,6 +829,11 @@ public:
     [[deprecated("ck-raw")]] operator managed_bytes_view() const { return _bytes; }
     [[deprecated("ck-noschema")]] auto components() const { return legacy_clustering_key_prefix::c_type::components(_bytes); }
     auto components(const schema& s) const { return get_compound_type(s)->components(_bytes); }
+    // Iterate over components(s) instead.
+    void begin(const schema& s) const = delete;
+    void end(const schema& s) const = delete;
+    managed_bytes_view get_component(const schema& s, size_t idx) const { return components(s)[idx]; }
+    size_t size(const schema& s) const { return get_compound_type(s)->size(_bytes); }
     [[deprecated("ck-noschema")]] std::vector<bytes> explode() const {
         std::vector<bytes> result;
         for (managed_bytes_view c : legacy_clustering_key_prefix::c_type::components(_bytes)) {

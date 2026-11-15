@@ -226,9 +226,30 @@ BOOST_AUTO_TEST_CASE(test_legacy_clustering_key_prefix) {
     }
 }
 
-BOOST_AUTO_TEST_CASE(test_legacy_primary_key_layout_matches_compound_type) {
+namespace {
+
+// Implements only the pure virtual operations, so the generic ones run.
+class minimal_primary_key_layout final : public primary_key_layout {
+    compound_type<allow_prefixes::yes> _compound;
+public:
+    explicit minimal_primary_key_layout(std::vector<data_type> types) : primary_key_layout(types), _compound(types) {}
+    void decompose(managed_bytes_view key, primary_key_components& out) const override {
+        for (managed_bytes_view c : _compound.components(key)) {
+            out.push_back(c);
+        }
+    }
+    std::strong_ordering compare(managed_bytes_view k1, managed_bytes_view k2) const override { return _compound.compare(k1, k2); }
+    bool equal(managed_bytes_view k1, managed_bytes_view k2) const override { return _compound.equal(k1, k2); }
+    size_t hash(managed_bytes_view key) const override { return _compound.hash(key); }
+    managed_bytes serialize(std::span<const managed_bytes_view> components) const override { return _compound.serialize_value(components); }
+};
+
+}
+
+BOOST_AUTO_TEST_CASE(test_primary_key_layouts_match_compound_type) {
     std::vector<data_type> types{int32_type, reversed_type_impl::get_instance(utf8_type), bytes_type};
-    legacy_primary_key_layout layout(types);
+    legacy_primary_key_layout legacy(types);
+    minimal_primary_key_layout minimal(types);
     compound_type<allow_prefixes::yes> compound(types);
 
     std::vector<std::vector<bytes>> keys{
@@ -240,27 +261,32 @@ BOOST_AUTO_TEST_CASE(test_legacy_primary_key_layout_matches_compound_type) {
         {bytes()},
     };
 
-    for (const auto& k1 : keys) {
-        auto b1 = layout.serialize_value(k1);
-        BOOST_REQUIRE(b1 == compound.serialize_value(k1));
-        BOOST_REQUIRE(layout.deserialize_value(b1) == k1);
-        BOOST_REQUIRE(std::vector<managed_bytes_view>(layout.begin(b1), layout.end(b1)) == std::vector<managed_bytes_view>(compound.begin(b1), compound.end(b1)));
-        BOOST_REQUIRE_EQUAL(layout.size(b1), k1.size());
-        BOOST_REQUIRE_EQUAL(layout.is_full(b1), compound.is_full(b1));
-        BOOST_REQUIRE_EQUAL(layout.hash(b1), compound.hash(b1));
-        layout.validate(b1);
-        for (const auto& k2 : keys) {
-            auto b2 = layout.serialize_value(k2);
-            BOOST_REQUIRE(layout.compare(b1, b2) == compound.compare(b1, b2));
-            BOOST_REQUIRE_EQUAL(layout.equal(b1, b2), compound.equal(b1, b2));
-            BOOST_REQUIRE(layout.prefix_equal_compare(b1, b2) == prefix_equality_tri_compare(types.begin(),
-                compound.begin(b1), compound.end(b1), compound.begin(b2), compound.end(b2), ::tri_compare));
+    for (const primary_key_layout* layout : {static_cast<const primary_key_layout*>(&legacy), static_cast<const primary_key_layout*>(&minimal)}) {
+        for (const auto& k1 : keys) {
+            auto b1 = layout->serialize_value(k1);
+            BOOST_REQUIRE(b1 == compound.serialize_value(k1));
+            // Components yielded as temporaries are copied before serialization.
+            BOOST_REQUIRE(b1 == layout->serialize_value(k1 | std::views::transform([] (const bytes& b) { return bytes(b); })));
+            BOOST_REQUIRE(layout->deserialize_value(b1) == k1);
+            auto components = layout->components(b1);
+            BOOST_REQUIRE(std::vector<managed_bytes_view>(components.begin(), components.end()) == std::vector<managed_bytes_view>(compound.begin(b1), compound.end(b1)));
+            BOOST_REQUIRE_EQUAL(layout->size(b1), k1.size());
+            BOOST_REQUIRE_EQUAL(layout->is_full(b1), compound.is_full(b1));
+            BOOST_REQUIRE_EQUAL(layout->hash(b1), compound.hash(b1));
+            layout->validate(b1);
+            for (const auto& k2 : keys) {
+                auto b2 = layout->serialize_value(k2);
+                BOOST_REQUIRE(layout->compare(b1, b2) == compound.compare(b1, b2));
+                BOOST_REQUIRE_EQUAL(layout->equal(b1, b2), compound.equal(b1, b2));
+                BOOST_REQUIRE(layout->prefix_equal_compare(b1, b2) == prefix_equality_tri_compare(types.begin(),
+                    compound.begin(b1), compound.end(b1), compound.begin(b2), compound.end(b2), ::tri_compare));
+            }
         }
     }
 
     // Layouts depend only on the types, and treat reversed types like their underlying types.
     auto unreversed = make_primary_key_layout({int32_type, utf8_type, bytes_type});
     for (const auto& k : keys) {
-        BOOST_REQUIRE(unreversed->serialize_value(k) == layout.serialize_value(k));
+        BOOST_REQUIRE(unreversed->serialize_value(k) == legacy.serialize_value(k));
     }
 }

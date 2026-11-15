@@ -12,50 +12,39 @@
 #include "utils/small_vector.hh"
 #include <seastar/core/shared_ptr.hh>
 
-class primary_key_layout;
-
-// Position in a serialized key, owned by primary_key_layout_iterator,
-// interpreted by the layout.
-struct primary_key_layout_cursor {
-    managed_bytes_view key;     // the whole key
-    managed_bytes_view rest;    // bytes following the current component
-    managed_bytes_view current; // the current component
-    size_t index = 0;           // of the current component
-    bool at_end = true;
-};
-
-// Forward iterator over components of a serialized key. Yields managed_bytes_view.
-class primary_key_layout_iterator {
-    const primary_key_layout* _layout = nullptr;
-    primary_key_layout_cursor _c;
+// Views of the components of a serialized key, pointing into the key.
+//
+// begin() and end() exist only on lvalues: iterators into a temporary would
+// dangle. Range-for over a temporary is fine.
+class primary_key_components {
+    utils::small_vector<managed_bytes_view, 8> _views;
 public:
-    using iterator_category = std::forward_iterator_tag;
-    using iterator_concept = std::forward_iterator_tag;
-    using value_type = const managed_bytes_view;
-    using difference_type = std::ptrdiff_t;
+    using value_type = managed_bytes_view;
+    using const_iterator = utils::small_vector<managed_bytes_view, 8>::const_iterator;
 
-    struct end_tag {};
-
-    primary_key_layout_iterator() = default;
-    primary_key_layout_iterator(const primary_key_layout& layout, managed_bytes_view key);
-    primary_key_layout_iterator(end_tag, const primary_key_layout& layout) : _layout(&layout) {}
-
-    primary_key_layout_iterator& operator++();
-    primary_key_layout_iterator operator++(int) {
-        primary_key_layout_iterator i(*this);
-        ++(*this);
-        return i;
+    void push_back(managed_bytes_view v) {
+        _views.push_back(v);
     }
-    value_type operator*() const { return _c.current; }
-    // Valid only for iterators over the same key.
-    bool operator==(const primary_key_layout_iterator& o) const {
-        return _c.at_end == o._c.at_end && (_c.at_end || _c.index == o._c.index);
-    }
+
+    const_iterator begin() const& { return _views.begin(); }
+    const_iterator end() const& { return _views.end(); }
+    const_iterator begin() const&& = delete;
+    const_iterator end() const&& = delete;
+
+    size_t size() const { return _views.size(); }
+    bool empty() const { return _views.empty(); }
+    const managed_bytes_view& operator[](size_t i) const { return _views[i]; }
+
+    std::span<const managed_bytes_view> span() const& { return {_views.data(), _views.size()}; }
+    std::span<const managed_bytes_view> span() const&& = delete;
 };
 
 // Serialized form of a clustering key prefix: how the key frames its
 // components, and how keys compare, hash and decompose. A schema owns one
 // layout, made by make_primary_key_layout() from the clustering column types.
+//
+// Only operations on whole keys are virtual. Component access goes through
+// decompose(), so iterating components costs one virtual call per key.
 //
 // Every layout keeps the serialized value of each component as a contiguous
 // span of the key, so component views point into the key. A key with no
@@ -63,18 +52,6 @@ public:
 class primary_key_layout {
 public:
     using value_type = std::vector<bytes>;
-
-    using cursor = primary_key_layout_cursor;
-    using iterator = primary_key_layout_iterator;
-
-    // Value bytes of the components of a key being serialized.
-    class component_source {
-    public:
-        // Appends the value of component idx to out. Called once per component, in order.
-        virtual void write(size_t idx, managed_bytes_mutable_view& out) = 0;
-    protected:
-        ~component_source() = default;
-    };
 protected:
     std::vector<data_type> _types;
 public:
@@ -89,31 +66,23 @@ public:
         return _types.size() == 1;
     }
 
-    // Iteration
+    // Decomposition
 
-    // Positions c at the first component of c.key, or at the end.
-    virtual void first(cursor& c) const = 0;
+    // Appends views of the components of the key to out.
+    virtual void decompose(managed_bytes_view key, primary_key_components& out) const = 0;
 
-    // Moves c to the next component, or to the end.
-    virtual void next(cursor& c) const = 0;
-
-    iterator begin(managed_bytes_view key) const {
-        return iterator(*this, key);
-    }
-
-    iterator end(managed_bytes_view) const {
-        return iterator(iterator::end_tag{}, *this);
-    }
-
-    // Returns a range of managed_bytes_view
-    std::ranges::subrange<iterator> components(managed_bytes_view key) const {
-        return {begin(key), end(key)};
+    primary_key_components components(managed_bytes_view key) const {
+        primary_key_components result;
+        decompose(key, result);
+        return result;
     }
 
     // Returns the number of components of the key.
-    virtual size_t size(managed_bytes_view key) const;
+    virtual size_t size(managed_bytes_view key) const {
+        return components(key).size();
+    }
 
-    virtual value_type deserialize_value(managed_bytes_view key) const;
+    value_type deserialize_value(managed_bytes_view key) const;
 
     // Comparison
 
@@ -143,12 +112,8 @@ public:
 
     // Serialization
 
-    // Returns the size of a key with components of the given sizes.
-    virtual size_t serialized_size(std::span<const size_t> sizes) const = 0;
-
-    // Writes a key with components of the given sizes into out, which is
-    // serialized_size(sizes) long, taking the component values from src.
-    virtual void serialize(std::span<const size_t> sizes, component_source& src, managed_bytes_mutable_view out) const = 0;
+    // Returns a key made of the given serialized components.
+    virtual managed_bytes serialize(std::span<const managed_bytes_view> components) const = 0;
 
     // Serializes a key from a forward range of serialized components
     // (bytes, bytes_view, managed_bytes or any FragmentedView).
@@ -161,11 +126,13 @@ public:
     }
 
     managed_bytes serialize_single(const managed_bytes& v) const {
-        return serialize_value(std::ranges::subrange(&v, 1 + &v));
+        managed_bytes_view mv(v);
+        return serialize(std::span(&mv, 1));
     }
 
     managed_bytes serialize_single(const bytes& v) const {
-        return serialize_value(std::ranges::subrange(&v, 1 + &v));
+        managed_bytes_view mv{bytes_view(v)};
+        return serialize(std::span(&mv, 1));
     }
 
     // Throws std::logic_error on a disengaged value.
@@ -175,41 +142,38 @@ public:
     managed_bytes serialize_value_deep(const std::vector<data_value>& values) const;
 };
 
-inline
-primary_key_layout_iterator::primary_key_layout_iterator(const primary_key_layout& layout, managed_bytes_view key)
-    : _layout(&layout)
-{
-    _c.key = key;
-    _layout->first(_c);
-}
-
-inline
-primary_key_layout_iterator& primary_key_layout_iterator::operator++() {
-    _layout->next(_c);
-    return *this;
-}
-
-static_assert(std::forward_iterator<primary_key_layout_iterator>);
-
 namespace detail {
 
+// Components whose managed_bytes_view stays valid after the range yields them.
+template <typename Range>
+concept viewable_key_components = requires {
+    requires std::is_lvalue_reference_v<std::ranges::range_reference_t<Range>>
+        || std::same_as<std::ranges::range_value_t<Range>, bytes_view>
+        || std::same_as<std::ranges::range_value_t<Range>, managed_bytes_view>;
+    requires std::same_as<std::ranges::range_value_t<Range>, bytes>
+        || std::same_as<std::ranges::range_value_t<Range>, bytes_view>
+        || std::same_as<std::ranges::range_value_t<Range>, managed_bytes>
+        || std::same_as<std::ranges::range_value_t<Range>, managed_bytes_view>;
+};
+
 template <typename T>
-size_t serialized_component_size(const T& v) {
-    if constexpr (FragmentedView<T>) {
-        return v.size_bytes();
+managed_bytes_view key_component_view(const T& v) {
+    if constexpr (std::same_as<T, bytes> || std::same_as<T, bytes_view>) {
+        return managed_bytes_view(bytes_view(v));
     } else {
-        return v.size();
+        return managed_bytes_view(v);
     }
 }
 
 template <typename T>
-void write_serialized_component(const T& v, managed_bytes_mutable_view& out) {
+managed_bytes copy_key_component(const T& v) {
     if constexpr (FragmentedView<T>) {
+        managed_bytes b(managed_bytes::initialized_later(), v.size_bytes());
+        auto out = managed_bytes_mutable_view(b);
         write_fragmented(out, v);
-    } else if constexpr (std::same_as<T, managed_bytes>) {
-        write_fragmented(out, managed_bytes_view(v));
+        return b;
     } else {
-        write_fragmented(out, single_fragmented_view(v));
+        return managed_bytes(key_component_view(v));
     }
 }
 
@@ -217,24 +181,23 @@ void write_serialized_component(const T& v, managed_bytes_mutable_view& out) {
 
 template <typename RangeOfSerializedComponents>
 managed_bytes primary_key_layout::serialize_value(RangeOfSerializedComponents&& values) const {
-    utils::small_vector<size_t, 8> sizes;
-    for (auto&& v : values) {
-        sizes.push_back(detail::serialized_component_size(v));
-    }
-
-    using iterator_type = decltype(std::ranges::begin(values));
-    struct source final : component_source {
-        iterator_type it;
-        explicit source(iterator_type it) : it(std::move(it)) {}
-        void write(size_t, managed_bytes_mutable_view& out) override {
-            detail::write_serialized_component(*it, out);
-            ++it;
+    utils::small_vector<managed_bytes_view, 8> views;
+    if constexpr (detail::viewable_key_components<RangeOfSerializedComponents>) {
+        for (auto&& v : values) {
+            views.push_back(detail::key_component_view(v));
         }
-    } src(std::ranges::begin(values));
-
-    managed_bytes b(managed_bytes::initialized_later(), serialized_size(sizes));
-    serialize(sizes, src, managed_bytes_mutable_view(b));
-    return b;
+        return serialize(std::span<const managed_bytes_view>(views.data(), views.size()));
+    } else {
+        // Views of the copies are taken once storage stops growing.
+        std::vector<managed_bytes> storage;
+        for (auto&& v : values) {
+            storage.push_back(detail::copy_key_component(v));
+        }
+        for (const auto& c : storage) {
+            views.push_back(managed_bytes_view(c));
+        }
+        return serialize(std::span<const managed_bytes_view>(views.data(), views.size()));
+    }
 }
 
 // The layout of the legacy compound format:
@@ -248,19 +211,13 @@ class legacy_primary_key_layout final : public primary_key_layout {
 public:
     explicit legacy_primary_key_layout(std::vector<data_type> types);
 
-    void first(cursor& c) const override;
-    void next(cursor& c) const override;
-
-    // These walk components with compound_type's non-virtual iterator.
+    void decompose(managed_bytes_view key, primary_key_components& out) const override;
     size_t size(managed_bytes_view key) const override;
-    value_type deserialize_value(managed_bytes_view key) const override;
-    std::strong_ordering prefix_equal_compare(managed_bytes_view k1, managed_bytes_view k2) const override;
-
     std::strong_ordering compare(managed_bytes_view k1, managed_bytes_view k2) const override;
+    std::strong_ordering prefix_equal_compare(managed_bytes_view k1, managed_bytes_view k2) const override;
     bool equal(managed_bytes_view k1, managed_bytes_view k2) const override;
     size_t hash(managed_bytes_view key) const override;
-    size_t serialized_size(std::span<const size_t> sizes) const override;
-    void serialize(std::span<const size_t> sizes, component_source& src, managed_bytes_mutable_view out) const override;
+    managed_bytes serialize(std::span<const managed_bytes_view> components) const override;
 };
 
 using primary_key_layout_ptr = seastar::shared_ptr<const primary_key_layout>;
