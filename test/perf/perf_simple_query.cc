@@ -147,6 +147,8 @@ struct test_config {
     bool bypass_cache;
     std::optional<unsigned> initial_tablets;
     unsigned collection = 0;
+    // Rows per partition. With 0 the table has no clustering key.
+    unsigned clustering_rows = 0;
     db::consistency_level consistency_level;
     bool shard_aware;
     // Store the table with logstor rather than with sstables. Implies tablets, which is the only
@@ -181,10 +183,26 @@ std::ostream& operator<<(std::ostream& os, const test_config& cfg) {
            << ", query_single_key=" << (cfg.query_single_key ? "yes" : "no")
            << ", counters=" << (cfg.counters ? "yes" : "no")
            << ", collection=" << cfg.collection
+           << ", clustering_rows=" << cfg.clustering_rows
            << ", shard_aware=" << (cfg.shard_aware ? "yes" : "no")
            << ", logstor=" << (cfg.logstor ? "yes" : "no")
            << ", auto_compaction=" << (cfg.auto_compaction ? "yes" : "no")
            << "}";
+}
+
+// The restriction selecting one row: the partition key, and the clustering key when the table has one.
+static sstring key_restriction(const test_config& cfg) {
+    return cfg.clustering_rows > 0 ? "\"KEY\" = ? AND \"CK\" = ?" : "\"KEY\" = ?";
+}
+
+// The values bound to key_restriction().
+static std::vector<cql3::raw_value> make_key_values(const test_config& cfg, bytes pk, uint32_t ck) {
+    std::vector<cql3::raw_value> values;
+    values.push_back(cql3::raw_value::make_value(std::move(pk)));
+    if (cfg.clustering_rows > 0) {
+        values.push_back(cql3::raw_value::make_value(int32_type->decompose(int32_t(ck))));
+    }
+    return values;
 }
 
 // The statements the test measures, with the key left to be bound. Logstor holds a whole row per
@@ -209,15 +227,15 @@ static sstring make_write_query(const test_config& cfg, std::string_view usings 
         collection_assignment = fmt::format(", \"CC\" = {}", make_collection_literal(cfg.collection));
     }
     return format("UPDATE cf {}SET \"C0\" = {}, \"C1\" = {}, \"C2\" = {}, \"C3\" = {}, \"C4\" = {}{} "
-            "WHERE \"KEY\" = ?",
+            "WHERE {}",
             usings, cell_values[0], cell_values[1], cell_values[2], cell_values[3], cell_values[4],
-            collection_assignment);
+            collection_assignment, key_restriction(cfg));
 }
 
-static sstring make_counter_update_query(std::string_view usings = "") {
+static sstring make_counter_update_query(const test_config& cfg, std::string_view usings = "") {
     return format("UPDATE cf {}SET "
             "\"C0\" = \"C0\" + 1, \"C1\" = \"C1\" + 2, \"C2\" = \"C2\" + 3, \"C3\" = \"C3\" + 4, \"C4\" = \"C4\" + 5 "
-            "WHERE \"KEY\" = ?", usings);
+            "WHERE {}", usings, key_restriction(cfg));
 }
 
 static sstring make_delete_query(const test_config& cfg, std::string_view usings = "") {
@@ -228,7 +246,7 @@ static sstring make_delete_query(const test_config& cfg, std::string_view usings
     if (cfg.collection > 0) {
         collection_column = ", \"CC\"";
     }
-    return format("DELETE \"C0\", \"C1\", \"C2\", \"C3\", \"C4\"{} FROM cf {}WHERE \"KEY\" = ?", collection_column, usings);
+    return format("DELETE \"C0\", \"C1\", \"C2\", \"C3\", \"C4\"{} FROM cf {}WHERE {}", collection_column, usings, key_restriction(cfg));
 }
 
 // A USING clause, with the trailing space the statements above expect between it and what follows.
@@ -241,27 +259,38 @@ static std::string make_timeout_using(const test_config& cfg) {
 static constexpr unsigned populate_concurrency = 100;
 
 static void create_partitions(cql_test_env& env, test_config& cfg) {
-    std::cout << "Creating " << cfg.partitions << " partitions..." << std::endl;
-    auto id = env.prepare(cfg.counters ? make_counter_update_query() : make_write_query(cfg)).get();
+    std::cout << "Creating " << cfg.partitions << " partitions";
+    if (cfg.clustering_rows > 0) {
+        std::cout << " with " << cfg.clustering_rows << " rows each";
+    }
+    std::cout << "..." << std::endl;
+    auto id = env.prepare(cfg.counters ? make_counter_update_query(cfg) : make_write_query(cfg)).get();
+    const unsigned rows = std::max(cfg.clustering_rows, 1u);
     // Strongly consistent writes need QUORUM/LOCAL_QUORUM. For eventual consistency it does not
     // matter because there is only one node involved.
-    auto write = [&env, id] (unsigned sequence) {
-        return env.execute_prepared(id, {{cql3::raw_value::make_value(make_key(sequence))}},
+    auto write_row = [&env, &cfg, id] (unsigned sequence, unsigned ck) {
+        return env.execute_prepared(id, make_key_values(cfg, make_key(sequence), ck),
                 db::consistency_level::QUORUM).discard_result();
+    };
+    // Writes the row with the given index among the rows of all partitions.
+    auto write = [&write_row, rows] (unsigned row_index) {
+        return write_row(row_index / rows, row_index % rows);
     };
     if (cfg.memtable_partitions > 0) {
         // Flushing every so many partitions needs the writes to happen in a known order.
         unsigned next_flush = cfg.memtable_partitions;
         for (unsigned sequence = 0; sequence < cfg.partitions; ++sequence) {
-            write(sequence).get();
+            for (unsigned ck = 0; ck < rows; ++ck) {
+                write_row(sequence, ck).get();
+            }
             if (sequence + 1 >= next_flush) {
                 env.db().invoke_on_all(&replica::database::flush_all_memtables).get();
                 next_flush += cfg.memtable_partitions;
             }
         }
     } else {
-        auto sequences = std::views::iota(0u, cfg.partitions);
-        max_concurrent_for_each(sequences.begin(), sequences.end(), populate_concurrency, std::move(write)).get();
+        auto row_indexes = std::views::iota(0u, cfg.partitions * rows);
+        max_concurrent_for_each(row_indexes.begin(), row_indexes.end(), populate_concurrency, std::move(write)).get();
         env.db().invoke_on_all(&replica::database::flush_all_memtables).get();
     }
 
@@ -310,6 +339,14 @@ static std::optional<bytes> next_key(test_config& cfg, const std::vector<uint64_
     return make_key(tests::random::get_int<uint64_t>(cfg.partitions - 1));
 }
 
+// Picks the clustering key for the next operation.
+static uint32_t next_clustering_key(const test_config& cfg) {
+    if (cfg.query_single_key || cfg.clustering_rows == 0) {
+        return 0;
+    }
+    return tests::random::get_int<uint32_t>(cfg.clustering_rows - 1);
+}
+
 // The load of an sstable run ends with a flush, which leaves the rows in the row cache, but a logstor
 // write does not put its partition in the logstor cache: only a read that misses it does. Read every
 // key once, so that a logstor read test measures the reads a warm cache serves, as the sstable one
@@ -329,7 +366,8 @@ static std::vector<query_perf_result> test_read(cql_test_env& env, test_config& 
     if (cfg.collection > 0) {
         query += ", \"CC\"";
     }
-    query += " from cf where \"KEY\" = ?";
+    query += " from cf where ";
+    query += key_restriction(cfg);
     if (cfg.bypass_cache) {
         query += " bypass cache";
     }
@@ -347,7 +385,7 @@ static std::vector<query_perf_result> test_read(cql_test_env& env, test_config& 
                 // one measurement window instead of issuing a cross-shard query.
                 return seastar::sleep(std::chrono::seconds(1));
             }
-            return env.execute_prepared(id, {{cql3::raw_value::make_value(std::move(*key))}}, cfg.consistency_level).discard_result();
+            return env.execute_prepared(id, make_key_values(cfg, std::move(*key), next_clustering_key(cfg)), cfg.consistency_level).discard_result();
         }, cfg.concurrency, cfg.duration_in_seconds, cfg.operations_per_shard, cfg.stop_on_error, query_stats_updater(env.db()));
 }
 
@@ -360,7 +398,7 @@ static std::vector<query_perf_result> test_write(cql_test_env& env, test_config&
                 // one measurement window instead of issuing a cross-shard query.
                 return seastar::sleep(std::chrono::seconds(1));
             }
-            return env.execute_prepared(id, {{cql3::raw_value::make_value(std::move(*key))}}, cfg.consistency_level).discard_result();
+            return env.execute_prepared(id, make_key_values(cfg, std::move(*key), next_clustering_key(cfg)), cfg.consistency_level).discard_result();
         }, cfg.concurrency, cfg.duration_in_seconds, cfg.operations_per_shard, cfg.stop_on_error, query_stats_updater(env.db()));
 }
 
@@ -374,12 +412,12 @@ static std::vector<query_perf_result> test_delete(cql_test_env& env, test_config
                 // one measurement window instead of issuing a cross-shard query.
                 return seastar::sleep(std::chrono::seconds(1));
             }
-            return env.execute_prepared(id, {{cql3::raw_value::make_value(std::move(*key))}}, cfg.consistency_level).discard_result();
+            return env.execute_prepared(id, make_key_values(cfg, std::move(*key), next_clustering_key(cfg)), cfg.consistency_level).discard_result();
         }, cfg.concurrency, cfg.duration_in_seconds, cfg.operations_per_shard, cfg.stop_on_error, query_stats_updater(env.db()));
 }
 
 static std::vector<query_perf_result> test_counter_update(cql_test_env& env, test_config& cfg, sharded<std::vector<uint64_t>>& shard_seqs) {
-    auto id = env.prepare(make_counter_update_query(make_timeout_using(cfg))).get();
+    auto id = env.prepare(make_counter_update_query(cfg, make_timeout_using(cfg))).get();
     return time_parallel_ex<query_perf_result>([&env, &cfg, &shard_seqs, id] {
             auto key = next_key(cfg, shard_seqs.local());
             if (!key) {
@@ -387,14 +425,17 @@ static std::vector<query_perf_result> test_counter_update(cql_test_env& env, tes
                 // one measurement window instead of issuing a cross-shard query.
                 return seastar::sleep(std::chrono::seconds(1));
             }
-            return env.execute_prepared(id, {{cql3::raw_value::make_value(std::move(*key))}}, cfg.consistency_level).discard_result();
+            return env.execute_prepared(id, make_key_values(cfg, std::move(*key), next_clustering_key(cfg)), cfg.consistency_level).discard_result();
         }, cfg.concurrency, cfg.duration_in_seconds, cfg.operations_per_shard, cfg.stop_on_error, query_stats_updater(env.db()));
 }
 
-static schema_ptr make_counter_schema(std::string_view ks_name) {
-    return schema_builder(this_smp_shard_count(), ks_name, "cf")
-            .with_column("KEY", bytes_type, column_kind::partition_key)
-            .with_column("C0", counter_type)
+static schema_ptr make_counter_schema(std::string_view ks_name, const test_config& cfg) {
+    auto sb = schema_builder(this_smp_shard_count(), ks_name, "cf")
+            .with_column("KEY", bytes_type, column_kind::partition_key);
+    if (cfg.clustering_rows > 0) {
+        sb.with_column("CK", int32_type, column_kind::clustering_key);
+    }
+    return sb.with_column("C0", counter_type)
             .with_column("C1", counter_type)
             .with_column("C2", counter_type)
             .with_column("C3", counter_type)
@@ -406,11 +447,14 @@ static std::vector<query_perf_result> do_cql_test(cql_test_env& env, test_config
     std::cout << "Running test with config: " << cfg << std::endl;
     env.create_table([&cfg] (auto ks_name) {
         if (cfg.counters) {
-            return *make_counter_schema(ks_name);
+            return *make_counter_schema(ks_name, cfg);
         }
         auto sb = schema_builder(this_smp_shard_count(), ks_name, "cf")
-                .with_column("KEY", bytes_type, column_kind::partition_key)
-                .with_column("C0", bytes_type)
+                .with_column("KEY", bytes_type, column_kind::partition_key);
+        if (cfg.clustering_rows > 0) {
+            sb.with_column("CK", int32_type, column_kind::clustering_key);
+        }
+        sb.with_column("C0", bytes_type)
                 .with_column("C1", bytes_type)
                 .with_column("C2", bytes_type)
                 .with_column("C3", bytes_type)
@@ -472,6 +516,9 @@ void write_json_result(std::string result_file, const test_config& cfg, const ag
     if (cfg.collection > 0) {
         params["collection"] = cfg.collection;
     }
+    if (cfg.clustering_rows > 0) {
+        params["clustering_rows"] = cfg.clustering_rows;
+    }
     params["logstor"] = cfg.logstor;
     params["auto_compaction"] = cfg.auto_compaction;
 
@@ -524,6 +571,7 @@ int scylla_simple_query_main(int argc, char** argv) {
         ("operations-per-shard", bpo::value<unsigned>(), "run this many operations per shard (overrides duration)")
         ("counters", "test counters")
         ("collection", bpo::value<unsigned>()->default_value(0), "add map<text,text> collection column with N cells per row (excludes --counters)")
+        ("clustering-rows", bpo::value<unsigned>()->default_value(0), "add an int clustering key column and N rows per partition; operations address a random row (0: no clustering key)")
         ("tablets", "use tablets")
         ("logstor", "store the table with the logstor storage engine instead of sstables (implies --tablets)")
         ("logstor-disk-size-in-mb", bpo::value<unsigned>()->default_value(1024), "size of the logstor segment pool")
@@ -622,6 +670,10 @@ int scylla_simple_query_main(int argc, char** argv) {
             cfg.flush_memtables = app.configuration().contains("flush");
             cfg.collection = app.configuration()["collection"].as<unsigned>();
             cfg.logstor = app.configuration().contains("logstor");
+            cfg.clustering_rows = app.configuration()["clustering-rows"].as<unsigned>();
+            if (cfg.clustering_rows > 0 && cfg.logstor) {
+                throw std::invalid_argument("--clustering-rows and --logstor are mutually exclusive: logstor holds one row per partition");
+            }
             if (cfg.counters && cfg.collection > 0) {
                 throw std::invalid_argument("--collection and --counters are mutually exclusive");
             }
