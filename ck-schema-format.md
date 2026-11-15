@@ -81,22 +81,29 @@ Converted:
 returns `legacy_primary_key_layout`, which matches
 `compound_type<allow_prefixes::yes>` byte for byte (checked in `keys_test`).
 
-Virtual core:
+Only operations on whole keys are virtual; nothing costs a virtual call per
+component:
 
-- iteration: `first(cursor&)` and `next(cursor&)`. The non-virtual
-  `iterator` (forward) wraps a `cursor {key, rest, current, index, at_end}`,
-  so a layout can find component i from the whole key (header-based formats).
-- `size()`, `deserialize_value()` (explode)
-- `compare()`, `prefix_equal_compare()`, `equal()`, `hash()`
-- `serialized_size(sizes)` and `serialize(sizes, component_source&, out)`.
-  The non-virtual template `serialize_value(range)` collects component sizes,
-  then calls `serialize()`, which pulls each value through a type-erased
-  `component_source`. Any FragmentedView range serializes without copying.
+- `decompose(key, primary_key_components&)`: views of all components, which
+  point into the key. `components(key)` returns them as an owning
+  `primary_key_components` (small_vector of 8). Its `begin()`/`end()` are
+  lvalue-only, so iterators into a temporary do not compile; range-for over a
+  temporary works.
+- `size()` (default: through `decompose()`)
+- `compare()`, `prefix_equal_compare()` (default: through `decompose()`),
+  `equal()`, `hash()`
+- `serialize(std::span<const managed_bytes_view>)`: construction. The
+  non-virtual template `serialize_value(range)` collects views of the
+  components, copying them first only when the range yields owning
+  temporaries or FragmentedViews other than `managed_bytes_view`.
 
-The non-virtual API mirrors `compound_type` (`types()`, `begin/end/components`,
-`less`, `is_full`, `is_empty`, `validate`, `serialize_single`,
-`serialize_optionals`, `serialize_value_deep`), so the templates in `keys.hh`
-work unchanged. `clustering_key_prefix{,_view}::compound` is now
+Non-virtual, through the above: `deserialize_value()` (explode), `validate()`,
+`is_full()`, `serialize_single()`, `serialize_optionals()`,
+`serialize_value_deep()`. `keys_test` checks both `legacy_primary_key_layout`
+and a layout implementing only the pure virtuals against `compound_type`.
+
+Clustering keys have no `begin(s)`/`end(s)` (deleted): callers iterate
+`components(s)`. `get_component(s, i)` and `size(s)` go through the layout. `clustering_key_prefix{,_view}::compound` is now
 `primary_key_layout_ptr` (`seastar::shared_ptr<const primary_key_layout>`;
 `lw_shared_ptr` cannot hold a derived class), and `get_compound_type(s)`
 returns the layout. The schema-free (deprecated) members decode the legacy
@@ -112,37 +119,38 @@ legacy-format users: sstables `composite`, `tools/scylla-types`,
 `tools/lua_sstable_consumer` (`validate()` of user hex input), and callers
 that only need `->types()`.
 
-Cost: one virtual call per key comparison. Generic iteration costs one per
-component step, so `legacy_primary_key_layout` overrides the hot walkers
-(`size`, `prefix_equal_compare`, `deserialize_value`) with `compound_type`'s
-non-virtual iterator.
+Cost: one virtual call per key operation. `legacy_primary_key_layout`
+implements `size` and `prefix_equal_compare` with `compound_type`'s inlined
+iterator rather than through `decompose()`.
 
 ### Measurements
 
 `perf_simple_query --smp 1 -m 2G --duration 10 --clustering-rows N`, release
 `--disable-lto`, hal, median of 3 alternating runs. Baseline: ca0516ef14f plus
 `--clustering-rows`. Partitions: 10000 (1000 for 1000 rows). Reads hit the row
-cache. tps change against the baseline:
+cache. tps change against the baseline, for three versions of the layout:
+per-component virtual `first`/`next` with generic walkers, the same with
+`legacy_primary_key_layout` overriding `size`/`prefix_equal_compare`, and the
+per-key interface (current):
 
-| rows | mode | generic walkers | legacy overrides | insns/op (overrides) |
-|---|---|---|---|---|
-| 0 | read | -2.8% | -0.9% | +142 (+0.4%) |
-| 0 | write | -3.9% | -0.3% | +446 (+1.1%) |
-| 10 | read | -5.4% | -2.0% | +48 (+0.1%) |
-| 10 | write | -5.7% | -2.1% | +779 (+1.6%) |
-| 1000 | read | -7.4% | -2.5% | -350 (-0.8%) |
-| 1000 | write | -0.1% | -0.2% | -260 (-0.5%) |
+| rows | mode | generic walkers | overrides | per-key | insns/op (per-key) | cycles/op (per-key) |
+|---|---|---|---|---|---|---|
+| 0 | read | -2.8% | -0.9% | -3.8% | +80 (+0.2%) | +3.4% |
+| 0 | write | -3.9% | -0.3% | -0.5% | +178 (+0.4%) | +0.8% |
+| 10 | read | -5.4% | -2.0% | -4.1% | -164 (-0.4%) | +3.9% |
+| 10 | write | -5.7% | -2.1% | +0.8% | -464 (-0.9%) | -0.3% |
+| 1000 | read | -7.4% | -2.5% | -2.7% | -610 (-1.4%) | +3.1% |
+| 1000 | write | -0.1% | -0.2% | -0.1% | -588 (-1.0%) | -0.3% |
 
-Run-to-run spread is 0.1-3.5%. Before the overrides, `perf` showed `first`,
-`prefix_equal_compare`, `size` and `next` at ~9.5% of cycles in the 10-row
-write (2.6% for the inlined comparison in the baseline). Open: the extra ~780
-insns/op in the 10-row write (likely key construction through
-`serialize_value()` and its virtual `component_source`); cycles rise more
-than instructions (indirect calls).
+Run-to-run tps spread is 0.1-3.5%. With the per-component virtuals, `perf`
+showed `first`, `prefix_equal_compare`, `size` and `next` at ~9.5% of cycles
+in the 10-row write (2.6% for the inlined comparison in the baseline).
 
-Not virtualized yet: `prefix_view_on_prefix_compound::less_compare_with_prefix`
-and `is_prefixed_by()` (they iterate components generically), and
-`validate()` (it iterates generically).
+With the per-key interface, writes match the baseline and run fewer
+instructions. Reads run the same or fewer instructions but 3-4% more cycles,
+so they lose 3-4% tps. Open: profile the read path (candidates: the
+indirect `prefix_equal_compare`/`size` calls in the row-tree search,
+`components(s)` filling a small_vector per key, code alignment).
 
 ## IDL (todo)
 
