@@ -95,6 +95,21 @@ void legacy_primary_key_layout::next(cursor& c) const {
     ++c.index;
 }
 
+size_t legacy_primary_key_layout::size(managed_bytes_view key) const {
+    return std::distance(compound::begin(key), compound::end(key));
+}
+
+primary_key_layout::value_type legacy_primary_key_layout::deserialize_value(managed_bytes_view key) const {
+    return _compound.deserialize_value(key);
+}
+
+std::strong_ordering legacy_primary_key_layout::prefix_equal_compare(managed_bytes_view k1, managed_bytes_view k2) const {
+    return prefix_equality_tri_compare(_types.begin(),
+        compound::begin(k1), compound::end(k1),
+        compound::begin(k2), compound::end(k2),
+        ::tri_compare);
+}
+
 std::strong_ordering legacy_primary_key_layout::compare(managed_bytes_view k1, managed_bytes_view k2) const {
     return _compound.compare(k1, k2);
 }

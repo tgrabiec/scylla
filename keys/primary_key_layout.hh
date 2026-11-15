@@ -250,6 +250,12 @@ public:
 
     void first(cursor& c) const override;
     void next(cursor& c) const override;
+
+    // These walk components with compound_type's non-virtual iterator.
+    size_t size(managed_bytes_view key) const override;
+    value_type deserialize_value(managed_bytes_view key) const override;
+    std::strong_ordering prefix_equal_compare(managed_bytes_view k1, managed_bytes_view k2) const override;
+
     std::strong_ordering compare(managed_bytes_view k1, managed_bytes_view k2) const override;
     bool equal(managed_bytes_view k1, managed_bytes_view k2) const override;
     size_t hash(managed_bytes_view key) const override;
