@@ -148,9 +148,41 @@ in the 10-row write (2.6% for the inlined comparison in the baseline).
 
 With the per-key interface, writes match the baseline and run fewer
 instructions. Reads run the same or fewer instructions but 3-4% more cycles,
-so they lose 3-4% tps. Open: profile the read path (candidates: the
-indirect `prefix_equal_compare`/`size` calls in the row-tree search,
-`components(s)` filling a small_vector per key, code alignment).
+so they lose 3-4% tps.
+
+### Read profile (per-key interface)
+
+Both builds above use the checked-in PGO profile
+(`pgo/profiles/x86_64/profile.profdata.xz`, applied when `--use-profile` is
+not given). It has no data for `primary_key_layout` code, nor for functions
+whose control flow changed through `keys.hh`, so it biases against the layout
+build.
+
+`perf stat` (10-row reads, per op, two runs each): instructions equal
+(39.5k vs 39.4k), cycles +3% (27.3k vs 28.1k). The extra cycles are front-end:
+`idq_uops_not_delivered.core` +10-15%, `icache.ifdata_stall` +10%, branch
+misses +1.2/op.
+
+`perf record` (10-row reads, cycles/op by symbol): comparison work moved, not
+grew. `prefix_equal_compare` +448, `size` +94, `equal` +25 in the layout build;
+`partition_snapshot_row_cursor::prepare_heap` -388 and `bound_view::tri_compare`
+-191 (inlined in the baseline). The net +811 cycles/op is spread over
+unrelated functions (`small_pool::add_more_objects` +142,
+`cache_mutation_reader::move_to_range` +110, `mutation_querier::consume` +84,
+`table::query` +77, ...): code layout and profile mismatch, not comparison
+cost.
+
+CPU share of key comparison in reads (layout build, LBR call graphs,
+inclusive, with `abstract_type::compare` callees):
+
+| rows/partition | clustering key | partition key | row-tree search (`prepare_heap` self) |
+|---|---|---|---|
+| 0 | 0.3% | 0.6% | 0.8% |
+| 10 | 2.7% | 0.5% | 3.6% |
+| 1000 | 6.1% | 0.4% | 11.1% |
+
+Next: compare builds trained on the same workload (PGO + LTO, profile from
+perf_simple_query reads of one ~1 GB partition on one shard).
 
 ## IDL (todo)
 
