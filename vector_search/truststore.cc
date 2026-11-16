@@ -8,6 +8,7 @@
 
 #include "truststore.hh"
 #include <seastar/core/smp.hh>
+#include "utils/http.hh"
 
 namespace vector_search {
 
@@ -62,7 +63,7 @@ seastar::future<seastar::tls::credentials_builder> truststore::create_builder() 
     if (_options.get().contains("truststore")) {
         co_await builder.set_x509_trust_file(_options.get().at("truststore"), seastar::tls::x509_crt_format::PEM);
     } else {
-        co_await builder.set_system_trust();
+        co_await utils::http::set_default_trust(builder);
     }
     builder.set_session_resume_mode(seastar::tls::session_resume_mode::TLS13_SESSION_TICKET);
     co_return builder;

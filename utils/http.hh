@@ -25,9 +25,20 @@ void set_default_truststore(std::string path);
 // Loads the bundle set by set_default_truststore() into creds, or the
 // system trust store if none is set.
 future<> set_default_trust(tls::certificate_credentials& creds);
+future<> set_default_trust(tls::credentials_builder& builder);
 
 // Credentials trusting the CAs set_default_trust() loads, shared by all callers on a shard.
+// The watch started by start_default_truststore_watch() rebuilds them in place.
 future<shared_ptr<tls::certificate_credentials>> system_trust_credentials();
+
+// Counts reloads of the default truststore on this shard. Holders of credentials
+// built with set_default_trust() rebuild them when it changes.
+uint64_t default_trust_generation();
+
+// Watches the default truststore file and reloads it on all shards when it changes.
+// Call on shard 0, after set_default_truststore() ran on all shards.
+future<> start_default_truststore_watch();
+future<> stop_default_truststore_watch();
 
 class dns_connection_factory : public seastar::http::connection_factory {
 protected:

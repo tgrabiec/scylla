@@ -244,6 +244,7 @@ private:
     attr_cache<attr_cache_key, key_and_id_type, attr_cache_key_hash> _attr_cache;
     id_cache<id_cache_key, bytes, id_cache_key_hash> _id_cache;
     shared_ptr<seastar::tls::certificate_credentials> _creds;
+    uint64_t _creds_generation = 0;
     std::unordered_map<bytes, shared_ptr<symmetric_key>> _cache;
     bool _initialized = false;
 };
@@ -701,8 +702,12 @@ future<rjson::value> encryption::kms_host::impl::do_post(std::string_view target
 // helper to build AWS request and parse result.
 future<encryption::kms_host::impl::result_type> encryption::kms_host::impl::post(aws_query query) {
     auto creds = _creds;
+    if (creds && _creds_generation != utils::http::default_trust_generation()) {
+        creds = nullptr;
+    }
     // if we are https, we need at least a credentials object that says "use system trust"
     if (!creds && _options.https) {
+        auto gen = utils::http::default_trust_generation();
         creds = ::make_shared<seastar::tls::certificate_credentials>();
 
         if (!_options.priority_string.empty()) {
@@ -720,6 +725,7 @@ future<encryption::kms_host::impl::result_type> encryption::kms_host::impl::post
             co_await utils::http::set_default_trust(*creds);
         }
         _creds = creds;
+        _creds_generation = gen;
     }
 
     // some of this could be shared with alternator

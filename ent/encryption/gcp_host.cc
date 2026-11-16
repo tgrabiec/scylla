@@ -111,6 +111,7 @@ public:
     ~impl() = default;
 
     future<> init();
+    future<> make_certs();
     future<> stop();
     const host_options& options() const {
         return _options;
@@ -166,6 +167,7 @@ private:
     host_options _options;
 
     shared_ptr<tls::certificate_credentials> _certs;
+    uint64_t _certs_generation = 0;
 
     std::unordered_map<credentials_source, std::optional<google_credentials>> _cached_credentials;
 
@@ -278,6 +280,10 @@ future<rjson::value> encryption::gcp_host::impl::gcp_auth_post_with_retry(std::s
     std::vector<key_value> headers;
     std::string bearer;
 
+    if (_certs_generation != utils::http::default_trust_generation()) {
+        co_await make_certs();
+    }
+
     for (int retry = 0; ; ++retry) {
         if (std::exchange(do_backoff, false)) {
             co_await exr.retry(_as);
@@ -355,27 +361,34 @@ future<rjson::value> encryption::gcp_host::impl::gcp_auth_post_with_retry(std::s
 
 static constexpr char GCP_KMS_QUERY_TEMPLATE[] = "{}/v1/projects/{}/locations/{}/keyRings/{}/cryptoKeys/{}:{}";
 
+future<> encryption::gcp_host::impl::make_certs() {
+    auto gen = utils::http::default_trust_generation();
+    auto certs = ::make_shared<tls::certificate_credentials>();
+
+    if (!_options.priority_string.empty()) {
+        certs->set_priority_string(_options.priority_string);
+    } else {
+        certs->set_priority_string(db::config::default_tls_priority);
+    }
+    if (!_options.certfile.empty()) {
+        co_await certs->set_x509_key_file(_options.certfile, _options.keyfile, seastar::tls::x509_crt_format::PEM);
+    }
+    if (!_options.truststore.empty()) {
+        co_await certs->set_x509_trust_file(_options.truststore, seastar::tls::x509_crt_format::PEM);
+    } else {
+        co_await utils::http::set_default_trust(*certs);
+    }
+    _certs = std::move(certs);
+    _certs_generation = gen;
+}
+
 future<> encryption::gcp_host::impl::init() {
     if (_initialized) {
         co_return;
     }
 
     // will only do network calls on shard 0
-    _certs =::make_shared<tls::certificate_credentials>();
-
-    if (!_options.priority_string.empty()) {
-        _certs->set_priority_string(_options.priority_string);
-    } else {
-        _certs->set_priority_string(db::config::default_tls_priority);
-    }
-    if (!_options.certfile.empty()) {
-        co_await _certs->set_x509_key_file(_options.certfile, _options.keyfile, seastar::tls::x509_crt_format::PEM);
-    }
-    if (!_options.truststore.empty()) {
-        co_await _certs->set_x509_trust_file(_options.truststore, seastar::tls::x509_crt_format::PEM);
-    } else {
-        co_await utils::http::set_default_trust(*_certs);
-    }
+    co_await make_certs();
 
     if (!_options.master_key.empty()) {
         gcp_log.debug("Looking up master key");

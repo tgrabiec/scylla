@@ -10,30 +10,106 @@
 #include "rest/client.hh"
 
 #include <boost/regex.hpp>
+#include <seastar/core/gate.hh>
+#include <seastar/core/smp.hh>
 #include <seastar/coroutine/all.hh>
 
-static thread_local std::string default_truststore;
+static logging::logger dtlog("default_truststore");
+
+namespace {
+
+struct default_trust_state {
+    std::string truststore;
+    shared_ptr<tls::certificate_credentials> creds;
+    uint64_t generation = 0;
+    // Shard 0 only. Serves as the file watcher; connections use creds.
+    shared_ptr<tls::certificate_credentials> watcher;
+    std::optional<gate> reload_gate;
+};
+
+thread_local default_trust_state default_trust;
+
+}
 
 void utils::http::set_default_truststore(std::string path) {
-    default_truststore = std::move(path);
+    default_trust.truststore = std::move(path);
+    default_trust.creds = nullptr;
+    ++default_trust.generation;
 }
 
 future<> utils::http::set_default_trust(tls::certificate_credentials& creds) {
-    if (!default_truststore.empty()) {
-        return creds.set_x509_trust_file(default_truststore, tls::x509_crt_format::PEM);
+    if (!default_trust.truststore.empty()) {
+        return creds.set_x509_trust_file(default_trust.truststore, tls::x509_crt_format::PEM);
     }
     return creds.set_system_trust();
 }
 
+future<> utils::http::set_default_trust(tls::credentials_builder& builder) {
+    if (!default_trust.truststore.empty()) {
+        return builder.set_x509_trust_file(default_trust.truststore, tls::x509_crt_format::PEM);
+    }
+    return builder.set_system_trust();
+}
+
+uint64_t utils::http::default_trust_generation() {
+    return default_trust.generation;
+}
+
 future<shared_ptr<tls::certificate_credentials>> utils::http::system_trust_credentials() {
-    static thread_local shared_ptr<tls::certificate_credentials> system_trust_credentials;
-    if (!system_trust_credentials) {
-        // can race, and overwrite the object. that is fine.
+    while (!default_trust.creds) {
+        auto gen = default_trust.generation;
         auto cred = make_shared<tls::certificate_credentials>();
         co_await set_default_trust(*cred);
-        system_trust_credentials = std::move(cred);
+        // Reloads rebuild only default_trust.creds, so a concurrent caller's object wins,
+        // and a reload during the read may have left cred with stale contents.
+        if (!default_trust.creds && gen == default_trust.generation) {
+            default_trust.creds = std::move(cred);
+        }
     }
-    co_return system_trust_credentials;
+    co_return default_trust.creds;
+}
+
+static future<> reload_default_trust() {
+    try {
+        if (default_trust.creds) {
+            tls::credentials_builder b;
+            co_await b.set_x509_trust_file(default_trust.truststore, tls::x509_crt_format::PEM);
+            b.rebuild(*default_trust.creds);
+        }
+        ++default_trust.generation;
+    } catch (...) {
+        dtlog.warn("Failed to reload {}: {}", default_trust.truststore, std::current_exception());
+    }
+}
+
+future<> utils::http::start_default_truststore_watch() {
+    if (default_trust.truststore.empty()) {
+        co_return;
+    }
+    tls::credentials_builder b;
+    co_await b.set_x509_trust_file(default_trust.truststore, tls::x509_crt_format::PEM);
+    default_trust.reload_gate.emplace();
+    default_trust.watcher = co_await b.build_reloadable_certificate_credentials(
+            [] (const tls::credentials_builder&, const std::unordered_set<sstring>& files, std::exception_ptr ep) -> future<> {
+                if (!default_trust.reload_gate || default_trust.reload_gate->is_closed()) {
+                    co_return;
+                }
+                auto holder = default_trust.reload_gate->hold();
+                if (ep) {
+                    dtlog.warn("Exception while reloading {}: {}", files, ep);
+                    co_return;
+                }
+                dtlog.info("Reloading {}", files);
+                co_await smp::invoke_on_all([] { return reload_default_trust(); });
+            });
+}
+
+future<> utils::http::stop_default_truststore_watch() {
+    if (default_trust.reload_gate) {
+        co_await default_trust.reload_gate->close();
+        default_trust.reload_gate.reset();
+    }
+    default_trust.watcher = nullptr;
 }
 
 future<> utils::http::dns_connection_factory::init_credentials() {

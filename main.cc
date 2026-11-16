@@ -963,6 +963,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             smp::invoke_on_all([&cfg] {
                 utils::http::set_default_truststore(cfg->default_truststore());
             }).get();
+            utils::http::start_default_truststore_watch().get();
+            auto stop_default_truststore_watch = defer_verbose_shutdown("default truststore watch", [] {
+                utils::http::stop_default_truststore_watch().get();
+            });
 
             ::sighup_handler sighup_handler(opts, *cfg);
             auto stop_sighup_handler = defer_verbose_shutdown("sighup", [&] {
