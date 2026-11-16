@@ -181,8 +181,26 @@ inclusive, with `abstract_type::compare` callees):
 | 10 | 2.7% | 0.5% | 3.6% |
 | 1000 | 6.1% | 0.4% | 11.1% |
 
-Next: compare builds trained on the same workload (PGO + LTO, profile from
-perf_simple_query reads of one ~1 GB partition on one shard).
+### PGO + LTO
+
+Each tree built with `--pgo --use-profile="" --disable-lto` (instrumented),
+trained on `perf-simple-query --smp 1 -m 8G --partitions 1
+--clustering-rows 6000000 --duration 60` (reads of one ~1 GB partition), then
+built release with LTO and `--use-profile=<that profile>`. Reads, 1 shard,
+median of 3 alternating rounds:
+
+| workload | baseline tps | layout tps | tps | insns/op | cycles/op |
+|---|---|---|---|---|---|
+| 1 GB partition (6M rows) | 114828 | 111978 | -2.5% | -0.2% | +2.9% |
+| no clustering key, 10k partitions | 175435 | 171177 | -2.4% | +0.2% | +1.8% |
+| 10 rows/partition | 148978 | 146617 | -1.6% | -0.2% | +1.2% |
+| 1000 rows/partition | 132156 | 129388 | -2.1% | 0.0% | +2.0% |
+
+All three layout runs fall below all three baseline runs in every row. With
+equal instructions, the extra cycles are the indirect call per key
+operation. configure.py builds with `-mllvm -enable-value-profiling=false`,
+which also disables PGO's indirect call promotion, so PGO cannot turn the hot
+virtual call into a direct one.
 
 ## IDL (todo)
 
