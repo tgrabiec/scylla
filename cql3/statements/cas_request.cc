@@ -179,7 +179,7 @@ cas_request::build_cas_result_set(seastar::shared_ptr<cql3::metadata> metadata,
             result_set->add_row(std::move(rs_row));
             continue;
         }
-        auto ckey_bytes = old_row.ckey->explode();
+        auto ckey_bytes = old_row.ckey->explode(*_schema);
 
         auto eval_inputs = expr::evaluation_inputs{
             .partition_key = pkey_bytes,

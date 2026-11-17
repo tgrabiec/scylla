@@ -127,7 +127,7 @@ private:
             }
             const auto underlying_ck_begin = exploded_ck.begin() + 2;
             const auto underlying_ck_end = underlying_ck_begin + std::min(exploded_ck.size() - 2, ck_types.size());
-            auto underlying_ck = clustering_key::from_exploded(std::vector<bytes>(underlying_ck_begin, underlying_ck_end));
+            auto underlying_ck = clustering_key::from_exploded(*_underlying_schema, std::vector<bytes>(underlying_ck_begin, underlying_ck_end));
             bool is_inclusive = b->is_inclusive();
             // Check if inclusiveness override is needed because of position weight
             if (exploded_ck.size() == ck_types.size() + 3) {

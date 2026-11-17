@@ -79,7 +79,7 @@ class clustering_parser {
     }
 
     position_in_partition make_position() {
-        auto key = clustering_key_prefix::from_range(clustering_key_values | std::views::transform(
+        auto key = clustering_key_prefix::from_range(_s, clustering_key_values | std::views::transform(
             [] (const FragmentedBuffer & b) { return typename FragmentedBuffer::view(b); }));
 
         if (kind == bound_kind_m::clustering) {

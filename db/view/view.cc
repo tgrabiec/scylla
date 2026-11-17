@@ -315,7 +315,7 @@ bool partition_key_matches(data_dictionary::database db, const schema& base, con
 bool clustering_prefix_matches(data_dictionary::database db, const schema& base, const view_info& view, const partition_key& key, const clustering_key_prefix& ck) {
     const cql3::expr::expression& r = view.restrictions(db).get_clustering_columns_restrictions();
     std::vector<bytes> exploded_pk = key.explode();
-    std::vector<bytes> exploded_ck = ck.explode();
+    std::vector<bytes> exploded_ck = ck.explode(base);
     std::vector<const column_definition*> ck_columns;
     ck_columns.reserve(base.clustering_key_size());
     for (const column_definition& column : base.clustering_key_columns()) {
@@ -669,7 +669,7 @@ view_updates::get_view_rows(const partition_key& base_key, const clustering_or_s
     std::vector<view_updates::view_row_entry> ret;
     auto compute_row = [&]<typename Range>(Range&& pk, Range&& ck) {
         partition_key pkey = partition_key::from_range(std::views::transform(pk, view_managed_key_view_and_action::get_key_view));
-        clustering_key ckey = clustering_key::from_range(std::views::transform(ck, view_managed_key_view_and_action::get_key_view));
+        clustering_key ckey = clustering_key::from_range(*_view, std::views::transform(ck, view_managed_key_view_and_action::get_key_view));
         auto action = (action_column < pk.size() ? pk[action_column] : ck[action_column - pk.size()])._action;
         mutation_partition& partition = partition_for(std::move(pkey));
 
@@ -3562,7 +3562,7 @@ future<> delete_ghost_rows_visitor::do_accept_new_row(partition_key pk, clusteri
         }
     }
     partition_key base_pk = partition_key::from_exploded(base_exploded_pk);
-    clustering_key base_ck = clustering_key::from_exploded(base_exploded_ck);
+    clustering_key base_ck = clustering_key::from_exploded(*_base_schema, base_exploded_ck);
 
     dht::partition_range_vector partition_ranges({dht::partition_range::make_singular(dht::decorate_key(*_base_schema, base_pk))});
     auto selection = cql3::selection::selection::for_columns(_base_schema,

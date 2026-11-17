@@ -1555,13 +1555,13 @@ void sstable::set_min_max_position_range() {
         return;
     }
 
-    auto pip = [] (const utils::chunked_vector<disk_string<uint16_t>>& column_names, bound_kind kind) {
+    auto pip = [this] (const utils::chunked_vector<disk_string<uint16_t>>& column_names, bound_kind kind) {
         std::vector<bytes> key_bytes;
         key_bytes.reserve(column_names.size());
         for (auto& value : column_names) {
             key_bytes.emplace_back(bytes_view(value));
         }
-        auto ckp = clustering_key_prefix(std::move(key_bytes));
+        auto ckp = clustering_key_prefix::from_exploded(*_schema, key_bytes);
         return position_in_partition(position_in_partition::range_tag_t(), kind, std::move(ckp));
     };
 

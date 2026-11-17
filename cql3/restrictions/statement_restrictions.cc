@@ -2346,7 +2346,7 @@ build_get_multi_column_clustering_bounds_fn(
                             opt_values[i],
                             "Invalid null value in condition for column {}", col.col->name_as_text());
                 }
-                intersect_all(acc, prefix3cmp, to_range(binop.op, clustering_key_prefix(std::move(values))));
+                intersect_all(acc, prefix3cmp, to_range(binop.op, clustering_key_prefix::from_exploded(*schema, values)));
             } else if (binop.op == oper_t::IN) {
                 const cql3::raw_value tup = expr::evaluate(binop.rhs, options);
                 utils::chunked_vector<std::vector<managed_bytes_opt>> tuple_elems;
@@ -2434,7 +2434,7 @@ std::vector<query::clustering_range> get_single_column_clustering_bounds(
                 // This is the first and last range; just turn it into a clustering_key_prefix.
                 ck_ranges.push_back(
                         reverse_if_reqd(
-                                last_range->transform([] (const managed_bytes& val) { return clustering_key_prefix::from_range(std::array<managed_bytes, 1>{val}); }),
+                                last_range->transform([&schema] (const managed_bytes& val) { return clustering_key_prefix::from_range(schema, std::array<managed_bytes, 1>{val}); }),
                                 *schema.clustering_column_at(i).type));
             } else {
                 // Prior clustering columns are equality-restricted (either via = or IN), producing one or more
@@ -2455,8 +2455,8 @@ std::vector<query::clustering_range> get_single_column_clustering_bounds(
                     if (extra_ub) {
                         new_ub.push_back(extra_ub->value());
                     }
-                    query::clustering_range::bound new_start(new_lb, extra_lb ? extra_lb->is_inclusive() : inclusive);
-                    query::clustering_range::bound new_end  (new_ub, extra_ub ? extra_ub->is_inclusive() : inclusive);
+                    query::clustering_range::bound new_start(clustering_key_prefix::from_exploded(schema, new_lb), extra_lb ? extra_lb->is_inclusive() : inclusive);
+                    query::clustering_range::bound new_end  (clustering_key_prefix::from_exploded(schema, new_ub), extra_ub ? extra_ub->is_inclusive() : inclusive);
                     ck_ranges.push_back(reverse_if_reqd({new_start, new_end}, *schema.clustering_column_at(i).type));
                 }
             }
@@ -2468,7 +2468,9 @@ std::vector<query::clustering_range> get_single_column_clustering_bounds(
     // prior_column_values.
     std::vector<query::clustering_range> ck_ranges(product_size);
     cartesian_product cp(prior_column_values);
-    std::transform(cp.begin(), cp.end(), ck_ranges.begin(), std::bind_front(query::clustering_range::make_singular));
+    std::transform(cp.begin(), cp.end(), ck_ranges.begin(), [&schema] (const std::vector<managed_bytes>& values) {
+        return query::clustering_range::make_singular(clustering_key_prefix::from_exploded(schema, values));
+    });
     sort(ck_ranges.begin(), ck_ranges.end(), range_less{schema});
     return ck_ranges;
 }
@@ -2584,7 +2586,7 @@ using opt_bound = std::optional<query::clustering_range::bound>;
 /// Makes a partial bound out of whole_bound's prefix.  If the partial bound is strictly shorter than the whole, it is
 /// exclusive.  Otherwise, it matches the whole_bound's inclusivity.
 opt_bound make_prefix_bound(
-        size_t prefix_len, const std::vector<bytes>& whole_bound, bool whole_bound_is_inclusive) {
+        const schema& schema, size_t prefix_len, const std::vector<bytes>& whole_bound, bool whole_bound_is_inclusive) {
     if (whole_bound.empty()) {
         return {};
     }
@@ -2592,7 +2594,7 @@ opt_bound make_prefix_bound(
     std::vector<bytes> partial_bound(
             whole_bound.cbegin(), whole_bound.cbegin() + std::min(prefix_len, whole_bound.size()));
     return query::clustering_range::bound(
-            clustering_key_prefix(std::move(partial_bound)),
+            clustering_key_prefix::from_exploded(schema, partial_bound),
             prefix_len >= whole_bound.size() && whole_bound_is_inclusive);
 }
 
@@ -2653,16 +2655,16 @@ std::vector<query::clustering_range> get_equivalent_ranges(
     std::vector<query::clustering_range> ranges;
     // First range is special: it has both bounds.
     opt_bound lb1 = make_prefix_bound(
-            common_prefix_len + 1, cql_lb_bytes, cql_lb_is_inclusive);
+            schema, common_prefix_len + 1, cql_lb_bytes, cql_lb_is_inclusive);
     opt_bound ub1 = make_prefix_bound(
-            common_prefix_len + 1, cql_ub_bytes, cql_ub_is_inclusive);
+            schema, common_prefix_len + 1, cql_ub_bytes, cql_ub_is_inclusive);
     auto range1 = schema.clustering_column_at(common_prefix_len).type->is_reversed() ?
             query::clustering_range(ub1, lb1) : query::clustering_range(lb1, ub1);
     ranges.push_back(std::move(range1));
 
     for (size_t p = common_prefix_len + 2; p <= cql_lb_bytes.size(); ++p) {
-        opt_bound lb = make_prefix_bound(p, cql_lb_bytes, cql_lb_is_inclusive);
-        opt_bound ub = make_prefix_bound(p - 1, cql_lb_bytes, /*irrelevant:*/true);
+        opt_bound lb = make_prefix_bound(schema, p, cql_lb_bytes, cql_lb_is_inclusive);
+        opt_bound ub = make_prefix_bound(schema, p - 1, cql_lb_bytes, /*irrelevant:*/true);
         if (ub) {
             ub = query::clustering_range::bound(ub->value(), inclusive);
         }
@@ -2673,8 +2675,8 @@ std::vector<query::clustering_range> get_equivalent_ranges(
 
     for (size_t p = common_prefix_len + 2; p <= cql_ub_bytes.size(); ++p) {
         // Note the difference from the cql_lb_bytes case above!
-        opt_bound ub = make_prefix_bound(p, cql_ub_bytes, cql_ub_is_inclusive);
-        opt_bound lb = make_prefix_bound(p - 1, cql_ub_bytes, /*irrelevant:*/true);
+        opt_bound ub = make_prefix_bound(schema, p, cql_ub_bytes, cql_ub_is_inclusive);
+        opt_bound lb = make_prefix_bound(schema, p - 1, cql_ub_bytes, /*irrelevant:*/true);
         if (lb) {
             lb = query::clustering_range::bound(lb->value(), inclusive);
         }

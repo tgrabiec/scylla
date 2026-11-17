@@ -20,7 +20,7 @@ void metadata_collector::convert(disk_array<uint32_t, disk_string<uint16_t>>& to
         return;
     }
     mdclogger.trace("{}: convert: {}", _name, position_in_partition_view::printer(_schema, *from));
-    for (auto& value : from->key().components()) {
+    for (auto& value : from->key().components(_schema)) {
         to.elements.push_back(disk_string<uint16_t>{to_bytes(value)});
     }
 }

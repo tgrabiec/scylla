@@ -29,7 +29,7 @@ update_parameters::get_prefetched_list(const partition_key& pkey, const clusteri
     }
 
     auto pkey_bytes = pkey.explode();
-    auto ckey_bytes = ckey.explode();
+    auto ckey_bytes = ckey.explode(*_schema);
 
     auto val = expr::extract_column_value(&column, expr::evaluation_inputs{
         .partition_key = pkey_bytes,
@@ -72,7 +72,7 @@ update_parameters::evaluate_on_prefetched_row(
         return expr::evaluate(e, expr::evaluation_inputs{.options = &_options});
     }
     auto pkey_bytes = pkey.explode();
-    auto ckey_bytes = ckey.explode();
+    auto ckey_bytes = ckey.explode(*_schema);
     auto row = _prefetched.find_row(pkey, ckey);
     if (row == nullptr) {
         // Row is absent: treat all column references as null (SQL null-

@@ -508,7 +508,7 @@ public:
             if (is_static) {
                 return position_in_partition(position_in_partition::static_row_tag_t());
             } else {
-                auto ck = clustering_key_prefix::from_exploded_view(ecp);
+                auto ck = clustering_key_prefix::from_range(*_schema, ecp);
                 return position_in_partition(position_in_partition::clustering_row_tag_t(), std::move(ck));
             }
         }();
@@ -687,7 +687,7 @@ public:
     // Consume one row tombstone.
     proceed consume_shadowable_row_tombstone(bytes_view col_name, sstables::deletion_time deltime) {
         auto key = composite_view(column::fix_static_name(*_schema, col_name)).explode();
-        auto ck = clustering_key_prefix::from_exploded_view(key);
+        auto ck = clustering_key_prefix::from_range(*_schema, key);
         auto ret = flush_if_needed(std::move(ck));
         if (!_skip_in_progress) {
             _in_progress->mutate_as_clustering_row(*_schema, [&] (clustering_row& cr) mutable {
@@ -744,9 +744,9 @@ public:
         // Still, it is enough to check if we're dealing with a collection, since any other tombstone
         // won't have a full clustering prefix (otherwise it isn't a range)
         if (start.size() <= _schema->clustering_key_size()) {
-            auto start_ck = clustering_key_prefix::from_exploded_view(start);
+            auto start_ck = clustering_key_prefix::from_range(*_schema, start);
             auto start_kind = compound ? start_marker_to_bound_kind(start_col) : bound_kind::incl_start;
-            auto end = clustering_key_prefix::from_exploded_view(composite_view(column::fix_static_name(*_schema, end_col), compound).explode());
+            auto end = clustering_key_prefix::from_range(*_schema, composite_view(column::fix_static_name(*_schema, end_col), compound).explode());
             auto end_kind = compound ? end_marker_to_bound_kind(end_col) : bound_kind::incl_end;
             if (range_tombstone::is_single_clustering_row_tombstone(*_schema, start_ck, start_kind, end, end_kind)) {
                 auto ret = flush_if_needed(std::move(start_ck));
