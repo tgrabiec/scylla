@@ -306,12 +306,12 @@ void result::ensure_counts() {
     }
 }
 
-full_position result::get_or_calculate_last_position() const {
+full_position result::get_or_calculate_last_position(const schema& s) const {
     if (_last_position) {
         return *_last_position;
     }
-    return result_view::do_with(*this, [] (const result_view& v) {
-        return v.calculate_last_position();
+    return result_view::do_with(*this, [&s] (const result_view& v) {
+        return v.calculate_last_position(s);
     });
 }
 

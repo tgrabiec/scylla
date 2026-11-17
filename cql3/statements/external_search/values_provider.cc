@@ -299,7 +299,7 @@ public:
     }
 
     void accept_new_row(const clustering_key& key, const query::result_row_view& static_row, const query::result_row_view& row) {
-        const auto candidate = match(key);
+        const auto candidate = match(clustering_key_prefix::from_idl(_schema, key));
         add_row(candidate, read_columns(hits_of(candidate), &key, static_row, &row));
     }
 

@@ -1184,7 +1184,7 @@ lw_shared_ptr<const service::pager::paging_state> view_indexed_table_select_stat
         return paging_state;
     }
 
-    auto&& last_pos = results->get_or_calculate_last_position();
+    auto&& last_pos = results->get_or_calculate_last_position(*_schema);
     auto& last_base_pk = last_pos.partition;
     auto* last_base_ck = last_pos.position.has_key() ? &last_pos.position.key() : nullptr;
 

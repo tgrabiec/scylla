@@ -429,7 +429,7 @@ public:
 
     // Return _last_position if replica filled it, otherwise calculate it based
     // on the content (by looking up the last row in the last partition).
-    full_position get_or_calculate_last_position() const;
+    full_position get_or_calculate_last_position(const schema&) const;
 
     struct printer {
         schema_ptr s;

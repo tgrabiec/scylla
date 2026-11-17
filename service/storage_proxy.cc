@@ -5369,7 +5369,7 @@ private:
     }
 
     static primary_key get_last_row(const schema& s, const partition& p, bool is_reversed) {
-        return {p.mut().decorated_key(s), is_reversed ? p.mut().partition().first_row_key() : p.mut().partition().last_row_key()  };
+        return {p.mut().decorated_key(s), is_reversed ? p.mut().partition().first_row_key(s) : p.mut().partition().last_row_key(s)  };
     }
 
     // Returns the highest row sent by the specified replica, according to the schema and the direction of

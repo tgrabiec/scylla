@@ -183,7 +183,7 @@ public:
         return std::make_tuple(ps.size(), rows);
     }
 
-    full_position calculate_last_position() const {
+    full_position calculate_last_position(const schema& s) const {
         auto ps = _v.partitions();
         SCYLLA_ASSERT(!ps.empty());
         auto pit = ps.begin();
@@ -202,7 +202,7 @@ public:
             }
             const auto& key_opt = (*rit).key();
             if (key_opt) {
-                pos = position_in_partition::for_key(*key_opt);
+                pos = position_in_partition::for_key(clustering_key_prefix::from_idl(s, *key_opt));
             }
         }
         return { p.key().value(), std::move(pos) };

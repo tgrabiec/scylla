@@ -396,7 +396,7 @@ public:
     void accept_partition_end(const query::result_row_view& static_row) {}
 
     bool check_if_matches(const clustering_key& key, const query::result_row_view& static_row, const query::result_row_view& row) const {
-        std::vector<bytes> ck = key.explode();
+        std::vector<bytes> ck = key.explode_idl();
         return std::ranges::all_of(
             _view.restrictions(_db).get_non_pk_restriction() | std::views::values,
             [&] (auto&& r) {
@@ -3544,7 +3544,7 @@ void delete_ghost_rows_visitor::accept_new_row(const clustering_key& ck, const q
 
 future<> delete_ghost_rows_visitor::do_accept_new_row(partition_key pk, clustering_key ck) {
     auto view_exploded_pk = pk.explode();
-    auto view_exploded_ck = ck.explode();
+    auto view_exploded_ck = ck.explode_idl();
     std::vector<bytes> base_exploded_pk(_base_schema->partition_key_size());
     std::vector<bytes> base_exploded_ck(_base_schema->clustering_key_size());
     std::flat_map<const column_definition*, bytes> view_key_cols_not_in_base_key;

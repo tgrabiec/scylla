@@ -143,13 +143,30 @@ auto write_row_marker(Writer&& writer, const row_marker& marker)
 
 }
 
+// rt with keys in the legacy format, for writing through the IDL: rt itself
+// when the layout is legacy, otherwise a copy put into holder.
+static const range_tombstone& rt_to_idl(const schema& s, const range_tombstone& rt, std::optional<range_tombstone>& holder) {
+    if (s.clustering_key_layout()->is_legacy()) {
+        return rt;
+    }
+    std::optional<clustering_key_prefix> start, end;
+    return holder.emplace(rt.start.to_idl(s, start), rt.start_kind, rt.end.to_idl(s, end), rt.end_kind, rt.tomb);
+}
+
+template <typename RowTombstones>
+static void write_range_tombstone(const schema& s, RowTombstones& row_tombstones, const range_tombstone& rt)
+{
+    std::optional<range_tombstone> holder;
+    const auto& idl_rt = rt_to_idl(s, rt, holder);
+    row_tombstones.add().write_start(idl_rt.start).write_tomb(idl_rt.tomb).write_start_kind(idl_rt.start_kind)
+        .write_end(idl_rt.end).write_end_kind(idl_rt.end_kind).end_range_tombstone();
+}
+
 template <typename RowTombstones>
 static void write_tombstones(const schema& s, RowTombstones& row_tombstones, const range_tombstone_list& rt_list)
 {
     for (auto&& rte : rt_list) {
-        auto& rt = rte.tombstone();
-        row_tombstones.add().write_start(rt.start).write_tomb(rt.tomb).write_start_kind(rt.start_kind)
-            .write_end(rt.end).write_end_kind(rt.end_kind).end_range_tombstone();
+        write_range_tombstone(s, row_tombstones, rte.tombstone());
     }
 }
 
@@ -160,7 +177,8 @@ static auto write_tombstone(Writer&& writer, const tombstone& t) {
 
 template<typename Writer>
 static auto write_row(Writer&& writer, const schema& s, const clustering_key_prefix& key, const row& cells, const row_marker& m, const row_tombstone& t) {
-    auto marker_writer = std::move(writer).write_key(key);
+    std::optional<clustering_key_prefix> idl_key;
+    auto marker_writer = std::move(writer).write_key(key.to_idl(s, idl_key));
     auto deleted_at_writer = write_row_marker(std::move(marker_writer), m).start_deleted_at();
     auto row_writer = write_tombstone(std::move(deleted_at_writer), t.regular()).end_deleted_at().start_cells();
     auto shadowable_deleted_at_writer = write_row_cells(std::move(row_writer), cells, s, column_kind::regular_column).end_cells().start_shadowable_deleted_at();
@@ -187,9 +205,7 @@ future<> mutation_partition_serializer::write_serialized_gently(Writer&& writer,
     auto row_tombstones = write_row_cells(std::move(srow_writer), mp.static_row().get(), s, column_kind::static_column).end_static_row().start_range_tombstones();
     for (auto&& rte : mp.row_tombstones()) {
         co_await coroutine::maybe_yield();
-        auto& rt = rte.tombstone();
-        row_tombstones.add().write_start(rt.start).write_tomb(rt.tomb).write_start_kind(rt.start_kind)
-            .write_end(rt.end).write_end_kind(rt.end_kind).end_range_tombstone();
+        write_range_tombstone(s, row_tombstones, rte.tombstone());
     }
     auto clustering_rows = std::move(row_tombstones).end_range_tombstones().start_rows();
     for (auto&& cr : mp.non_dummy_rows()) {
@@ -263,7 +279,8 @@ frozen_mutation_fragment freeze(const schema& s, const mutation_fragment& mf)
                 .end_static_row();
         },
         [&] (const range_tombstone& rt) {
-            return std::move(writer).write_fragment_range_tombstone(rt);
+            std::optional<range_tombstone> holder;
+            return std::move(writer).write_fragment_range_tombstone(rt_to_idl(s, rt, holder));
         },
         [&] (const partition_start& ps) {
             return std::move(writer).start_fragment_partition_start()
@@ -293,8 +310,9 @@ frozen_mutation_fragment_v2 freeze(const schema& s, const mutation_fragment_v2& 
                 .end_static_row();
         },
         [&] (const range_tombstone_change& rtc) {
+            std::optional<clustering_key_prefix> idl_key;
             return std::move(writer).start_fragment_range_tombstone_change()
-                .write_key(rtc.position().key())
+                .write_key(rtc.position().key().to_idl(s, idl_key))
                 .write_weight(rtc.position().get_bound_weight())
                 .write_tomb(rtc.tombstone())
                 .end_range_tombstone_change();

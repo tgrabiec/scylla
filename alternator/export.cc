@@ -1516,7 +1516,7 @@ static future<std::vector<export_summary_row>> get_all_exports(service::storage_
             co_return exports;
         }
         // Each partition holds a single row, so the next page starts after the last partition read.
-        auto last_key = dht::decorate_key(*schema, result->get_or_calculate_last_position().partition);
+        auto last_key = dht::decorate_key(*schema, result->get_or_calculate_last_position(*schema).partition);
         partition_ranges = {dht::partition_range::make_starting_with(dht::partition_range::bound(std::move(last_key), false))};
         co_await coroutine::maybe_yield();
     }

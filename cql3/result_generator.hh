@@ -56,7 +56,7 @@ private:
 
         void accept_new_row(const clustering_key& key, query::result_row_view static_row,
                             query::result_row_view row) {
-            _clustering_key = key.explode(_schema);
+            _clustering_key = key.explode_idl();
             accept_new_row(static_row, row);
         }
         void accept_new_row(query::result_row_view static_row, query::result_row_view row) {

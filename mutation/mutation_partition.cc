@@ -1960,7 +1960,8 @@ stop_iteration mutation_querier::consume(clustering_row&& cr, row_tombstone curr
     auto write_row = [&] (auto& rows_writer) {
         auto cells_wr = [&] {
             if (slice.options.contains(query::partition_slice::option::send_clustering_key)) {
-                return rows_writer.add().write_key(cr.key()).start_cells().start_cells();
+                std::optional<clustering_key_prefix> idl_key;
+                return rows_writer.add().write_key(cr.key().to_idl(_schema, idl_key)).start_cells().start_cells();
             } else {
                 return rows_writer.add().skip_key().start_cells().start_cells();
             }

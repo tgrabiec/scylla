@@ -429,7 +429,7 @@ void query_pager::handle_result(
         if (!replica_row_count && !results->is_short_read()) {
             _last_pkey = {};
         } else {
-            auto last_pos = results->get_or_calculate_last_position();
+            auto last_pos = results->get_or_calculate_last_position(*_query_schema);
             _last_pkey = std::move(last_pos.partition);
             _last_pos = std::move(last_pos.position);
         }

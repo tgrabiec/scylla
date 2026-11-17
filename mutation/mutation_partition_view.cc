@@ -146,9 +146,22 @@ row_marker read_row_marker(boost::variant<ser::live_marker_view, ser::expiring_m
 
 }
 
+// Clustering keys come out of the IDL in the legacy format. These convert them
+// to the layout of key_schema, if given.
+static clustering_key_prefix key_from_idl(const schema* key_schema, clustering_key_prefix key) {
+    return key_schema ? clustering_key_prefix::from_idl(*key_schema, std::move(key)) : std::move(key);
+}
+
+static void rt_from_idl(const schema* key_schema, range_tombstone& rt) {
+    if (key_schema && !key_schema->clustering_key_layout()->is_legacy()) {
+        rt.start = clustering_key_prefix::from_idl(*key_schema, std::move(rt.start));
+        rt.end = clustering_key_prefix::from_idl(*key_schema, std::move(rt.end));
+    }
+}
+
 template<typename Visitor>
 requires MutationViewVisitor<Visitor>
-void mutation_partition_view::do_accept(const column_mapping& cm, Visitor& visitor) const {
+void mutation_partition_view::do_accept(const schema* key_schema, const column_mapping& cm, Visitor& visitor) const {
     auto in = _in;
     auto mpv = ser::deserialize(in, std::type_identity<ser::mutation_partition_view>());
 
@@ -166,13 +179,16 @@ void mutation_partition_view::do_accept(const column_mapping& cm, Visitor& visit
     };
     read_and_visit_row(mpv.static_row(), cm, column_kind::static_column, static_row_cell_visitor{visitor});
 
-    for (auto&& rt : mpv.range_tombstones()) {
+    for (auto&& rtv : mpv.range_tombstones()) {
+        range_tombstone rt(rtv);
+        rt_from_idl(key_schema, rt);
         visitor.accept_row_tombstone(rt);
     }
 
     for (auto&& cr : mpv.rows()) {
         auto t = row_tombstone(cr.deleted_at(), shadowable_tombstone(cr.shadowable_deleted_at()));
-        visitor.accept_row(position_in_partition_view::for_key(cr.key()), t, read_row_marker(cr.marker()), is_dummy::no, is_continuous::yes);
+        auto key = key_from_idl(key_schema, cr.key());
+        visitor.accept_row(position_in_partition_view::for_key(key), t, read_row_marker(cr.marker()), is_dummy::no, is_continuous::yes);
 
         struct cell_visitor {
             Visitor& _visitor;
@@ -190,7 +206,7 @@ void mutation_partition_view::do_accept(const column_mapping& cm, Visitor& visit
 
 template<typename Visitor>
 requires (MutationViewVisitor<Visitor> && !AsyncMutationViewVisitor<Visitor>)
-future<> mutation_partition_view::do_accept_gently(const column_mapping& cm, Visitor& visitor) const {
+future<> mutation_partition_view::do_accept_gently(const schema* key_schema, const column_mapping& cm, Visitor& visitor) const {
     auto in = _in;
     auto mpv = ser::deserialize(in, std::type_identity<ser::mutation_partition_view>());
 
@@ -209,14 +225,16 @@ future<> mutation_partition_view::do_accept_gently(const column_mapping& cm, Vis
     read_and_visit_row(mpv.static_row(), cm, column_kind::static_column, static_row_cell_visitor{visitor});
     co_await coroutine::maybe_yield();
 
-    for (auto rt : mpv.range_tombstones()) {
+    for (auto rtv : mpv.range_tombstones()) {
+        range_tombstone rt(rtv);
+        rt_from_idl(key_schema, rt);
         visitor.accept_row_tombstone(rt);
         co_await coroutine::maybe_yield();
     }
 
     for (auto cr : mpv.rows()) {
         auto t = row_tombstone(cr.deleted_at(), shadowable_tombstone(cr.shadowable_deleted_at()));
-        auto key = cr.key();
+        auto key = key_from_idl(key_schema, cr.key());
         visitor.accept_row(position_in_partition_view::for_key(key), t, read_row_marker(cr.marker()), is_dummy::no, is_continuous::yes);
 
         struct cell_visitor {
@@ -236,7 +254,7 @@ future<> mutation_partition_view::do_accept_gently(const column_mapping& cm, Vis
 
 template<typename AsyncVisitor>
 requires AsyncMutationViewVisitor<AsyncVisitor>
-future<> mutation_partition_view::do_accept_gently(const column_mapping& cm, AsyncVisitor& visitor) const {
+future<> mutation_partition_view::do_accept_gently(const schema* key_schema, const column_mapping& cm, AsyncVisitor& visitor) const {
     auto in = _in;
     auto mpv = ser::deserialize(in, std::type_identity<ser::mutation_partition_view>());
 
@@ -255,13 +273,15 @@ future<> mutation_partition_view::do_accept_gently(const column_mapping& cm, Asy
     read_and_visit_row(mpv.static_row(), cm, column_kind::static_column, static_row_cell_visitor{visitor});
     co_await coroutine::maybe_yield();
 
-    for (auto rt : mpv.range_tombstones()) {
+    for (auto rtv : mpv.range_tombstones()) {
+        range_tombstone rt(rtv);
+        rt_from_idl(key_schema, rt);
         co_await visitor.accept_row_tombstone(rt);
     }
 
     for (auto cr : mpv.rows()) {
         auto t = row_tombstone(cr.deleted_at(), shadowable_tombstone(cr.shadowable_deleted_at()));
-        auto key = cr.key();
+        auto key = key_from_idl(key_schema, cr.key());
         co_await visitor.accept_row(position_in_partition_view::for_key(key), t, read_row_marker(cr.marker()), is_dummy::no, is_continuous::yes);
 
         struct cell_visitor {
@@ -352,6 +372,7 @@ mutation_partition_view::accept_ordered_result mutation_partition_view::do_accep
             return;
         }
         rt = *rt_it;
+        rt_from_idl(&s, *rt);
         ++rt_it;
     };
 
@@ -362,7 +383,7 @@ mutation_partition_view::accept_ordered_result mutation_partition_view::do_accep
             return;
         }
         cr = *cr_it;
-        cr_key = cr->key();
+        cr_key = clustering_key_prefix::from_idl(s, cr->key());
         ++cr_it;
     };
 
@@ -393,28 +414,28 @@ mutation_partition_view::accept_ordered_result mutation_partition_view::do_accep
 
 void mutation_partition_view::accept(const schema& s, partition_builder& visitor) const
 {
-    do_accept(s.get_column_mapping(), visitor);
+    do_accept(&s, s.get_column_mapping(), visitor);
 }
 
 future<> mutation_partition_view::accept_gently(const schema& s, mutation_partition_visitor& visitor) const {
-    return do_accept_gently(s.get_column_mapping(), visitor);
+    return do_accept_gently(&s, s.get_column_mapping(), visitor);
 }
 
 future<> mutation_partition_view::accept_gently(const schema& s, async_mutation_partition_visitor& visitor) const {
-    return do_accept_gently(s.get_column_mapping(), visitor);
+    return do_accept_gently(&s, s.get_column_mapping(), visitor);
 }
 
 void mutation_partition_view::accept(const column_mapping& cm, converting_mutation_partition_applier& visitor) const
 {
-    do_accept(cm, visitor);
+    do_accept(&visitor.target_schema(), cm, visitor);
 }
 
 future<> mutation_partition_view::accept_gently(const column_mapping& cm, converting_mutation_partition_applier& visitor) const {
-    return do_accept_gently(cm, visitor);
+    return do_accept_gently(&visitor.target_schema(), cm, visitor);
 }
 
 void mutation_partition_view::accept(const column_mapping& cm, mutation_partition_view_virtual_visitor& visitor) const {
-    do_accept(cm, visitor);
+    do_accept(nullptr, cm, visitor);
 }
 
 void mutation_partition_view::accept_ordered(const schema& s, mutation_partition_view_virtual_visitor& visitor) const {
@@ -429,7 +450,7 @@ future<> mutation_partition_view::accept_gently_ordered(const schema& s, mutatio
     } while (!res.stop);
 }
 
-std::optional<clustering_key> mutation_partition_view::first_row_key() const
+std::optional<clustering_key> mutation_partition_view::first_row_key(const schema& s) const
 {
     auto in = _in;
     auto mpv = ser::deserialize(in, std::type_identity<ser::mutation_partition_view>());
@@ -437,10 +458,10 @@ std::optional<clustering_key> mutation_partition_view::first_row_key() const
     if (rows.empty()) {
         return { };
     }
-    return (*rows.begin()).key();
+    return clustering_key_prefix::from_idl(s, (*rows.begin()).key());
 }
 
-std::optional<clustering_key> mutation_partition_view::last_row_key() const
+std::optional<clustering_key> mutation_partition_view::last_row_key(const schema& s) const
 {
     auto in = _in;
     auto mpv = ser::deserialize(in, std::type_identity<ser::mutation_partition_view>());
@@ -453,7 +474,7 @@ std::optional<clustering_key> mutation_partition_view::last_row_key() const
     while (++next != rows.end()) {
         it = next;
     }
-    return (*it).key();
+    return clustering_key_prefix::from_idl(s, (*it).key());
 }
 
 mutation_partition_view mutation_partition_view::from_view(ser::mutation_partition_view v)
@@ -478,7 +499,7 @@ clustering_row read_clustered_row(const schema& s, ser::clustering_row_view crv)
 
     auto cr = crv.row();
     auto t = row_tombstone(cr.deleted_at(), shadowable_tombstone(cr.shadowable_deleted_at()));
-    clustering_row_builder builder(cr.key(), std::move(t), read_row_marker(cr.marker()));
+    clustering_row_builder builder(clustering_key_prefix::from_idl(s, cr.key()), std::move(t), read_row_marker(cr.marker()));
     read_and_visit_row(cr.cells(), s.get_column_mapping(), column_kind::regular_column, builder);
     return std::move(builder).get();
 }
@@ -513,7 +534,9 @@ mutation_fragment frozen_mutation_fragment::unfreeze(const schema& s, reader_per
             return mutation_fragment(s, permit, read_static_row(s, sr));
         },
         [&] (ser::range_tombstone_view rt) {
-            return mutation_fragment(s, permit, range_tombstone(rt));
+            range_tombstone result(rt);
+            rt_from_idl(&s, result);
+            return mutation_fragment(s, permit, std::move(result));
         },
         [&] (ser::partition_start_view ps) {
             auto dkey = dht::decorate_key(s, ps.key());
@@ -540,7 +563,7 @@ mutation_fragment_v2 frozen_mutation_fragment_v2::unfreeze(const schema& s, read
             return mutation_fragment_v2(s, permit, read_static_row(s, sr));
         },
         [&] (ser::range_tombstone_change_view rtc) {
-            auto pos = position_in_partition(partition_region::clustered, rtc.weight(), rtc.key());
+            auto pos = position_in_partition(partition_region::clustered, rtc.weight(), clustering_key_prefix::from_idl(s, rtc.key()));
             return mutation_fragment_v2(s, permit, range_tombstone_change(std::move(pos), rtc.tomb()));
         },
         [&] (ser::partition_start_view ps) {

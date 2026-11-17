@@ -146,7 +146,7 @@ public:
         cells.cells = expr::get_non_pk_values(*_data.selection, static_row, &row);
         update_has_static(cells);
 
-        _data.rows.emplace(std::make_pair(*_pkey, key), std::move(cells));
+        _data.rows.emplace(std::make_pair(*_pkey, clustering_key_prefix::from_idl(*_schema, key)), std::move(cells));
     }
 
     void accept_new_row(const query::result_row_view& static_row, const query::result_row_view& row) {

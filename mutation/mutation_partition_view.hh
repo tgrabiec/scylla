@@ -71,17 +71,19 @@ private:
         : _in(v)
     { }
 
+    // key_schema: the schema whose layout the visitor gets clustering keys in,
+    // or null for the legacy format of the IDL.
     template<typename Visitor>
     requires MutationViewVisitor<Visitor>
-    void do_accept(const column_mapping&, Visitor& visitor) const;
+    void do_accept(const schema* key_schema, const column_mapping&, Visitor& visitor) const;
 
     template<typename Visitor>
     requires (MutationViewVisitor<Visitor> && !AsyncMutationViewVisitor<Visitor>)
-    future<> do_accept_gently(const column_mapping&, Visitor& visitor) const;
+    future<> do_accept_gently(const schema* key_schema, const column_mapping&, Visitor& visitor) const;
 
     template<typename AsyncVisitor>
     requires AsyncMutationViewVisitor<AsyncVisitor>
-    future<> do_accept_gently(const column_mapping&, AsyncVisitor& visitor) const;
+    future<> do_accept_gently(const schema* key_schema, const column_mapping&, AsyncVisitor& visitor) const;
 
     struct accept_ordered_cookie {
         bool accepted_partition_tombstone = false;
@@ -114,10 +116,11 @@ public:
     future<> accept_gently(const schema& schema, async_mutation_partition_visitor& visitor) const;
     void accept(const column_mapping&, converting_mutation_partition_applier& visitor) const;
     future<> accept_gently(const column_mapping&, converting_mutation_partition_applier& visitor) const;
+    // Clustering keys are in the legacy format of the IDL.
     void accept(const column_mapping&, mutation_partition_view_virtual_visitor& mpvvv) const;
     void accept_ordered(const schema& schema, mutation_partition_view_virtual_visitor& mpvvv) const;
     future<> accept_gently_ordered(const schema&, mutation_partition_view_virtual_visitor& mpvvv) const;
 
-    std::optional<clustering_key> first_row_key() const;
-    std::optional<clustering_key> last_row_key() const;
+    std::optional<clustering_key> first_row_key(const schema&) const;
+    std::optional<clustering_key> last_row_key(const schema&) const;
 };

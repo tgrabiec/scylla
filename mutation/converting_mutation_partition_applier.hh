@@ -40,6 +40,10 @@ private:
     static void accept_cell(row& dst, column_kind kind, const column_definition& new_def, const abstract_type& old_type, collection_mutation_view cell,
             db::large_data_cache_tracker* tracker = nullptr);
 public:
+    const schema& target_schema() const {
+        return _p_schema;
+    }
+
     converting_mutation_partition_applier(
             const column_mapping& visited_column_mapping,
             const schema& target_schema,

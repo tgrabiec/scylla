@@ -150,7 +150,7 @@ std::unordered_map<sstring, non_null_data_value>
 result_set_builder::deserialize(const clustering_key& key)
 {
     std::unordered_map<sstring, non_null_data_value> cells;
-    auto components = key.components(*_schema);
+    auto components = key.explode_idl();
     auto i = components.begin();
     for (auto&& col : _schema->clustering_key_columns()) {
         if (i == components.end()) {
