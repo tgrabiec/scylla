@@ -2795,7 +2795,7 @@ SEASTAR_TEST_CASE(test_uncompressed_compound_ck_read) {
 
     assert_that(sst.make_reader())
         .produces_partition_start(to_key(5))
-        .produces_row(clustering_key::from_exploded(*UNCOMPRESSED_SIMPLE_SCHEMA, {
+        .produces_row(clustering_key::from_exploded(*UNCOMPRESSED_COMPOUND_CK_SCHEMA, {
                           int32_type->decompose(105),
                           to_bytes(utf8_type->from_string("This is a string for 5")),
                           to_bytes(uuid_type->from_string("f1badb6f-80a0-4eef-90df-b3651d9a5578")),
@@ -2804,7 +2804,7 @@ SEASTAR_TEST_CASE(test_uncompressed_compound_ck_read) {
                       {{int_cdef, int32_type->decompose(1005)}})
         .produces_partition_end()
         .produces_partition_start(to_key(1))
-        .produces_row(clustering_key::from_exploded(*UNCOMPRESSED_SIMPLE_SCHEMA, {
+        .produces_row(clustering_key::from_exploded(*UNCOMPRESSED_COMPOUND_CK_SCHEMA, {
                           int32_type->decompose(101),
                           to_bytes(utf8_type->from_string("This is a string for 1")),
                           to_bytes(uuid_type->from_string("f7fdcbd2-4544-482c-85fd-d9572adc3cd6")),
@@ -2813,7 +2813,7 @@ SEASTAR_TEST_CASE(test_uncompressed_compound_ck_read) {
                       {{int_cdef, int32_type->decompose(1001)}})
         .produces_partition_end()
         .produces_partition_start(to_key(2))
-        .produces_row(clustering_key::from_exploded(*UNCOMPRESSED_SIMPLE_SCHEMA, {
+        .produces_row(clustering_key::from_exploded(*UNCOMPRESSED_COMPOUND_CK_SCHEMA, {
                           int32_type->decompose(102),
                           to_bytes(utf8_type->from_string("This is a string for 2")),
                           to_bytes(uuid_type->from_string("c25ae960-07a2-467d-8f35-5bd38647b367")),
@@ -2822,7 +2822,7 @@ SEASTAR_TEST_CASE(test_uncompressed_compound_ck_read) {
                       {{int_cdef, int32_type->decompose(1002)}})
         .produces_partition_end()
         .produces_partition_start(to_key(4))
-        .produces_row(clustering_key::from_exploded(*UNCOMPRESSED_SIMPLE_SCHEMA, {
+        .produces_row(clustering_key::from_exploded(*UNCOMPRESSED_COMPOUND_CK_SCHEMA, {
                           int32_type->decompose(104),
                           to_bytes(utf8_type->from_string("This is a string for 4")),
                           to_bytes(uuid_type->from_string("4549e2c2-786e-4b30-90aa-5dd37ae1db8f")),
@@ -2831,7 +2831,7 @@ SEASTAR_TEST_CASE(test_uncompressed_compound_ck_read) {
                       {{int_cdef, int32_type->decompose(1004)}})
         .produces_partition_end()
         .produces_partition_start(to_key(3))
-        .produces_row(clustering_key::from_exploded(*UNCOMPRESSED_SIMPLE_SCHEMA, {
+        .produces_row(clustering_key::from_exploded(*UNCOMPRESSED_COMPOUND_CK_SCHEMA, {
                           int32_type->decompose(103),
                           to_bytes(utf8_type->from_string("This is a string for 3")),
                           to_bytes(uuid_type->from_string("f7e8ebc0-dbae-4c06-bae0-656c23f6af6a")),
