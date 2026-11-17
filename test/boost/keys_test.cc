@@ -290,3 +290,48 @@ BOOST_AUTO_TEST_CASE(test_primary_key_layouts_match_compound_type) {
         BOOST_REQUIRE(unreversed->serialize_value(k) == legacy.serialize_value(k));
     }
 }
+
+BOOST_AUTO_TEST_CASE(test_int32_pk_layout_orders_like_compound_type) {
+    std::vector<std::vector<bytes>> keys{
+        {},
+        {bytes()},
+        {int32_type->decompose(std::numeric_limits<int32_t>::min())},
+        {int32_type->decompose(int32_t(-5))},
+        {int32_type->decompose(int32_t(0))},
+        {int32_type->decompose(int32_t(7))},
+        {int32_type->decompose(int32_t(256))},
+        {int32_type->decompose(std::numeric_limits<int32_t>::max())},
+    };
+
+    for (const auto& type : std::vector<data_type>{int32_type, reversed_type_impl::get_instance(int32_type)}) {
+        std::vector<data_type> types{type};
+        int32_pk_layout layout(types);
+        compound_type<allow_prefixes::yes> compound(types);
+
+        for (const auto& k1 : keys) {
+            auto b1 = layout.serialize_value(k1);
+            BOOST_REQUIRE_EQUAL(b1.size(), size_t(k1.empty() ? 0 : k1[0].empty() ? 1 : 4));
+            BOOST_REQUIRE(layout.deserialize_value(b1) == k1);
+            BOOST_REQUIRE_EQUAL(layout.size(b1), k1.size());
+            BOOST_REQUIRE_EQUAL(layout.is_full(b1), k1.size() == 1);
+            layout.validate(b1);
+            auto c1 = compound.serialize_value(k1);
+            for (const auto& k2 : keys) {
+                auto b2 = layout.serialize_value(k2);
+                auto c2 = compound.serialize_value(k2);
+                BOOST_REQUIRE(layout.compare(b1, b2) == compound.compare(c1, c2));
+                BOOST_REQUIRE(layout.prefix_equal_compare(b1, b2) == prefix_equality_tri_compare(types.begin(),
+                    compound.begin(c1), compound.end(c1), compound.begin(c2), compound.end(c2), ::tri_compare));
+                BOOST_REQUIRE_EQUAL(layout.equal(b1, b2), compound.equal(c1, c2));
+                if (layout.equal(b1, b2)) {
+                    BOOST_REQUIRE_EQUAL(layout.hash(b1), layout.hash(b2));
+                }
+            }
+        }
+
+        // A key in the legacy layout is an internal error.
+        auto legacy_key = compound.serialize_value(keys[3]);
+        BOOST_REQUIRE_THROW(layout.size(legacy_key), std::runtime_error);
+        BOOST_REQUIRE_THROW(layout.compare(legacy_key, legacy_key), std::runtime_error);
+    }
+}

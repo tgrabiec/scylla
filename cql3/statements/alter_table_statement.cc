@@ -121,6 +121,13 @@ static data_type validate_alter(const schema& schema, const column_definition& d
                            def.type->as_cql3_type(),
                            validator));
         }
+        // Keys in memory are in the layout of the current types, which a
+        // different type may not share.
+        if (!schema.clustering_key_layout()->is_legacy() && type != def.type) {
+            throw exceptions::invalid_request_exception(
+                    format("Cannot change the type of clustering column {}: the table uses a non-legacy clustering key layout",
+                           def.name_as_text()));
+        }
         break;
 
     case column_kind::regular_column:

@@ -232,7 +232,33 @@ public:
     managed_bytes serialize(std::span<const managed_bytes_view> components) const override;
 };
 
+// The layout of a single int32 column (or its reversed_type):
+//
+//   no components:      no bytes
+//   empty int32 value:  0x00
+//   int32 value:        the 4-byte big-endian value, with no length
+//
+// Keys compare as native int32. Any other size is a key in another layout,
+// which is an internal error.
+class int32_pk_layout final : public primary_key_layout {
+    bool _reversed;
+public:
+    explicit int32_pk_layout(std::vector<data_type> types);
+
+    void decompose(managed_bytes_view key, primary_key_components& out) const override;
+    size_t size(managed_bytes_view key) const override;
+    std::strong_ordering compare(managed_bytes_view k1, managed_bytes_view k2) const override;
+    std::strong_ordering prefix_equal_compare(managed_bytes_view k1, managed_bytes_view k2) const override;
+    bool equal(managed_bytes_view k1, managed_bytes_view k2) const override;
+    size_t hash(managed_bytes_view key) const override;
+    managed_bytes serialize(std::span<const managed_bytes_view> components) const override;
+};
+
 using primary_key_layout_ptr = seastar::shared_ptr<const primary_key_layout>;
+
+// Whether make_primary_key_layout() picks int32_pk_layout for single int32
+// clustering keys. Set by the SCYLLA_INT32_PK_LAYOUT=1 environment variable.
+bool int32_pk_layout_enabled();
 
 // Returns the layout for clustering keys with components of the given types.
 // Depends only on the types, and yields the same layout for a type and its
