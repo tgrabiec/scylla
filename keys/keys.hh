@@ -880,6 +880,38 @@ public:
         return from_legacy(s, legacy.representation());
     }
 
+    // The IDL serializes clustering_key_prefix without a schema, by decoding
+    // it as the legacy format. to_idl() returns this key in the legacy format,
+    // for writing through the IDL: *this when the layout is legacy, otherwise
+    // a copy put into holder. from_idl() converts a key read through the IDL.
+    const clustering_key_prefix& to_idl(const schema& s, std::optional<clustering_key_prefix>& holder) const {
+        if (get_compound_type(s)->is_legacy()) {
+            return *this;
+        }
+        return holder.emplace(clustering_key_prefix(managed_bytes(to_legacy(s).representation())));
+    }
+
+    // Components of a key read through the IDL.
+    std::vector<bytes> explode_idl() const {
+        std::vector<bytes> result;
+        for (managed_bytes_view c : legacy_clustering_key_prefix::c_type::components(_bytes)) {
+            result.emplace_back(to_bytes(c));
+        }
+        return result;
+    }
+
+    static clustering_key_prefix from_idl(const schema& s, clustering_key_prefix idl) {
+        if (get_compound_type(s)->is_legacy()) {
+            return idl;
+        }
+        return from_legacy(s, idl._bytes);
+    }
+
+    template<typename RangeOfSerializedComponents>
+    static clustering_key_prefix from_range(const schema& s, RangeOfSerializedComponents&& v) {
+        return clustering_key_prefix(get_compound_type(s)->serialize_value(std::forward<RangeOfSerializedComponents>(v)));
+    }
+
     static clustering_key_prefix from_clustering_prefix(const schema& s, const exploded_clustering_prefix& prefix) {
         return from_exploded(s, prefix.components());
     }

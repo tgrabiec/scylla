@@ -68,7 +68,7 @@ managed_bytes primary_key_layout::serialize_value_deep(const std::vector<data_va
 }
 
 legacy_primary_key_layout::legacy_primary_key_layout(std::vector<data_type> types)
-    : primary_key_layout(types)
+    : primary_key_layout(types, true)
     , _compound(std::move(types))
 { }
 

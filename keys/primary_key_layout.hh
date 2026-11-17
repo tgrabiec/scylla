@@ -54,9 +54,21 @@ public:
     using value_type = std::vector<bytes>;
 protected:
     std::vector<data_type> _types;
+private:
+    bool _legacy;
 public:
-    explicit primary_key_layout(std::vector<data_type> types) : _types(std::move(types)) {}
+    // legacy: whether keys are in the legacy compound format.
+    explicit primary_key_layout(std::vector<data_type> types, bool legacy = false)
+        : _types(std::move(types))
+        , _legacy(legacy)
+    { }
     virtual ~primary_key_layout() = default;
+
+    // Whether keys are in the legacy compound format, which the IDL and
+    // sstable large data records use.
+    bool is_legacy() const {
+        return _legacy;
+    }
 
     const std::vector<data_type>& types() const {
         return _types;
