@@ -202,6 +202,37 @@ operation. configure.py builds with `-mllvm -enable-value-profiling=false`,
 which also disables PGO's indirect call promotion, so PGO cannot turn the hot
 virtual call into a direct one.
 
+## int32_pk_layout
+
+A single int32 clustering column (or its reversed type) is stored as the
+4-byte value with no length; an empty value is one 0x00 byte, the empty
+prefix no bytes. Comparison is a native int32 compare. Any other key size is
+an internal error, which catches leftover legacy-format conversions.
+Enabled by `SCYLLA_INT32_PK_LAYOUT=1`; ALTER of the column type is refused
+while enabled.
+
+Validation (dev, 18 suites incl. row_cache, memtable, database,
+cache_mutation_reader, mvcc, cql_query, sstable_3_x): all pass with both
+layouts, except `bti_key_translation_test` with int32 (two cases feed
+legacy-format bytes as int keys).
+
+Benchmark: one PGO+LTO binary, profile trained on 1 GB-partition reads under
+both layouts, flag on vs off. hal (i7-5960X), `--smp 1`, median of 3
+alternating rounds:
+
+| workload | legacy tps | int32 tps | tps | insns/op |
+|---|---|---|---|---|
+| read, 1 GB partition (6M rows) | 110846 | 134177 | +21.0% | -16.6% |
+| read, 1000 rows/partition | 129007 | 145320 | +12.6% | -9.0% |
+| read, 10 rows/partition | 146577 | 154328 | +5.3% | -4.4% |
+| write, 1000 rows/partition | 103042 | 111139 | +7.9% | -6.2% |
+| write, 10 rows/partition | 116186 | 122744 | +5.6% | -1.3% |
+| read, no clustering key (control) | 172686 | 172858 | +0.1% | 0.0% |
+
+All three int32 runs beat all three legacy runs in every clustering-key
+row. The gain grows with comparisons per lookup (~23 in the 1 GB
+partition). Same binary, so no code layout noise.
+
 ## IDL (todo)
 
 The generated `serializer<clustering_key_prefix>` calls `explode()` and the
