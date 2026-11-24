@@ -10,8 +10,10 @@
 
 #pragma once
 
+#include <algorithm>
 #include <bit>
 #include <cstdint>
+#include <cstring>
 #include <array>
 
 #include "bytes_fwd.hh"
@@ -241,6 +243,57 @@ void hash3_x64_128(InputIterator in, uint32_t length, uint64_t seed, std::array<
 }
 
 void hash3_x64_128(bytes_view key, uint64_t seed, std::array<uint64_t, 2>& result);
+
+// Computes hash3_x64_128() of the concatenation of all inputs fed to it.
+class hash3_x64_128_hasher {
+    uint64_t _h1;
+    uint64_t _h2;
+    uint32_t _length = 0;
+    uint32_t _buffered = 0;
+    int8_t _buf[16];
+public:
+    explicit hash3_x64_128_hasher(uint64_t seed) noexcept : _h1(seed), _h2(seed) {}
+
+    void update(bytes_view v) noexcept {
+        auto p = v.data();
+        size_t n = v.size();
+        _length += n;
+        if (_buffered) {
+            size_t take = std::min<size_t>(n, sizeof(_buf) - _buffered);
+            std::memcpy(_buf + _buffered, p, take);
+            _buffered += take;
+            p += take;
+            n -= take;
+            if (_buffered < sizeof(_buf)) {
+                return;
+            }
+            hash3_x64_128_block(_h1, _h2, _buf);
+            _buffered = 0;
+        }
+        while (n >= sizeof(_buf)) {
+            hash3_x64_128_block(_h1, _h2, p);
+            p += sizeof(_buf);
+            n -= sizeof(_buf);
+        }
+        std::memcpy(_buf, p, n);
+        _buffered = n;
+    }
+
+    void update(int8_t b) noexcept {
+        ++_length;
+        _buf[_buffered++] = b;
+        if (_buffered == sizeof(_buf)) {
+            hash3_x64_128_block(_h1, _h2, _buf);
+            _buffered = 0;
+        }
+    }
+
+    std::array<uint64_t, 2> finalize() const noexcept {
+        std::array<uint64_t, 2> result;
+        hash3_x64_128_finish(_h1, _h2, _buf, _length, result);
+        return result;
+    }
+};
 
 } // namespace murmur_hash
 
