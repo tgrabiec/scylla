@@ -26,6 +26,8 @@
 #include "utils/to_string.hh"
 #include "utils/murmur_hash.hh"
 #include "utils/allocation_strategy.hh"
+#include "sstables/key.hh"
+#include "keys/compound_compat.hh"
 
 #include "test/lib/simple_schema.hh"
 #include "test/lib/log.hh"
@@ -208,6 +210,54 @@ SEASTAR_THREAD_TEST_CASE(test_token_matches_legacy_form) {
                     BOOST_REQUIRE_EQUAL(partitioner.get_token(*s, fragmented), token_of_legacy_form(*s, fragmented));
                 });
             }
+        }
+    }
+    BOOST_REQUIRE(saw_fragmented);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_sstable_key_tri_compare_matches_legacy_form) {
+    fragmenting_allocation_strategy fragmenting_allocator(63);
+    bool saw_fragmented = false;
+    // Mostly short components over two byte values, so that keys often share
+    // prefixes; sometimes long enough to fragment.
+    auto random_component = [] {
+        auto n = tests::random::get_int<size_t>(0, 9) == 0
+                ? tests::random::get_int<size_t>(40, 80)
+                : tests::random::get_int<size_t>(0, 3);
+        bytes b(bytes::initialized_later(), n);
+        for (auto& x : b) {
+            x = tests::random::get_bool() ? int8_t(0xff) : int8_t(0);
+        }
+        return b;
+    };
+    for (size_t ncomponents : {1, 2, 3, 4}) {
+        schema_builder builder(this_smp_shard_count(), "ks", fmt::format("cf{}", ncomponents));
+        for (size_t i = 0; i < ncomponents; ++i) {
+            builder.with_column(to_bytes(fmt::format("pk{}", i)), bytes_type, column_kind::partition_key);
+        }
+        builder.with_column("v", int32_type);
+        auto s = builder.build();
+        const auto& type = *s->partition_key_type();
+
+        for (int i = 0; i < 2000; ++i) {
+            std::vector<bytes> a_components;
+            std::vector<bytes> b_components;
+            for (size_t c = 0; c < ncomponents; ++c) {
+                a_components.push_back(random_component());
+                b_components.push_back(tests::random::get_bool() ? a_components.back() : random_component());
+            }
+            auto a = partition_key::from_exploded(*s, a_components);
+            auto b = partition_key::from_exploded(*s, b_components);
+            auto a_legacy = to_legacy(type, a.representation());
+            auto expected = compare_unsigned(a_legacy, to_legacy(type, b.representation()));
+            BOOST_REQUIRE(sstables::key_view(bytes_view(a_legacy)).tri_compare(*s, b) == expected);
+
+            with_allocator(fragmenting_allocator, [&] {
+                auto fragmented = partition_key::from_exploded(*s, b_components);
+                managed_bytes_view repr(fragmented.representation());
+                saw_fragmented |= repr.current_fragment().size() != repr.size_bytes();
+                BOOST_REQUIRE(sstables::key_view(bytes_view(a_legacy)).tri_compare(*s, fragmented) == expected);
+            });
         }
     }
     BOOST_REQUIRE(saw_fragmented);
