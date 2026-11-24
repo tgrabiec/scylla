@@ -9,6 +9,7 @@
 #include "murmur3_partitioner.hh"
 #include "utils/murmur_hash.hh"
 #include "sstables/key.hh"
+#include "keys/compound_compat.hh"
 
 namespace dht {
 
@@ -43,9 +44,7 @@ murmur3_partitioner::get_token(const sstables::key_view& key) const {
 
 token
 murmur3_partitioner::get_token(const schema& s, partition_key_view key) const {
-    std::array<uint64_t, 2> hash;
-    auto&& legacy = key.legacy_form(s);
-    utils::murmur_hash::hash3_x64_128(legacy.begin(), legacy.size(), 0, hash);
+    auto hash = legacy_hash3_x64_128(*s.partition_key_type(), key.representation(), 0);
     return get_token(hash[0]);
 }
 

@@ -56,9 +56,7 @@ static uint16_t compute_shard(managed_bytes_view mb) {
 
 dht::token fixed_shard_partitioner::get_token(const schema& s, partition_key_view key) const {
     uint16_t shard_value = compute_shard(*key.begin());
-    std::array<uint64_t, 2> hash;
-    auto&& legacy = key.legacy_form(s);
-    utils::murmur_hash::hash3_x64_128(legacy.begin(), legacy.size(), 0, hash);
+    auto hash = legacy_hash3_x64_128(*s.partition_key_type(), key.representation(), 0);
     auto token = fixed_shard_partitioner::token_for_shard(shard_value, hash[0]);
     fslog.trace("get_token: shard={}, token={}", shard_value, token);
     return token;
