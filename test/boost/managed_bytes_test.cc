@@ -83,6 +83,22 @@ BOOST_AUTO_TEST_CASE(test_constructor_from_bytes) {
     });
 }
 
+BOOST_AUTO_TEST_CASE(test_constructor_from_bytes_inline_sizes) {
+    auto buf = tests::random::get_bytes(64);
+    for (size_t offset : {0, 1, 7, 13}) {
+        for (size_t size = 0; size <= 17; ++size) {
+            auto b = bytes_view(buf).substr(offset, size);
+            auto m = managed_bytes(b);
+            BOOST_CHECK_EQUAL(m.size(), size);
+            BOOST_CHECK_EQUAL(to_bytes(m), bytes(b));
+            auto copy = m;
+            BOOST_CHECK_EQUAL(to_bytes(copy), bytes(b));
+            auto moved = std::move(copy);
+            BOOST_CHECK_EQUAL(to_bytes(moved), bytes(b));
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(test_copy_constructor) {
     fragmenting_allocation_strategy alloc_1(alloc_size);
     fragmenting_allocation_strategy alloc_2(alloc_size + 1);
