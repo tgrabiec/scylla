@@ -275,6 +275,70 @@ std::array<uint64_t, 2> legacy_hash3_x64_128(const CompoundType& type, const man
     return h.finalize();
 }
 
+// Compares @legacy, a legacy representation, with the legacy representation
+// of @packed, which is serialized using @type, in compare_unsigned() order.
+template <typename CompoundType>
+std::strong_ordering legacy_form_tri_compare(const CompoundType& type, bytes_view legacy, const managed_bytes_view& packed) {
+    static_assert(!CompoundType::is_prefixable, "Legacy view not defined for prefixes");
+    // Compares the next bytes of @legacy with @piece and consumes them.
+    // Returns equal when they match.
+    auto consume = [&legacy] (bytes_view piece) {
+        auto n = std::min(legacy.size(), piece.size());
+        auto c = compare_unsigned(legacy.substr(0, n), piece.substr(0, n));
+        if (c != 0) {
+            return c;
+        }
+        if (n < piece.size()) {
+            return std::strong_ordering::less;
+        }
+        legacy.remove_prefix(n);
+        return std::strong_ordering::equal;
+    };
+    const int8_t eoc = 0;
+
+    if (packed.current_fragment().size() == packed.size_bytes()) [[likely]] {
+        bytes_view v = packed.current_fragment();
+        if (type.is_singular()) {
+            return compare_unsigned(legacy, detail::singular_compound_value<CompoundType>(v));
+        }
+        // A component's <len><value> is its legacy form without the EOC byte.
+        while (!v.empty()) {
+            if (auto c = consume(detail::split_compound_component<CompoundType>(v)); c != 0) {
+                return c;
+            }
+            if (auto c = consume(bytes_view(&eoc, 1)); c != 0) {
+                return c;
+            }
+        }
+        return legacy.empty() ? std::strong_ordering::equal : std::strong_ordering::greater;
+    }
+
+    if (type.is_singular()) {
+        for (bytes_view frag : fragment_range(*type.begin(packed))) {
+            if (auto c = consume(frag); c != 0) {
+                return c;
+            }
+        }
+        return legacy.empty() ? std::strong_ordering::equal : std::strong_ordering::greater;
+    }
+    for (managed_bytes_view component : type.components(packed)) {
+        auto size = component.size_bytes();
+        const int8_t len[2] = { int8_t(size >> 8), int8_t(size & 0xff) };
+        if (auto c = consume(bytes_view(len, 2)); c != 0) {
+            return c;
+        }
+        for (bytes_view frag : fragment_range(component)) {
+            if (auto c = consume(frag); c != 0) {
+                return c;
+            }
+        }
+        if (auto c = consume(bytes_view(&eoc, 1)); c != 0) {
+            return c;
+        }
+    }
+    return legacy.empty() ? std::strong_ordering::equal : std::strong_ordering::greater;
+}
+
 class composite_view;
 
 // Represents a value serialized according to Origin's CompositeType.
