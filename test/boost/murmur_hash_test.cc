@@ -13,6 +13,7 @@
 #include "utils/murmur_hash.hh"
 #include "bytes.hh"
 #include <seastar/core/format.hh>
+#include <random>
 
 static const bytes full_sequence("012345678901234567890123456789012345678901234567890123456789");
 
@@ -106,6 +107,39 @@ BOOST_AUTO_TEST_CASE(test_hash_output) {
             std::array<uint64_t,2> dst;
             utils::murmur_hash::hash3_x64_128(prefix.begin(), prefix.size(), seed, dst);
             assert_hashes_equal(prefix, dst, expected);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(test_hasher_matches_hash3_x64_128) {
+    std::mt19937_64 rng(seed);
+    for (size_t size = 0; size <= 100; ++size) {
+        // High-bit bytes exercise the sign extension of the tail.
+        bytes data(bytes::initialized_later(), size);
+        for (auto& b : data) {
+            b = int8_t(rng());
+        }
+        std::array<uint64_t, 2> expected;
+        utils::murmur_hash::hash3_x64_128(data, seed, expected);
+
+        for (int rep = 0; rep < 20; ++rep) {
+            utils::murmur_hash::hash3_x64_128_hasher h(seed);
+            bytes_view rest(data);
+            while (!rest.empty()) {
+                if (rng() % 4 == 0) {
+                    h.update(rest[0]);
+                    rest.remove_prefix(1);
+                } else {
+                    auto n = std::min<size_t>(rng() % 40, rest.size());
+                    h.update(rest.substr(0, n));
+                    rest.remove_prefix(n);
+                }
+            }
+            auto result = h.finalize();
+            if (result != expected) {
+                BOOST_FAIL(format("Hashes differ for {} (got {{0x{:x}, 0x{:x}}}, expected {{0x{:x}, 0x{:x}}})", to_hex(data),
+                    result[0], result[1], expected[0], expected[1]));
+            }
         }
     }
 }
