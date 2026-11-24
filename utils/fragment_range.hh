@@ -208,7 +208,7 @@ struct fragment_range {
 };
 
 template <FragmentedView View>
-inline bool is_single_fragment(const View& v) {
+inline bool is_single_fragment(View v) {
     return v.empty() || v.size_bytes() == v.current_fragment().size();
 }
 
@@ -377,14 +377,13 @@ T read_simple(View& v) {
 }
 
 template<typename T, FragmentedView View>
-T read_simple_exactly(const View& v) {
+T read_simple_exactly(View v) {
     if (v.current_fragment().size() == sizeof(T)) [[likely]] {
         auto p = v.current_fragment().data();
         return net::ntoh(read_unaligned<T>(p));
     } else if (v.size_bytes() == sizeof(T)) {
         T buf;
-        auto in = v;
-        read_fragmented(in, sizeof(T), reinterpret_cast<bytes::value_type*>(&buf));
+        read_fragmented(v, sizeof(T), reinterpret_cast<bytes::value_type*>(&buf));
         return net::ntoh(buf);
     } else {
         throw_with_backtrace<marshal_exception>(format("read_simple_exactly - size mismatch (expected {:d}, got {:d})", sizeof(T), v.size_bytes()));

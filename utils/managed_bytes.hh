@@ -263,7 +263,7 @@ public:
     explicit managed_bytes(const bytes& b) : managed_bytes(static_cast<bytes_view>(b)) {}
 
     template <FragmentedView View>
-    explicit managed_bytes(const View& v);
+    explicit managed_bytes(View v);
 
     managed_bytes(initialized_later, size_type size) {
         memory::on_alloc_point();
@@ -608,7 +608,7 @@ bytes_opt to_bytes_opt(const managed_bytes_opt&);
 managed_bytes_opt to_managed_bytes_opt(const bytes_opt&);
 
 template<FragmentedView View>
-inline managed_bytes::managed_bytes(const View& v) {
+inline managed_bytes::managed_bytes(View v) {
     auto size = v.size_bytes();
     if (size <= max_inline_size && v.current_fragment().size() == size) {
         set_inline(reinterpret_cast<const bytes_view::value_type*>(v.current_fragment().data()), size);
