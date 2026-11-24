@@ -25,6 +25,7 @@
 #include "utils/assert.hh"
 #include "utils/to_string.hh"
 #include "utils/murmur_hash.hh"
+#include "utils/allocation_strategy.hh"
 
 #include "test/lib/simple_schema.hh"
 #include "test/lib/log.hh"
@@ -158,6 +159,58 @@ SEASTAR_THREAD_TEST_CASE(test_single_component_key_token_matches_legacy_form) {
         utils::murmur_hash::hash3_x64_128(legacy.begin(), legacy.size(), 0, hash);
         BOOST_REQUIRE_EQUAL(partitioner.get_token(*s, key), token_from_long(hash[0]));
     }
+}
+
+namespace {
+
+struct fragmenting_allocation_strategy : standard_allocation_strategy {
+    explicit fragmenting_allocation_strategy(size_t n) {
+        _preferred_max_contiguous_allocation = n;
+    }
+};
+
+// Hashes the legacy form byte by byte, through legacy_compound_view.
+dht::token token_of_legacy_form(const schema& s, partition_key_view key) {
+    auto legacy = key.legacy_form(s);
+    std::array<uint64_t, 2> hash;
+    utils::murmur_hash::hash3_x64_128(legacy.begin(), legacy.size(), 0, hash);
+    return token_from_long(hash[0]);
+}
+
+}
+
+SEASTAR_THREAD_TEST_CASE(test_token_matches_legacy_form) {
+    dht::murmur3_partitioner partitioner;
+    fragmenting_allocation_strategy fragmenting_allocator(63);
+    bool saw_fragmented = false;
+    for (size_t ncomponents : {1, 2, 3, 4}) {
+        schema_builder builder(this_smp_shard_count(), "ks", fmt::format("cf{}", ncomponents));
+        for (size_t i = 0; i < ncomponents; ++i) {
+            builder.with_column(to_bytes(fmt::format("pk{}", i)), bytes_type, column_kind::partition_key);
+        }
+        builder.with_column("v", int32_type);
+        auto s = builder.build();
+
+        for (size_t size : {0, 1, 2, 7, 8, 13, 14, 15, 16, 17, 31, 32, 33, 100}) {
+            for (bool random_sizes : {false, true}) {
+                std::vector<bytes> components;
+                for (size_t i = 0; i < ncomponents; ++i) {
+                    auto n = random_sizes ? tests::random::get_int<size_t>(0, size) : size;
+                    components.push_back(tests::random::get_bytes(n));
+                }
+                auto key = partition_key::from_exploded(*s, components);
+                BOOST_REQUIRE_EQUAL(partitioner.get_token(*s, key), token_of_legacy_form(*s, key));
+
+                with_allocator(fragmenting_allocator, [&] {
+                    auto fragmented = partition_key::from_exploded(*s, components);
+                    managed_bytes_view repr(fragmented.representation());
+                    saw_fragmented |= repr.current_fragment().size() != repr.size_bytes();
+                    BOOST_REQUIRE_EQUAL(partitioner.get_token(*s, fragmented), token_of_legacy_form(*s, fragmented));
+                });
+            }
+        }
+    }
+    BOOST_REQUIRE(saw_fragmented);
 }
 
 SEASTAR_THREAD_TEST_CASE(test_token_wraparound_1) {

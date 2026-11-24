@@ -16,6 +16,7 @@
 #include "schema/schema.hh"
 #include "sstables/version.hh"
 #include "utils/log.hh"
+#include "utils/murmur_hash.hh"
 
 //FIXME: de-inline methods and define this as static in a .cc file.
 extern logging::logger compound_logger;
@@ -194,6 +195,30 @@ bytes to_legacy(CompoundType& type, managed_bytes_view packed) {
     bytes legacy_form(bytes::initialized_later(), lv.size());
     std::copy(lv.begin(), lv.end(), legacy_form.begin());
     return legacy_form;
+}
+
+// Computes utils::murmur_hash::hash3_x64_128() of the legacy representation
+// of @packed, which is serialized using @type.
+template <typename CompoundType>
+std::array<uint64_t, 2> legacy_hash3_x64_128(const CompoundType& type, const managed_bytes_view& packed, uint64_t seed) {
+    static_assert(!CompoundType::is_prefixable, "Legacy view not defined for prefixes");
+    utils::murmur_hash::hash3_x64_128_hasher h(seed);
+    if (type.is_singular()) {
+        for (bytes_view frag : fragment_range(*type.begin(packed))) {
+            h.update(frag);
+        }
+        return h.finalize();
+    }
+    for (managed_bytes_view component : type.components(packed)) {
+        auto size = component.size_bytes();
+        h.update(int8_t(size >> 8));
+        h.update(int8_t(size & 0xff));
+        for (bytes_view frag : fragment_range(component)) {
+            h.update(frag);
+        }
+        h.update(int8_t(0)); // EOC
+    }
+    return h.finalize();
 }
 
 class composite_view;
