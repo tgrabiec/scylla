@@ -45,13 +45,6 @@ murmur3_partitioner::get_token(const sstables::key_view& key) const {
 
 token
 murmur3_partitioner::get_token(const schema& s, const partition_key_view& key) const {
-    if (s.partition_key_size() == 1) {
-        // The legacy form of a single-component key is the component itself.
-        managed_bytes_view component = *key.begin();
-        if (component.current_fragment().size() == component.size_bytes()) [[likely]] {
-            return get_token(component.current_fragment());
-        }
-    }
     auto hash = legacy_hash3_x64_128(*s.partition_key_type(), key.representation(), 0);
     return get_token(hash[0]);
 }
