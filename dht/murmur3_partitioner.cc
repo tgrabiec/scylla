@@ -43,7 +43,7 @@ murmur3_partitioner::get_token(const sstables::key_view& key) const {
 }
 
 token
-murmur3_partitioner::get_token(const schema& s, partition_key_view key) const {
+murmur3_partitioner::get_token(const schema& s, const partition_key_view& key) const {
     std::array<uint64_t, 2> hash;
     if (s.partition_key_size() == 1) {
         // The legacy form of a single-component key is the component itself.
