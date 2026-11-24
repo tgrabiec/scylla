@@ -12,6 +12,7 @@
 #include <compare>
 #include <cstdint>
 #include <seastar/core/on_internal_error.hh>
+#include <seastar/core/byteorder.hh>
 #include "compound.hh"
 #include "schema/schema.hh"
 #include "sstables/version.hh"
@@ -197,11 +198,64 @@ bytes to_legacy(CompoundType& type, managed_bytes_view packed) {
     return legacy_form;
 }
 
+namespace detail {
+
+// Splits off the next component's <len><value> from contiguous @packed,
+// which is serialized using @CompoundType.
+template <typename CompoundType>
+bytes_view split_compound_component(bytes_view& packed) {
+    using size_type = typename CompoundType::size_type;
+    if (packed.size() < sizeof(size_type)) {
+        throw_with_backtrace<marshal_exception>(format("compound_type iterator - not enough bytes, expected {:d}, got {:d}",
+                sizeof(size_type), packed.size()));
+    }
+    auto len = seastar::read_be<size_type>(reinterpret_cast<const char*>(packed.data()));
+    if (packed.size() - sizeof(size_type) < len) {
+        throw_with_backtrace<marshal_exception>(format("compound_type iterator - not enough bytes, expected {:d}, got {:d}",
+                len, packed.size() - sizeof(size_type)));
+    }
+    auto component = packed.substr(0, sizeof(size_type) + len);
+    packed.remove_prefix(component.size());
+    return component;
+}
+
+// Returns the value of the only component of contiguous @packed, which is
+// serialized using singular @CompoundType.
+template <typename CompoundType>
+bytes_view singular_compound_value(bytes_view packed) {
+    using size_type = typename CompoundType::size_type;
+    return packed.empty() ? bytes_view() : split_compound_component<CompoundType>(packed).substr(sizeof(size_type));
+}
+
+} // namespace detail
+
+// Computes utils::murmur_hash::hash3_x64_128() of the legacy representation
+// of contiguous @packed, which is serialized using @type.
+template <typename CompoundType>
+std::array<uint64_t, 2> legacy_hash3_x64_128(const CompoundType& type, bytes_view packed, uint64_t seed) {
+    static_assert(!CompoundType::is_prefixable, "Legacy view not defined for prefixes");
+    if (type.is_singular()) {
+        std::array<uint64_t, 2> result;
+        utils::murmur_hash::hash3_x64_128(detail::singular_compound_value<CompoundType>(packed), seed, result);
+        return result;
+    }
+    // A component's <len><value> is its legacy form without the EOC byte.
+    utils::murmur_hash::hash3_x64_128_hasher h(seed);
+    while (!packed.empty()) {
+        h.update(detail::split_compound_component<CompoundType>(packed));
+        h.update(int8_t(0)); // EOC
+    }
+    return h.finalize();
+}
+
 // Computes utils::murmur_hash::hash3_x64_128() of the legacy representation
 // of @packed, which is serialized using @type.
 template <typename CompoundType>
 std::array<uint64_t, 2> legacy_hash3_x64_128(const CompoundType& type, const managed_bytes_view& packed, uint64_t seed) {
     static_assert(!CompoundType::is_prefixable, "Legacy view not defined for prefixes");
+    if (packed.current_fragment().size() == packed.size_bytes()) [[likely]] {
+        return legacy_hash3_x64_128(type, packed.current_fragment(), seed);
+    }
     utils::murmur_hash::hash3_x64_128_hasher h(seed);
     if (type.is_singular()) {
         for (bytes_view frag : fragment_range(*type.begin(packed))) {
