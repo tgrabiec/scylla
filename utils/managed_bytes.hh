@@ -18,7 +18,9 @@
 #include <type_traits>
 #include <utility>
 #include <iterator>
+#include <bit>
 #include <cstddef>
+#include <cstring>
 
 class bytes_ostream;
 
@@ -181,7 +183,7 @@ class managed_bytes {
         single_chunk_blob_storage::ref_type single_chunk_ref; // Points to external storage and stores the data size.
         multi_chunk_blob_storage::ref_type multi_chunk_ref; // Points to external storage.
     } _u;
-    int8_t _inline_size = 0;
+    int8_t _inline_size;
 
 private:
     constexpr bool is_multi_chunk() const noexcept {
@@ -205,16 +207,61 @@ private:
         }
     }
 
+    // Writes the whole object with a single 16-byte store, so that the
+    // 16-byte load in the move constructor can be store-forwarded. The vector
+    // type keeps the compiler from splitting the store into two 8-byte ones.
+    void store_words(uint64_t lo, uint64_t hi) noexcept {
+        static_assert(std::endian::native == std::endian::little);
+        static_assert(sizeof(managed_bytes) == 16);
+        using u64x2 = uint64_t __attribute__((vector_size(16)));
+        const u64x2 words = {lo, hi};
+        std::memcpy(reinterpret_cast<char*>(this), &words, sizeof(words));
+    }
+
+    void set_external_ref(void* ptr, uint32_t size, int8_t inline_size) noexcept {
+        store_words(reinterpret_cast<uintptr_t>(ptr), uint64_t(size) | uint64_t(uint8_t(inline_size)) << 56);
+    }
+
+    // Stores an inline value of n <= max_inline_size bytes from p, assembled in
+    // registers.
+    void set_inline(const bytes_view::value_type* p, size_t n) noexcept {
+        auto load = [] <typename T> (const bytes_view::value_type* p) {
+            T v;
+            std::memcpy(&v, p, sizeof(v));
+            return uint64_t(v);
+        };
+        uint64_t lo = 0;
+        uint64_t hi = 0;
+        if (n > 8) {
+            lo = load.template operator()<uint64_t>(p);
+            hi = load.template operator()<uint64_t>(p + n - 8) >> (8 * (16 - n));
+        } else if (n >= 4) {
+            lo = load.template operator()<uint32_t>(p) | load.template operator()<uint32_t>(p + n - 4) << (8 * (n - 4));
+        } else if (n > 0) {
+            lo = uint64_t(uint8_t(p[0])) | uint64_t(uint8_t(p[n / 2])) << (8 * (n / 2)) | uint64_t(uint8_t(p[n - 1])) << (8 * (n - 1));
+        }
+        store_words(lo, hi | uint64_t(n) << 56);
+    }
+
+    // Constructs the value from v when it does not fit inline or is not contiguous.
+    template <FragmentedView View>
+    [[gnu::noinline]] void construct_fragmented(const View& v);
+
     explicit managed_bytes(multi_chunk_blob_storage* data) {
-        _inline_size = -2;
-        _u.multi_chunk_ref.ptr = data;
+        set_external_ref(data, 0, -2);
         data->backref = &_u.multi_chunk_ref;
     }
 public:
     using size_type = multi_chunk_blob_storage::size_type;
     struct initialized_later {};
 
-    constexpr managed_bytes() = default;
+    constexpr managed_bytes() noexcept {
+        if (std::is_constant_evaluated()) {
+            _inline_size = 0;
+        } else {
+            std::memset(reinterpret_cast<char*>(this), 0, sizeof(managed_bytes));
+        }
+    }
 
     managed_bytes(const multi_chunk_blob_storage::char_type* ptr, size_type size)
         : managed_bytes(bytes_view(ptr, size)) {}
@@ -232,15 +279,15 @@ public:
           auto& alctr = current_allocator();
           auto maxseg = max_seg(alctr);
           if (size < maxseg) {
-            _inline_size = -1;
             void* p = alctr.alloc<single_chunk_blob_storage>(sizeof(single_chunk_blob_storage) + size);
             new (p) single_chunk_blob_storage(&_u.single_chunk_ref, size);
+            set_external_ref(p, size, -1);
           } else {
-            _inline_size = -2;
             auto maxseg = max_seg(alctr);
             auto now = std::min(size_t(size), maxseg);
             void* p = alctr.alloc<multi_chunk_blob_storage>(sizeof(multi_chunk_blob_storage) + now);
             auto first = new (p) multi_chunk_blob_storage(&_u.multi_chunk_ref, size, now);
+            set_external_ref(first, 0, -2);
             auto last = first;
             size -= now;
             try {
@@ -567,9 +614,22 @@ bytes_opt to_bytes_opt(const managed_bytes_opt&);
 managed_bytes_opt to_managed_bytes_opt(const bytes_opt&);
 
 template<FragmentedView View>
-inline managed_bytes::managed_bytes(View v) : managed_bytes(initialized_later(), v.size_bytes()) {
+inline managed_bytes::managed_bytes(View v) {
+    auto size = v.size_bytes();
+    if (size <= max_inline_size && v.current_fragment().size() == size) [[likely]] {
+        set_inline(reinterpret_cast<const bytes_view::value_type*>(v.current_fragment().data()), size);
+    } else {
+        construct_fragmented(v);
+    }
+}
+
+template<FragmentedView View>
+void managed_bytes::construct_fragmented(const View& v) {
+    View in = v;
+    _inline_size = 0;
+    *this = managed_bytes(initialized_later(), in.size_bytes());
     managed_bytes_mutable_view self(*this);
-    write_fragmented(self, v);
+    write_fragmented(self, in);
 }
 
 inline
@@ -604,16 +664,17 @@ inline bool managed_bytes::operator==(const managed_bytes& o) const {
 
 inline managed_bytes::managed_bytes(const managed_bytes& o) {
     if (o.is_inline()) {
-        _inline_size = o._inline_size;
-        _u = o._u;
+        std::memcpy(reinterpret_cast<char*>(this), &o, sizeof(managed_bytes));
     } else if (o.is_single_chunk() && o.size() <= max_seg(current_allocator())) {
         memory::on_alloc_point();
         auto& alctr = current_allocator();
-        void* p = alctr.alloc<single_chunk_blob_storage>(sizeof(single_chunk_blob_storage) + o._u.single_chunk_ref.size);
-        new (p) single_chunk_blob_storage(&_u.single_chunk_ref, o._u.single_chunk_ref.size);
-        memcpy(_u.single_chunk_ref.ptr->data, o._u.single_chunk_ref.ptr->data, o._u.single_chunk_ref.size);
-        _inline_size = -1;
+        auto size = o._u.single_chunk_ref.size;
+        void* p = alctr.alloc<single_chunk_blob_storage>(sizeof(single_chunk_blob_storage) + size);
+        new (p) single_chunk_blob_storage(&_u.single_chunk_ref, size);
+        memcpy(_u.single_chunk_ref.ptr->data, o._u.single_chunk_ref.ptr->data, size);
+        set_external_ref(p, size, -1);
     } else {
+        _inline_size = 0;
         *this = managed_bytes(initialized_later(), o.size());
         managed_bytes_mutable_view self(*this);
         write_fragmented(self, managed_bytes_view(o));
