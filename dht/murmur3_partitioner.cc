@@ -9,6 +9,7 @@
 #include "murmur3_partitioner.hh"
 #include "utils/murmur_hash.hh"
 #include "sstables/key.hh"
+#include "schema/schema.hh"
 
 namespace dht {
 
@@ -44,6 +45,12 @@ murmur3_partitioner::get_token(const sstables::key_view& key) const {
 token
 murmur3_partitioner::get_token(const schema& s, partition_key_view key) const {
     std::array<uint64_t, 2> hash;
+    if (s.partition_key_size() == 1) {
+        // The legacy form of a single-component key is the component itself.
+        if (auto component = key.single_contiguous_component()) [[likely]] {
+            return get_token(*component);
+        }
+    }
     auto&& legacy = key.legacy_form(s);
     utils::murmur_hash::hash3_x64_128(legacy.begin(), legacy.size(), 0, hash);
     return get_token(hash[0]);
